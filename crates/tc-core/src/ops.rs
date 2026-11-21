@@ -207,6 +207,18 @@ pub fn mkdir(parent: &Path, name: &OsStr) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Create empty file `name` inside `parent`; never truncates an existing file.
+pub fn touch(parent: &Path, name: &OsStr) -> Result<PathBuf> {
+    let path = parent.join(single_name(name)?);
+    fs::File::create_new(&path).map_err(io_err(&path))?;
+    Ok(path)
+}
+
+/// Move to the system trash.
+pub fn trash(path: &Path) -> Result<()> {
+    ::trash::delete(path).map_err(|e| io_err(path)(io::Error::other(e.to_string())))
+}
+
 /// Refuse copies of a directory into itself.
 fn prepare(src: &Path, target: &Path) -> Result<()> {
     let src_meta = fs::symlink_metadata(src).map_err(io_err(src))?;
@@ -295,6 +307,17 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn touch_never_truncates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = touch(tmp.path(), OsStr::new("a")).unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"");
+        fs::write(&f, "keep").unwrap();
+        assert!(touch(tmp.path(), OsStr::new("a")).is_err());
+        assert_eq!(fs::read(&f).unwrap(), b"keep");
+        assert!(touch(tmp.path(), OsStr::new("a/b")).is_err());
+    }
 
     fn run(
         mv: bool,

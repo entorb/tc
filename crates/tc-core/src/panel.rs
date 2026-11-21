@@ -1,11 +1,12 @@
 //! One file panel: a directory listing with cursor and selection.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::archive::Archive;
 use crate::{Result, io_err};
@@ -22,6 +23,18 @@ pub struct Entry {
     pub is_symlink: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    /// Target of a symlink (read once with the entry).
+    pub link: Option<PathBuf>,
+}
+
+/// What the list is ordered by; directories always come first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortKey {
+    #[default]
+    Name,
+    Ext,
+    Size,
+    Date,
 }
 
 impl Entry {
@@ -36,6 +49,7 @@ impl Entry {
             is_symlink: false,
             size: 0,
             modified: None,
+            link: None,
         }
     }
 }
@@ -72,12 +86,20 @@ pub struct Panel {
     virt: bool,
     /// Open archive and the directory inside it (`""` = root); `path` is then the archive file joined with it.
     archive: Option<(Arc<Archive>, String)>,
+    /// Sort key and reverse flag; survives directory changes.
+    sort: (SortKey, bool),
+    /// Dot-names listed (default); only real directories are filtered.
+    show_hidden: bool,
+    /// Cached (count, bytes) of the selection among visible entries; `None` = stale.
+    sel_sum: Cell<Option<(usize, u64)>>,
+    /// Directory sizes calculated on request (by entry name); dropped when the list is re-read.
+    dir_sizes: HashMap<OsString, u64>,
 }
 
 impl Panel {
     pub fn open(path: &Path) -> Result<Self> {
         let path = std::path::absolute(path).map_err(io_err(path))?;
-        let entries = read_entries(&path)?;
+        let entries = read_entries(&path, (SortKey::Name, false), true)?;
         Ok(Self {
             history: vec![path.clone()],
             pos: 0,
@@ -89,7 +111,72 @@ impl Panel {
             all: None,
             virt: false,
             archive: None,
+            sort: (SortKey::Name, false),
+            show_hidden: true,
+            sel_sum: Cell::new(None),
+            dir_sizes: HashMap::new(),
         })
+    }
+
+    pub fn sort(&self) -> (SortKey, bool) {
+        self.sort
+    }
+
+    pub fn shows_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Same key reverses the order, another key sorts ascending. In memory, cursor stays on its entry.
+    /// Found lists keep their search order.
+    pub fn set_sort(&mut self, key: SortKey) {
+        if self.virt {
+            return;
+        }
+        self.sort = (key, self.sort.0 == key && !self.sort.1);
+        let keep = self.current().map(|e| e.name.clone());
+        let sort = self.sort;
+        for list in std::iter::once(&mut self.entries).chain(self.all.as_mut()) {
+            let start = usize::from(list.first().is_some_and(Entry::is_parent));
+            sort_entries(&mut list[start..], sort);
+        }
+        if let Some(name) = keep {
+            self.focus(&name);
+        }
+    }
+
+    /// Show or hide dot-names and re-read.
+    // shortcut: Windows hidden attribute is ignored, only names starting with '.' count
+    pub fn toggle_hidden(&mut self) -> Result<()> {
+        self.show_hidden = !self.show_hidden;
+        self.reload()
+    }
+
+    /// Remember the calculated size of directory `name` (counts in the selection sum).
+    pub fn set_dir_size(&mut self, name: OsString, bytes: u64) {
+        self.dir_sizes.insert(name, bytes);
+        self.sel_sum.set(None);
+    }
+
+    pub fn dir_size(&self, e: &Entry) -> Option<u64> {
+        self.dir_sizes.get(&e.name).copied()
+    }
+
+    /// (count, bytes) of the selected visible entries; a directory adds its calculated size, else nothing. Cached until the selection, sizes or list change.
+    pub fn selection_info(&self) -> (usize, u64) {
+        if let Some(sum) = self.sel_sum.get() {
+            return sum;
+        }
+        let sel = self.entries.iter().filter(|e| self.is_selected(e));
+        let sum = sel.fold((0, 0), |(n, b), e| {
+            let size = if e.is_dir {
+                self.dir_size(e).unwrap_or(0)
+            } else {
+                e.size
+            };
+            (n + 1, b + size)
+        });
+        self.sel_sum.set(Some(sum));
+        sum
     }
 
     pub fn archive(&self) -> Option<&Arc<Archive>> {
@@ -114,7 +201,7 @@ impl Panel {
     fn archive_entries(&self) -> Option<Vec<Entry>> {
         let (a, sub) = self.archive.as_ref()?;
         let mut e = a.list(sub);
-        sort_entries(&mut e);
+        sort_entries(&mut e, self.sort);
         e.insert(0, Entry::parent());
         Some(e)
     }
@@ -137,6 +224,7 @@ impl Panel {
         self.virt = false;
         self.cursor = 0;
         self.selected.clear();
+        self.sel_sum.set(None);
     }
 
     pub fn is_virtual(&self) -> bool {
@@ -149,6 +237,7 @@ impl Panel {
         self.all = None;
         self.filter.clear();
         self.selected.clear();
+        self.sel_sum.set(None);
         self.cursor = 0;
         self.virt = true;
     }
@@ -184,6 +273,7 @@ impl Panel {
 
     /// Re-read the directory, keeping cursor name and still existing selections.
     pub fn reload(&mut self) -> Result<()> {
+        self.dir_sizes.clear();
         let keep = self.current().map(|e| e.name.clone());
         self.entries = if let Some(e) = self.archive_entries() {
             e
@@ -194,7 +284,7 @@ impl Panel {
                 .filter_map(|e| entry_for(e.name.clone(), Path::new(&e.name)))
                 .collect()
         } else {
-            read_entries(&self.path)?
+            read_entries(&self.path, self.sort, self.show_hidden)?
         };
         self.all = None;
         if !self.filter.is_empty() {
@@ -203,6 +293,7 @@ impl Panel {
         }
         let names: HashSet<&OsStr> = self.entries.iter().map(|e| e.name.as_os_str()).collect();
         self.selected.retain(|n| names.contains(n.as_os_str()));
+        self.sel_sum.set(None);
         let old = self.cursor;
         self.cursor = 0;
         match keep {
@@ -282,6 +373,7 @@ impl Panel {
             .map(|e| e.name.clone())
             .collect();
         self.selected.extend(names);
+        self.sel_sum.set(None);
         self.cursor = b.min(last);
     }
 
@@ -309,6 +401,7 @@ impl Panel {
         if !self.filter.is_empty() {
             self.all = Some(all);
         }
+        self.sel_sum.set(None);
         self.cursor = 0;
         if let Some(name) = keep {
             self.focus(&name);
@@ -341,12 +434,14 @@ impl Panel {
             if !self.selected.remove(&name) {
                 self.selected.insert(name);
             }
+            self.sel_sum.set(None);
         }
         self.move_cursor(1);
     }
 
     /// Select (`on`) or deselect visible files matching `masks`; directories are left alone.
     pub fn select_mask(&mut self, masks: &str, on: bool) {
+        self.sel_sum.set(None);
         for e in self
             .entries
             .iter()
@@ -365,10 +460,13 @@ impl Panel {
         let (sa, sb) = compare(&self.entries, &other.entries);
         self.selected = sa;
         other.selected = sb;
+        self.sel_sum.set(None);
+        other.sel_sum.set(None);
     }
 
     /// Invert the selection of visible files; directories are left alone.
     pub fn invert_selection(&mut self) {
+        self.sel_sum.set(None);
         for e in self.entries.iter().filter(|e| !e.is_dir) {
             if !self.selected.remove(&e.name) {
                 self.selected.insert(e.name.clone());
@@ -376,22 +474,25 @@ impl Panel {
         }
     }
 
-    /// Paths an operation acts on: the selection, else the cursor entry.
-    pub fn targets(&self) -> Vec<PathBuf> {
-        let names: Vec<&OsString> = if self.selected.is_empty() {
+    /// Entries an operation acts on: the selection, else the cursor entry.
+    pub fn target_entries(&self) -> Vec<&Entry> {
+        if self.selected.is_empty() {
             self.current()
                 .filter(|e| !e.is_parent())
-                .map(|e| &e.name)
                 .into_iter()
                 .collect()
         } else {
             self.entries
                 .iter()
                 .filter(|e| self.is_selected(e))
-                .map(|e| &e.name)
                 .collect()
-        };
-        names.into_iter().map(|n| self.path.join(n)).collect()
+        }
+    }
+
+    /// Paths an operation acts on: the selection, else the cursor entry.
+    pub fn targets(&self) -> Vec<PathBuf> {
+        let list = self.target_entries();
+        list.into_iter().map(|e| self.path.join(&e.name)).collect()
     }
 
     /// Jump to `path` (e.g. a bookmark); a failure leaves the panel unchanged.
@@ -429,7 +530,9 @@ impl Panel {
 
     /// Read the new directory first so a failure leaves the panel unchanged.
     fn load(&mut self, path: PathBuf) -> Result<()> {
-        self.entries = read_entries(&path)?;
+        self.entries = read_entries(&path, self.sort, self.show_hidden)?;
+        self.dir_sizes.clear();
+        self.sel_sum.set(None);
         self.all = None;
         self.filter.clear();
         self.virt = false;
@@ -440,7 +543,7 @@ impl Panel {
         Ok(())
     }
 
-    fn focus(&mut self, name: &OsStr) -> bool {
+    pub fn focus(&mut self, name: &OsStr) -> bool {
         match self.entries.iter().position(|e| e.name == name) {
             Some(i) => {
                 self.cursor = i;
@@ -467,28 +570,54 @@ pub(crate) fn entry_for(name: OsString, path: &Path) -> Option<Entry> {
         is_symlink,
         size: meta.len(),
         modified: meta.modified().ok(),
+        link: if is_symlink {
+            fs::read_link(path).ok()
+        } else {
+            None
+        },
     })
 }
 
-/// Directories first, then by case-insensitive name.
-fn sort_entries(entries: &mut [Entry]) {
-    entries.sort_by_cached_key(|e| {
-        (
-            !e.is_dir,
-            e.name.to_string_lossy().to_lowercase(),
-            e.name.clone(),
-        )
-    });
+/// Lowercase text after the last dot; none for `.name` and names without a dot.
+fn ext(lower: &str) -> &str {
+    match lower.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext,
+        _ => "",
+    }
 }
 
-fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
+/// Directories first (also when reversed), then by `sort`, ties by case-insensitive name.
+fn sort_entries(entries: &mut [Entry], (key, reverse): (SortKey, bool)) {
+    entries.sort_by_cached_key(|e| {
+        let lower = e.name.to_string_lossy().to_lowercase();
+        let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let (primary, lower) = match key {
+            SortKey::Name => (0, lower),
+            SortKey::Ext => (0, format!("{}\0{lower}", ext(&lower))),
+            SortKey::Size if !e.is_dir => (e.size, lower),
+            SortKey::Size => (0, lower),
+            SortKey::Date => (e.modified.map_or(0, secs), lower),
+        };
+        (!e.is_dir, primary, lower, e.name.clone())
+    });
+    if reverse {
+        let dirs = entries.partition_point(|e| e.is_dir);
+        entries[..dirs].reverse();
+        entries[dirs..].reverse();
+    }
+}
+
+fn read_entries(dir: &Path, sort: (SortKey, bool), hidden: bool) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for item in fs::read_dir(dir).map_err(io_err(dir))? {
         let item = item.map_err(io_err(dir))?;
+        if !hidden && item.file_name().as_encoded_bytes().starts_with(b".") {
+            continue;
+        }
         // None: vanished between read_dir and stat
         entries.extend(entry_for(item.file_name(), &item.path()));
     }
-    sort_entries(&mut entries);
+    sort_entries(&mut entries, sort);
     if dir.parent().is_some() {
         entries.insert(0, Entry::parent());
     }
@@ -508,6 +637,7 @@ mod tests {
             is_symlink: false,
             size,
             modified: Some(t + std::time::Duration::from_secs(s)),
+            link: None,
         };
         let a = [
             e("same", false, 1, 5),
@@ -727,5 +857,71 @@ mod tests {
                 .iter()
                 .any(|e| e.name == "link" && e.is_symlink && !e.is_dir)
         );
+        let link = p.entries().iter().find(|e| e.name == "link").unwrap();
+        assert_eq!(link.link, Some("missing".into()));
+    }
+
+    #[test]
+    fn selection_sum_cached_and_invalidated() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a"), "123").unwrap();
+        fs::write(tmp.path().join("b"), "12345").unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        p.select_mask("*", true);
+        assert_eq!(p.selection_info(), (2, 8));
+        p.set_cursor(1);
+        p.toggle_select(); // deselect "a"
+        assert_eq!(p.selection_info(), (1, 5));
+        p.select_mask("*", true);
+        p.apply_filter("b");
+        assert_eq!(p.selection_info(), (1, 5));
+    }
+
+    #[test]
+    fn sort_keys_reverse_and_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("b.txt"), "12345").unwrap();
+        fs::write(tmp.path().join("a.rs"), "123456789").unwrap();
+        fs::create_dir(tmp.path().join("z")).unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        p.set_cursor(3); // b.txt
+        p.set_sort(SortKey::Size);
+        assert_eq!(names(&p), ["..", "z", "b.txt", "a.rs"]);
+        assert_eq!(p.current().unwrap().name, "b.txt");
+        p.set_sort(SortKey::Size);
+        assert_eq!(names(&p), ["..", "z", "a.rs", "b.txt"]);
+        p.set_sort(SortKey::Ext);
+        assert_eq!(names(&p), ["..", "z", "a.rs", "b.txt"]);
+        p.set_sort(SortKey::Ext); // reversed, dirs stay first
+        assert_eq!(names(&p), ["..", "z", "b.txt", "a.rs"]);
+        p.reload().unwrap(); // sort survives re-read
+        assert_eq!(names(&p), ["..", "z", "b.txt", "a.rs"]);
+    }
+
+    #[test]
+    fn hidden_toggle() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(".a"), "").unwrap();
+        fs::write(tmp.path().join("b"), "").unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        assert_eq!(names(&p), ["..", ".a", "b"]);
+        p.toggle_hidden().unwrap();
+        assert_eq!(names(&p), ["..", "b"]);
+    }
+
+    #[test]
+    fn selected_dir_adds_calculated_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("d")).unwrap();
+        fs::write(tmp.path().join("f"), "123").unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        p.select_mask("*", true);
+        p.set_cursor(1);
+        p.toggle_select(); // "d"
+        assert_eq!(p.selection_info(), (2, 3));
+        p.set_dir_size("d".into(), 10);
+        assert_eq!(p.selection_info(), (2, 13));
+        p.reload().unwrap(); // stale after a re-read
+        assert_eq!(p.selection_info(), (2, 3));
     }
 }

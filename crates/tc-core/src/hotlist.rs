@@ -18,6 +18,17 @@ pub fn default_path() -> Option<PathBuf> {
     base.map(|b| b.join("tc").join("hotlist"))
 }
 
+/// Mount points (drive roots on Windows), sorted, no duplicates.
+pub fn mounts() -> Vec<PathBuf> {
+    let Ok(disks) = sysinfo::Disks::new_with_refreshed_list() else {
+        return Vec::new();
+    };
+    let mut list: Vec<PathBuf> = disks.iter().map(|d| d.mount_point().to_owned()).collect();
+    list.sort();
+    list.dedup();
+    list
+}
+
 /// Missing file means empty list. Paths containing a newline cannot be stored.
 pub fn load(file: &Path) -> Result<Vec<PathBuf>> {
     let bytes = match fs::read(file) {
