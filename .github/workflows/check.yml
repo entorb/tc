@@ -1,0 +1,244 @@
+---
+name: Check Code
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Create a Release?
+        type: boolean
+        default: false
+      tag_name:
+        description: Tag name (e.g. v1.0.0), auto-incremented if not provided.
+        type: string
+        required: false
+      release_title:
+        description: Release title?
+        type: string
+        required: false
+      prerelease:
+        description: Prerelease?
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 5 * * 0'  # Sunday 05:00 UTC, audit alert
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      next_tag: ${{ steps.next-tag.outputs.next_tag }}
+    permissions:
+      contents: read
+    steps:
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # fetch all tags
+
+      - name: Determine next semver tag
+        id: next-tag
+        run: |
+          # highest plain vX.Y.Z tag; prerelease tags (v1.2.0-rc1) are ignored
+          LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          LATEST_TAG=${LATEST_TAG:-v0.0.0}
+          IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
+          NEXT_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          echo "next_tag=$NEXT_TAG" >> $GITHUB_OUTPUT
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Run prek pre-commit
+        uses: j178/prek-action@44924fe9ef4a6f88253c4b6b1bf11c689d3ce53d  # v3.1.0
+        with:
+          extra-args: --all-files --quiet
+
+      - name: Run CSpell
+        uses: streetsidesoftware/cspell-action@ce1816e4ce36532956ac6e983737392774b6e169  # v9.2.0
+        with:
+          files: '**/*'
+          incremental_files_only: false
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: 0  # CI never reuses incremental state
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1  # latest only
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal -c rustfmt -c clippy --no-self-update
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c  # v2.90.7
+        with:
+          tool: cargo-shear,cargo-deny
+
+      - name: Run rs format check
+        run: cargo fmt --all --check
+
+      - name: Run rs lint Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run rs unused deps Shear
+        run: sh scripts/chk_rs_dead.sh
+
+      - name: Run rs audit Deny
+        run: sh scripts/chk_rs_audit.sh
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: 0  # CI never reuses incremental state
+      CARGO_PROFILE_DEV_DEBUG: 0  # skips PDB generation, slow on Windows MSVC link
+    steps:
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1  # latest only
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+
+      - name: Run rs test
+        run: cargo test --workspace --all-features --locked
+
+      # Linux/Windows release binaries only for releases; macOS always, thin LTO outside releases
+      - name: Build release
+        if: inputs.release || runner.os == 'macOS'
+        run: cargo build --release --locked -p tc
+        env:
+          CARGO_PROFILE_RELEASE_LTO: ${{ inputs.release && 'true' || 'thin' }}
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.release && '1' || '16' }}
+
+      - name: Upload binary
+        if: inputs.release || runner.os == 'macOS'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: tc-cli-${{ runner.os }}
+          path: target/release/tc-cli${{ runner.os == 'Windows' && '.exe' || '' }}
+          retention-days: 7
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: 0  # CI never reuses incremental state
+      CARGO_PROFILE_DEV_DEBUG: 0
+      # 127.0.0.1, not localhost: vsftpd may not listen on ::1; empty path = server home
+      TC_TEST_SFTP: sftp://runner@127.0.0.1
+      TC_TEST_FTP: ftp://runner@127.0.0.1
+    steps:
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1  # latest only
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+
+      # SFTP: key auth via ~/.ssh/id_ed25519, GNU find covers server-side File Stats;
+      # FTP: password auth, no exec, covers the parallel listing fallback
+      - name: Start SFTP and FTP servers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server vsftpd
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_ed25519
+          cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          PASS=$(openssl rand -hex 16)
+          echo "::add-mask::$PASS"
+          echo "TC_TEST_PASS=$PASS" >> "$GITHUB_ENV"
+          echo "$USER:$PASS" | sudo chpasswd
+          echo write_enable=YES | sudo tee -a /etc/vsftpd.conf
+          sudo systemctl restart ssh vsftpd
+          ssh-keyscan -H 127.0.0.1 >> ~/.ssh/known_hosts  # system ssh for the ":" command line
+
+      - name: Run e2e tests
+        run: cargo test -p tc-remote --locked -- --ignored live_ --skip live_drop
+
+      # last: kills the servers' sessions
+      - name: Run e2e session drop test
+        run: cargo test -p tc-remote --locked -- --ignored live_drop
+
+  all-checks-passed:
+    if: always()
+    needs: [core, rust, build, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check job results
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]] || \
+             [[ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "One or more required jobs failed or were cancelled."
+            exit 1
+          fi
+          echo "All required jobs passed."
+
+
+  create-release:
+    if: inputs.release && github.ref == 'refs/heads/main'
+    needs: [core, all-checks-passed]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write  # create tag, release and upload assets
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: dist
+
+      - name: Create Release
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Invalid tag: $TAG"; exit 1; }
+          # artifact zips drop the exec bit
+          chmod +x dist/tc-cli-Linux/tc-cli dist/tc-cli-macOS/tc-cli
+          mv dist/tc-cli-Linux/tc-cli dist/tc-cli-linux
+          mv dist/tc-cli-macOS/tc-cli dist/tc-cli-macos
+          mv dist/tc-cli-Windows/tc-cli.exe dist/tc-cli.exe
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "${TAG#v}${TITLE:+ $TITLE}" \
+            --generate-notes ${PRERELEASE:+--prerelease} \
+            dist/tc-cli-linux dist/tc-cli-macos dist/tc-cli.exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag_name || needs.core.outputs.next_tag }}
+          TITLE: ${{ inputs.release_title }}
+          PRERELEASE: ${{ inputs.prerelease && '1' || '' }}

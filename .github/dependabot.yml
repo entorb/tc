@@ -1,0 +1,52 @@
+version: 2
+updates:
+
+  # ---- GitHub Actions: ALL updates grouped into one PR ----
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: chore(deps)
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions-dependencies:
+        patterns:
+          - '*'
+        update-types:
+          - major
+          - minor
+          - patch
+        applies-to: version-updates
+
+  # ---- Rust / Cargo ----
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(deps-dev)
+    versioning-strategy: auto
+    cooldown:
+      default-days: 7
+    groups:
+      cargo-dependencies:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      cargo-devtools:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
