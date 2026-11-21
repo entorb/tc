@@ -7,10 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 use regex::Regex;
 
-use crate::app::{App, Mode, Step};
+use crate::app::{App, FOOTER, Mode, Step};
 use tc_core::edit::Eol;
 
-const HELP: &str = "F3 View  F4 Edit  S-F4 Ext  F5 Copy  F6 Move  F7 Mkdir  F8 Delete  Ins Select  Tab Switch  F10 Quit";
 /// Length of "YY-MM-DD HH:MM".
 const DATE_WIDTH: usize = 14;
 
@@ -49,7 +48,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         for (i, area) in halves.into_iter().enumerate() {
             draw_panel(frame, app, i, area);
         }
-        frame.render_widget(Line::raw(HELP).reversed(), status);
+        app.footer = status;
+        let help = FOOTER.map(|(l, ..)| l).join("  ");
+        frame.render_widget(Line::raw(help).reversed(), status);
     }
 
     match &app.mode {
@@ -80,6 +81,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "Editor not found, enter editor command",
             &format!("{cmd}_\n\nEnter ok   Esc cancel"),
         ),
+        Mode::Hotlist(sel) => {
+            let rows = &app.hotlist;
+            let start = (sel + 1).saturating_sub(4);
+            let mut text: String = rows
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(4)
+                .map(|(i, p)| format!("{}{}\n", if i == *sel { "> " } else { "  " }, p.display()))
+                .collect();
+            if rows.is_empty() {
+                text.push_str("(empty, Ctrl+D adds the current directory)\n");
+            }
+            text.push_str("\nEnter go  Del remove  Esc close");
+            popup(frame, "Hotlist", &text);
+        }
         Mode::Message(msg) => popup(frame, "Error", &format!("{msg}\n\nany key")),
         Mode::Edit { error, .. } => {
             if let Some(msg) = error {

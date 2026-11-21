@@ -16,7 +16,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use regex::Regex;
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
-use tc_core::{Error, ops, panel::Panel, search, view::Viewer};
+use tc_core::{Error, hotlist, ops, panel::Panel, search, view::Viewer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -47,6 +47,8 @@ pub enum Mode {
     Filter(String),
     /// Command prompt for the external editor (shown when the default is missing).
     Editor(PathBuf, String),
+    /// Bookmark list with the selected row.
+    Hotlist(usize),
     Message(String),
     View {
         title: String,
@@ -151,12 +153,26 @@ impl Mode {
     }
 }
 
+/// Footer bar items: label, key sent when clicked.
+pub const FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
+    ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
+    ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
+    ("S-F4 Ext", KeyCode::F(4), KeyModifiers::SHIFT),
+    ("F5 Copy", KeyCode::F(5), KeyModifiers::NONE),
+    ("F6 Move", KeyCode::F(6), KeyModifiers::NONE),
+    ("F7 Mkdir", KeyCode::F(7), KeyModifiers::NONE),
+    ("F8 Delete", KeyCode::F(8), KeyModifiers::NONE),
+    ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
+];
+
 pub struct App {
     pub panels: [Panel; 2],
     /// Scroll state per panel, kept across frames so the list does not jump.
     pub lists: [ListState; 2],
     /// Screen area of each panel, set by the UI, used for mouse clicks.
     pub areas: [Rect; 2],
+    /// Screen area of the footer bar, set by the UI, used for mouse clicks.
+    pub footer: Rect,
     pub active: usize,
     pub mode: Mode,
     pub quit: bool,
@@ -171,6 +187,9 @@ pub struct App {
     /// Editor clipboard, kept across files.
     // shortcut: not the system clipboard, upgrade when pasting to other programs matters
     clipboard: String,
+    /// Bookmarked directories and the file they are saved to (none: not persisted).
+    pub hotlist: Vec<PathBuf>,
+    pub hotlist_file: Option<PathBuf>,
 }
 
 impl App {
@@ -179,6 +198,7 @@ impl App {
             panels: [left, right],
             lists: Default::default(),
             areas: Default::default(),
+            footer: Rect::default(),
             active: 0,
             mode: Mode::Normal,
             quit: false,
@@ -187,6 +207,8 @@ impl App {
             search: None,
             note: String::new(),
             clipboard: String::new(),
+            hotlist: Vec::new(),
+            hotlist_file: None,
         }
     }
 
@@ -224,6 +246,17 @@ impl App {
     /// Left click on a file row moves the cursor there (and activates the panel); with Shift it selects the range from the old cursor.
     fn click(&mut self, ev: MouseEvent) {
         if self.input.is_some() || !matches!(self.mode, Mode::Normal) {
+            return;
+        }
+        if self.footer.contains((ev.column, ev.row).into()) {
+            let mut x = self.footer.x;
+            for (label, code, mods) in FOOTER {
+                let end = x + label.len() as u16;
+                if (x..end).contains(&ev.column) {
+                    return self.on_key(KeyEvent::new(code, mods));
+                }
+                x = end + 2;
+            }
             return;
         }
         let Some(i) = (0..2).find(|&i| self.areas[i].contains((ev.column, ev.row).into())) else {
@@ -277,8 +310,19 @@ impl App {
                 KeyCode::Char('f') => {
                     self.mode = Mode::Filter(self.panels[self.active].filter().to_owned());
                 }
+                KeyCode::Char('d') => self.hotlist_add(),
+                KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
                 _ => {}
             },
+            Mode::Normal
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && matches!(key.code, KeyCode::Left | KeyCode::Right) =>
+            {
+                let delta = if key.code == KeyCode::Left { -1 } else { 1 };
+                if let Err(e) = self.panels[self.active].history_step(delta) {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
             Mode::Normal if key.code == KeyCode::Esc => self.panels[self.active].apply_filter(""),
             Mode::Normal => self.normal_key(key.code),
             Mode::Search(mut text) => {
@@ -363,6 +407,7 @@ impl App {
                 }
                 _ => self.mode = Mode::Mkdir(name),
             },
+            Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
             Mode::Message(_) => {}
             Mode::Work(job) => {
                 if key.code == KeyCode::Esc {
@@ -557,6 +602,48 @@ impl App {
                 };
             }
         }
+    }
+
+    fn hotlist_add(&mut self) {
+        let path = self.panels[self.active].path().to_owned();
+        if !self.hotlist.contains(&path) {
+            self.hotlist.push(path);
+            self.hotlist_save();
+        }
+    }
+
+    fn hotlist_save(&mut self) {
+        if let Some(file) = &self.hotlist_file
+            && let Err(e) = hotlist::save(file, &self.hotlist)
+        {
+            self.mode = Mode::Message(e.to_string());
+        }
+    }
+
+    fn hotlist_key(&mut self, code: KeyCode, sel: usize) {
+        let last = self.hotlist.len().saturating_sub(1);
+        let mut sel = sel.min(last);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => return,
+            KeyCode::Up => sel = sel.saturating_sub(1),
+            KeyCode::Down => sel = (sel + 1).min(last),
+            KeyCode::Enter if !self.hotlist.is_empty() => {
+                let path = self.hotlist[sel].clone();
+                if let Err(e) = self.panels[self.active].go(path) {
+                    self.mode = Mode::Message(e.to_string());
+                }
+                return;
+            }
+            KeyCode::Delete if !self.hotlist.is_empty() => {
+                self.hotlist.remove(sel);
+                self.hotlist_save();
+                if matches!(self.mode, Mode::Message(_)) {
+                    return;
+                }
+            }
+            _ => {}
+        }
+        self.mode = Mode::Hotlist(sel);
     }
 
     fn ask(&mut self, ask: Ask) {
@@ -952,6 +1039,37 @@ mod tests {
 
     fn key(app: &mut App, code: KeyCode) {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn hotlist_add_jump_delete_and_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = App::new(Panel::open(&sub).unwrap(), Panel::open(tmp.path()).unwrap());
+        let file = tmp.path().join("cfg").join("hotlist");
+        app.hotlist_file = Some(file.clone());
+        let ctrl =
+            |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'd');
+        ctrl(&mut app, 'd'); // no duplicate
+        assert_eq!(hotlist::load(&file).unwrap(), [app.panels[0].path()]);
+        key(&mut app, KeyCode::Tab);
+        ctrl(&mut app, 'b');
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.panels[1].path(), sub);
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(app.panels[1].path(), tmp.path());
+        // vanished dir: error popup, panel unchanged
+        std::fs::remove_dir(&sub).unwrap();
+        ctrl(&mut app, 'b');
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Message(_)));
+        assert_eq!(app.panels[1].path(), tmp.path());
+        key(&mut app, KeyCode::Esc);
+        ctrl(&mut app, 'b');
+        key(&mut app, KeyCode::Delete);
+        assert!(app.hotlist.is_empty() && hotlist::load(&file).unwrap().is_empty());
     }
 
     #[test]
