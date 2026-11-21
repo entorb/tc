@@ -913,10 +913,6 @@ impl App {
                         view.scroll_h(if key.code == KeyCode::Left { -8 } else { 8 });
                         Ok(())
                     }
-                    KeyCode::Char('e') => {
-                        view.next_encoding();
-                        Ok(())
-                    }
                     KeyCode::Char('w') => {
                         view.wrap = !view.wrap;
                         Ok(())
