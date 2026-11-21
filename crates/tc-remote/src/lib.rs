@@ -141,6 +141,8 @@ fn split(path: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
 
     #[test]
@@ -199,45 +201,253 @@ mod tests {
         assert_eq!(split("/x/y/a"), ("/x/y", "a"));
     }
 
-    /// Live servers: `TC_TEST_SFTP=sftp://user@host/tmp/dir` (key auth) or `TC_TEST_FTP=ftp://user@host/dir` with `TC_TEST_PASS`.
-    #[test]
-    #[ignore = "needs a server"]
-    fn live_roundtrip() {
-        use std::path::Path;
-        use tc_core::ops::{Decision, Progress};
-        use tc_core::vfs::{Side, transfer};
+    struct Live {
+        var: &'static str,
+        url: String,
+        r: Arc<dyn Remote>,
+        /// Fresh remote directory for this test.
+        base: PathBuf,
+    }
+
+    /// Live servers: `TC_TEST_SFTP=sftp://user@host` (key auth) and `TC_TEST_FTP=ftp://user@host`
+    /// with `TC_TEST_PASS`, both on the machine running the tests (some tests change the server's
+    /// files directly). A missing variable skips locally but fails in CI.
+    fn live(tag: &str) -> Vec<Live> {
+        let pass = std::env::var("TC_TEST_PASS").ok();
+        let mut out = Vec::new();
         for var in ["TC_TEST_SFTP", "TC_TEST_FTP"] {
             let Ok(url) = std::env::var(var) else {
+                assert!(std::env::var_os("CI").is_none(), "{var} not set in CI");
                 continue;
             };
-            let pass = std::env::var("TC_TEST_PASS").ok();
             let mut ask = |p: Prompt| match p {
                 Prompt::HostKey(_) => Some("y".into()),
                 Prompt::Password(_) => pass.clone(),
             };
-            let (r, dir) = connect(&url, &mut ask).unwrap();
+            let (r, home) = connect(&url, &mut ask).unwrap();
+            let base = PathBuf::from(home).join(format!("tc-live-{tag}-{var}"));
+            let path = tc_core::vfs::rpath(&base);
+            if r.stat(&path).unwrap().is_none() {
+                r.mkdir(&path).unwrap();
+            }
+            out.push(Live { var, url, r, base });
+        }
+        out
+    }
+
+    fn put(l: &Live, src: &Path, to: &Path, mv: bool) -> Result<()> {
+        use tc_core::ops::{Decision, Progress};
+        let ask = &mut |_: &Path, _: &Path| Decision::Overwrite;
+        let side = tc_core::vfs::Side::Remote(l.r.clone());
+        tc_core::vfs::transfer(
+            &tc_core::vfs::Side::Local,
+            src,
+            &side,
+            to,
+            mv,
+            ask,
+            &Progress::default(),
+        )
+    }
+
+    fn get(l: &Live, from: &Path, to: &Path, mv: bool) -> Result<()> {
+        use tc_core::ops::{Decision, Progress};
+        let ask = &mut |_: &Path, _: &Path| Decision::Overwrite;
+        let side = tc_core::vfs::Side::Remote(l.r.clone());
+        tc_core::vfs::transfer(
+            &side,
+            from,
+            &tc_core::vfs::Side::Local,
+            to,
+            mv,
+            ask,
+            &Progress::default(),
+        )
+    }
+
+    fn gone(l: &Live, p: &Path) -> bool {
+        l.r.stat(&tc_core::vfs::rpath(p)).unwrap().is_none()
+    }
+
+    #[test]
+    #[ignore = "needs a server"]
+    fn live_roundtrip() {
+        for l in live("roundtrip") {
             let tmp = tempfile::tempdir().unwrap();
             let src = tmp.path().join("tc-live");
             std::fs::create_dir(&src).unwrap();
             std::fs::write(src.join("a"), "hello").unwrap();
-            let side = Side::Remote(r.clone());
-            let remote = Path::new(&dir).join("tc-live");
-            let p = Progress::default();
-            let mut d = |_: &Path, _: &Path| Decision::Overwrite;
-            transfer(&Side::Local, &src, &side, &remote, false, &mut d, &p).unwrap();
-            let tree = tc_core::stats::scan_remote(r.as_ref(), &remote, &p);
+            let remote = l.base.join("tc-live");
+            put(&l, &src, &remote, false).unwrap();
+            let p = tc_core::ops::Progress::default();
+            let tree = tc_core::stats::scan_remote(l.r.as_ref(), &remote, &p);
             assert_eq!((tree.size, tree.files), (5, 1));
-            if var == "TC_TEST_SFTP" {
-                let out = ssh_command(&url, "cat a", &tc_core::vfs::rpath(&remote))
+            if l.var == "TC_TEST_SFTP" {
+                let out = ssh_command(&l.url, "cat a", &tc_core::vfs::rpath(&remote))
                     .unwrap()
                     .output()
                     .unwrap();
                 assert_eq!(String::from_utf8_lossy(&out.stdout), "hello", "{out:?}");
             }
             let back = tmp.path().join("back");
-            transfer(&side, &remote, &Side::Local, &back, true, &mut d, &p).unwrap();
+            get(&l, &remote, &back, true).unwrap();
             assert_eq!(std::fs::read_to_string(back.join("a")).unwrap(), "hello");
-            assert!(r.stat(&tc_core::vfs::rpath(&remote)).unwrap().is_none());
+            assert!(gone(&l, &remote));
+        }
+    }
+
+    /// Spaces, quotes, `$`, backticks, unicode and a leading dash survive upload, listing,
+    /// the server-side `find` scan (shell quoting) and download.
+    #[test]
+    #[ignore = "needs a server"]
+    fn live_names() {
+        const NAMES: [&str; 5] = ["sp ace", "q'uote", "ünï çødé 日本", "-dash", "$x;`y`"];
+        for l in live("names") {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("src");
+            std::fs::create_dir(&src).unwrap();
+            for n in NAMES {
+                std::fs::write(src.join(n), n).unwrap();
+            }
+            let remote = l.base.join("d'ir ü $x");
+            put(&l, &src, &remote, false).unwrap();
+            let mut got: Vec<_> =
+                l.r.list(&tc_core::vfs::rpath(&remote))
+                    .unwrap()
+                    .into_iter()
+                    .map(|e| e.name.to_string_lossy().into_owned())
+                    .collect();
+            got.sort();
+            let mut want = NAMES.map(String::from).to_vec();
+            want.sort();
+            assert_eq!(got, want, "{}", l.var);
+            let p = tc_core::ops::Progress::default();
+            let tree = tc_core::stats::scan_remote(l.r.as_ref(), &remote, &p);
+            let bytes = NAMES.iter().map(|n| n.len() as u64).sum::<u64>();
+            assert_eq!((tree.size, tree.files), (bytes, 5), "{}", l.var);
+            let back = tmp.path().join("back");
+            get(&l, &remote, &back, true).unwrap();
+            for n in NAMES {
+                assert_eq!(std::fs::read_to_string(back.join(n)).unwrap(), n);
+            }
+        }
+    }
+
+    /// A failing transfer leaves the source intact and no partial target.
+    #[test]
+    #[ignore = "needs a server"]
+    #[cfg(unix)]
+    fn live_failure_cleanup() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        for l in live("cleanup") {
+            let tmp = tempfile::tempdir().unwrap();
+            // a dangling link cannot be read: fails after (or before) `a` was copied
+            let src = tmp.path().join("src");
+            std::fs::create_dir(&src).unwrap();
+            std::fs::write(src.join("a"), "keep").unwrap();
+            symlink("nowhere", src.join("bad")).unwrap();
+            let t = l.base.join("t");
+            assert!(put(&l, &src, &t, true).is_err(), "{}", l.var);
+            assert!(gone(&l, &t), "{}: partial target left", l.var);
+            assert_eq!(std::fs::read_to_string(src.join("a")).unwrap(), "keep");
+            assert!(src.join("bad").symlink_metadata().is_ok());
+
+            // read-only target directory (the server runs as this user)
+            let ro = l.base.join("ro");
+            l.r.mkdir(&tc_core::vfs::rpath(&ro)).unwrap();
+            if !ro.is_dir() {
+                continue; // server on another machine
+            }
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let probe = ro.join(".probe");
+            if std::fs::File::create(&probe).is_ok() {
+                let _ = std::fs::remove_file(&probe); // root ignores modes
+            } else {
+                let f = tmp.path().join("f");
+                std::fs::write(&f, "keep").unwrap();
+                let res = put(&l, &f, &ro.join("f"), true);
+                assert!(res.is_err(), "{}", l.var);
+                assert!(gone(&l, &ro.join("f")), "{}", l.var);
+                assert_eq!(std::fs::read_to_string(&f).unwrap(), "keep");
+            }
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// Directory links (even a loop) are skipped, never followed; scan and download terminate.
+    #[test]
+    #[ignore = "needs a server"]
+    #[cfg(unix)]
+    fn live_symlinks() {
+        use std::os::unix::fs::symlink;
+        for l in live("links") {
+            let tree = l.base.join("tree");
+            let dir = tc_core::vfs::rpath(&tree);
+            l.r.mkdir(&dir).unwrap();
+            if !tree.is_dir() {
+                continue; // server on another machine
+            }
+            std::fs::create_dir(tree.join("real")).unwrap();
+            std::fs::write(tree.join("real/f"), "x").unwrap();
+            symlink(".", tree.join("loop")).unwrap();
+            symlink("real", tree.join("lnk")).unwrap();
+            let p = tc_core::ops::Progress::default();
+            let node = tc_core::stats::scan_remote(l.r.as_ref(), &tree, &p);
+            assert!(node.files >= 1, "{}", l.var);
+
+            let tmp = tempfile::tempdir().unwrap();
+            let back = tmp.path().join("back");
+            let res = get(&l, &tree, &back, false);
+            if l.var == "TC_TEST_FTP" {
+                // vsftpd lists a link to a directory as a plain file: RETR fails, the download rolls back
+                assert!(res.is_err() && !back.exists(), "{res:?}");
+            } else {
+                let err = res.unwrap_err().to_string();
+                assert!(err.contains("symlinked directories"), "{}: {err}", l.var);
+                assert_eq!(std::fs::read_to_string(back.join("real/f")).unwrap(), "x");
+                assert!(!back.join("loop").exists() && !back.join("lnk").exists());
+            }
+
+            // a dangling link cannot be read: the download fails and leaves nothing behind
+            symlink("nowhere", tree.join("dangling")).unwrap();
+            let back2 = tmp.path().join("back2");
+            assert!(get(&l, &tree, &back2, false).is_err(), "{}", l.var);
+            assert!(!back2.exists(), "{}: partial download left", l.var);
+        }
+    }
+
+    /// Kills the server side of an open session: the next call must fail, not hang.
+    /// Needs passwordless `sudo`; run it alone (it ends every session of the user).
+    #[test]
+    #[ignore = "needs a server and sudo, kills sessions"]
+    fn live_drop() {
+        for l in live("drop") {
+            let user = Url::parse(&l.url).unwrap().user;
+            let home = tc_core::vfs::rpath(&l.base);
+            l.r.list(&home).unwrap();
+            let pattern = if l.var == "TC_TEST_SFTP" {
+                // anchored: the pattern must not match this `sudo pkill` command line
+                vec!["-f".to_string(), format!("^sshd(-session)?: {user}")]
+            } else {
+                vec!["-x".to_string(), "vsftpd".to_string()]
+            };
+            let st = Command::new("sudo")
+                .args(["-n", "pkill"])
+                .args(&pattern)
+                .status()
+                .unwrap();
+            assert!(st.success(), "pkill {pattern:?}: {st}");
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let r = l.r.clone();
+            std::thread::spawn(move || tx.send(r.list(&home).is_err()));
+            let failed = rx.recv_timeout(std::time::Duration::from_secs(60));
+            assert_eq!(
+                failed,
+                Ok(true),
+                "{}: list after drop hung or succeeded",
+                l.var
+            );
         }
     }
 }
