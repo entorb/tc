@@ -81,6 +81,9 @@ pub enum Ask {
     Replace,
     /// Second step of replace, `Input::pattern` holds the first answer.
     With,
+    /// File panel: select (`+`) or deselect (`-`) files by mask.
+    Select,
+    Deselect,
 }
 
 impl Ask {
@@ -90,6 +93,8 @@ impl Ask {
             Ask::Goto => "Go to line (N% in viewer)",
             Ask::Replace => "Replace (regex)",
             Ask::With => "Replace with ($1 = group)",
+            Ask::Select => "Select files (mask, default *)",
+            Ask::Deselect => "Deselect files (mask, default *)",
         }
     }
 }
@@ -634,6 +639,10 @@ impl App {
         let compile = |p: &str| search::compile(p).map_err(|e| e.to_string());
         match input.ask {
             Ask::Goto => self.goto(&text)?,
+            Ask::Select | Ask::Deselect => {
+                let on = input.ask == Ask::Select;
+                self.panels[self.active].select_mask(&text, on);
+            }
             Ask::Find => {
                 // empty answer repeats the last search
                 if !text.is_empty() {
@@ -674,6 +683,9 @@ impl App {
             KeyCode::Home => panel.move_cursor(isize::MIN),
             KeyCode::End => panel.move_cursor(isize::MAX),
             KeyCode::Insert | KeyCode::Char(' ') => panel.toggle_select(),
+            KeyCode::Char('+') => self.ask(Ask::Select),
+            KeyCode::Char('-') => self.ask(Ask::Deselect),
+            KeyCode::Char('*') => panel.invert_selection(),
             KeyCode::Enter | KeyCode::Backspace => {
                 let result = if code == KeyCode::Enter {
                     panel.enter().map(drop)
