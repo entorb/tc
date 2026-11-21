@@ -6,10 +6,11 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, Step};
+use tc_core::edit::Eol;
 
 const HELP: &str =
-    "F3 View  F5 Copy  F6 Move  F7 Mkdir  F8 Delete  Ins Select  Tab Switch  F10 Quit";
+    "F3 View  F4 Edit  F5 Copy  F6 Move  F7 Mkdir  F8 Delete  Ins Select  Tab Switch  F10 Quit";
 /// Length of "YY-MM-DD HH:MM".
 const DATE_WIDTH: usize = 14;
 
@@ -26,14 +27,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let [main, status] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    let halves: [Rect; 2] = Layout::horizontal([Constraint::Fill(1); 2]).areas(main);
-    app.page = main.height.saturating_sub(2).max(1) as usize;
-    for (i, area) in halves.into_iter().enumerate() {
-        draw_panel(frame, app, i, area);
+    if let Some(editor) = app.mode.editor_mut() {
+        draw_editor(frame, editor, &mut app.page);
+    } else {
+        let [main, status] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+        let halves: [Rect; 2] = Layout::horizontal([Constraint::Fill(1); 2]).areas(main);
+        app.page = main.height.saturating_sub(2).max(1) as usize;
+        for (i, area) in halves.into_iter().enumerate() {
+            draw_panel(frame, app, i, area);
+        }
+        frame.render_widget(Line::raw(HELP).reversed(), status);
     }
-    frame.render_widget(Line::raw(HELP).reversed(), status);
 
     match &app.mode {
         Mode::Confirm(op, targets) => {
@@ -55,8 +60,70 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &format!("{name}_\n\nEnter ok   Esc cancel"),
         ),
         Mode::Message(msg) => popup(frame, "Error", &format!("{msg}\n\nany key")),
+        Mode::Edit { error, .. } => {
+            if let Some(msg) = error {
+                popup(frame, "Error", &format!("{msg}\n\nany key"));
+            }
+        }
+        Mode::Work(job) if job.visible() => popup(
+            frame,
+            job.label,
+            &format!("{}%\n\nEsc cancel", job.percent()),
+        ),
+        Mode::Work(_) => {}
+        Mode::AskViewer { text, .. } => popup(frame, "Edit", text),
+        Mode::AskSave { editor, step, .. } => {
+            let text = match step {
+                Step::Encoding => format!("File is {}. Convert to UTF-8?", editor.encoding_name()),
+                Step::Eol => "Convert line endings to LF?".to_owned(),
+            };
+            popup(
+                frame,
+                "Save",
+                &format!("{text}\n\n[y] yes   [n] no   Esc cancel"),
+            );
+        }
+        Mode::AskExit(_) => popup(
+            frame,
+            "Edit",
+            "Save changes?\n\n[y] yes   [n] no   Esc cancel",
+        ),
         Mode::Normal | Mode::View { .. } => {}
     }
+}
+
+fn draw_editor(frame: &mut Frame, editor: &mut tc_core::edit::Editor, page: &mut usize) {
+    let [main, status] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    let block = Block::bordered().title(editor.path().display().to_string());
+    let inner = block.inner(main);
+    let (height, width) = (inner.height as usize, inner.width as usize);
+    *page = height.max(1);
+    editor.scroll_to_cursor(height, width);
+    let lines: Vec<Line> = editor
+        .visible(height, width)
+        .into_iter()
+        .map(Line::from)
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), main);
+    let (line, col) = editor.cursor;
+    frame.set_cursor_position((
+        inner.x + (col - editor.left) as u16,
+        inner.y + (line - editor.top) as u16,
+    ));
+    let eol = match editor.eol() {
+        Eol::Lf => "LF",
+        Eol::Crlf => "CRLF",
+        Eol::Mixed => "mixed",
+    };
+    let dirty = if editor.dirty() { " *" } else { "" };
+    let info = format!(
+        "{}:{}  {}  {eol}{dirty}  F2 Save  Esc Exit",
+        line + 1,
+        col + 1,
+        editor.encoding_name()
+    );
+    frame.render_widget(Line::raw(info).reversed(), status);
 }
 
 fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
@@ -173,5 +240,35 @@ mod tests {
             fmt_date(&z, yesterday),
             z.strftime("%y-%m-%d %H:%M").to_string()
         );
+    }
+
+    #[test]
+    fn renders_editor_with_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("e.txt");
+        std::fs::write(&path, "hello\nworld").unwrap();
+        let editor = tc_core::edit::Editor::open(
+            &path,
+            &std::sync::atomic::AtomicU64::new(0),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        app.mode = Mode::Edit {
+            editor,
+            error: None,
+        };
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("world"));
+        assert!(screen.contains("1:1  UTF-8  LF"));
     }
 }
