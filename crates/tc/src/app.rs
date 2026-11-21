@@ -1,5 +1,6 @@
 //! App state and key handling, independent of the terminal.
 
+use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -181,6 +182,8 @@ pub struct Stats {
     /// Running scan; `root` is empty until it finishes.
     job: Option<thread::JoinHandle<Node>>,
     pub progress: Arc<ops::Progress>,
+    /// Delete question for the selected entry, shown while set.
+    pub confirm: Option<String>,
 }
 
 impl Stats {
@@ -415,6 +418,10 @@ pub const FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
 
 pub struct App {
     pub panels: [Panel; 2],
+    /// Background tabs per side, in cycle order after the visible one in `panels`.
+    pub tabs: [VecDeque<Panel>; 2],
+    /// Position of the visible tab per side, for the title.
+    pub tab: [usize; 2],
     /// Scroll state per panel, kept across frames so the list does not jump.
     pub lists: [ListState; 2],
     /// Screen area of each panel, set by the UI, used for mouse clicks.
@@ -467,6 +474,8 @@ impl App {
     pub fn new(left: Panel, right: Panel) -> Self {
         Self {
             panels: [left, right],
+            tabs: Default::default(),
+            tab: [0; 2],
             lists: Default::default(),
             areas: Default::default(),
             footer: Rect::default(),
@@ -668,17 +677,7 @@ impl App {
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
             Mode::Found(f) => self.found_key(key.code, f),
-            Mode::Stats(st)
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(10)) =>
-            {
-                st.progress.cancel.store(true, Ordering::Relaxed);
-            }
-            Mode::Stats(st) if st.scanning() => self.mode = Mode::Stats(st),
-            Mode::Stats(st) if matches!(key.code, KeyCode::F(3 | 4)) => self.stats_open(st, key),
-            Mode::Stats(mut st) => {
-                st.key(key.code, self.page);
-                self.mode = Mode::Stats(st);
-            }
+            Mode::Stats(st) => self.stats_mode_key(st, key),
             Mode::Message(_) => {}
             Mode::Xfer(mut x) => {
                 x.key(key);
@@ -830,6 +829,8 @@ impl App {
             }
             KeyCode::Char('u') => {
                 self.panels.swap(0, 1);
+                self.tabs.swap(0, 1);
+                self.tab.swap(0, 1);
                 self.lists.swap(0, 1);
                 if let Some(job) = &mut self.dir_job {
                     job.0 = 1 - job.0;
@@ -848,11 +849,66 @@ impl App {
                 }
             }
             KeyCode::Insert => self.copy_paths(),
+            KeyCode::Char('t' | 'w')
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Tab
+            | KeyCode::BackTab => self.tab_key(code),
             KeyCode::F(n @ 3..=6) => {
                 let key = [SortKey::Name, SortKey::Ext, SortKey::Date, SortKey::Size];
                 self.panels[self.active].set_sort(key[usize::from(n) - 3]);
             }
             _ => {}
+        }
+    }
+
+    /// Tabs per side: `panels[side]` is the visible tab, rotated through the ring in `tabs[side]`.
+    fn tab_key(&mut self, code: KeyCode) {
+        let side = self.active;
+        let bg = &mut self.tabs[side];
+        let n = bg.len() + 1;
+        let next = match code {
+            KeyCode::Char('t') => match Panel::open(self.panels[side].path()) {
+                Ok(p) => {
+                    bg.push_back(mem::replace(&mut self.panels[side], p));
+                    self.tab[side] += 1;
+                    self.lists[side] = ListState::default();
+                    return;
+                }
+                Err(e) => {
+                    self.mode = Mode::Message(e.to_string());
+                    return;
+                }
+            },
+            KeyCode::Char('w') => {
+                let Some(p) = bg.pop_front() else { return };
+                self.panels[side] = p;
+                self.tab[side] %= n - 1;
+                None
+            }
+            KeyCode::PageDown | KeyCode::Tab => bg.pop_front().map(|p| {
+                self.tab[side] = (self.tab[side] + 1) % n;
+                (p, false)
+            }),
+            _ => bg.pop_back().map(|p| {
+                self.tab[side] = (self.tab[side] + n - 1) % n;
+                (p, true)
+            }),
+        };
+        if let Some((p, prev)) = next {
+            let old = mem::replace(&mut self.panels[side], p);
+            if prev {
+                self.tabs[side].push_front(old);
+            } else {
+                self.tabs[side].push_back(old);
+            }
+        } else if code != KeyCode::Char('w') {
+            return;
+        }
+        self.lists[side] = ListState::default();
+        // the directory may have changed while the tab was hidden
+        if let Err(e) = self.panels[side].reload() {
+            self.mode = Mode::Message(e.to_string());
         }
     }
 
@@ -1141,6 +1197,7 @@ impl App {
             by_files: false,
             job: Some(thread::spawn(move || stats::scan(&d, &p))),
             progress,
+            confirm: None,
         });
     }
 
@@ -1959,6 +2016,33 @@ mod tests {
 
     fn with(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         app.on_key(KeyEvent::new(code, mods));
+    }
+
+    #[test]
+    fn tabs_open_cycle_close_and_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        let ctrl = KeyModifiers::CONTROL;
+        with(&mut app, KeyCode::Char('t'), ctrl);
+        assert_eq!((app.tabs[0].len(), app.tab[0]), (1, 1));
+        app.go(0, sub.clone());
+        with(&mut app, KeyCode::PageDown, ctrl);
+        assert_eq!((app.panels[0].path(), app.tab[0]), (dir.path(), 0));
+        with(&mut app, KeyCode::PageUp, ctrl);
+        assert_eq!((app.panels[0].path(), app.tab[0]), (sub.as_path(), 1));
+        with(&mut app, KeyCode::Char('u'), ctrl);
+        assert_eq!(
+            (app.tabs[1].len(), app.tab[1], app.tabs[0].len()),
+            (1, 1, 0)
+        );
+        key(&mut app, KeyCode::Tab);
+        with(&mut app, KeyCode::Char('w'), ctrl);
+        assert_eq!((app.panels[1].path(), app.tab[1]), (dir.path(), 0));
+        assert!(app.tabs[1].is_empty());
+        with(&mut app, KeyCode::Char('w'), ctrl); // last tab stays
+        assert_eq!(app.panels[1].path(), dir.path());
     }
 
     #[test]

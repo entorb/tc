@@ -558,6 +558,10 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
         })
         .collect();
     let mut title = panel.title();
+    let tabs = app.tabs[i].len() + 1;
+    if tabs > 1 {
+        title = format!("[{}/{tabs}] {title}", app.tab[i] + 1);
+    }
     if panel.is_virtual() {
         title += " [found]";
     }
@@ -675,6 +679,8 @@ Ctrl+\\  root directory
 Ctrl+R  refresh
 Alt+F1 / Alt+F2  drives for left / right panel
 Ctrl+U  swap panels
+Ctrl+T / Ctrl+W  new / close tab
+Ctrl+PgDn / Ctrl+PgUp  next / previous tab (also Ctrl+Tab / Ctrl+Shift+Tab)
 Alt+=  other panel to this directory
 Alt+.  show / hide hidden files
 Ctrl+F3/F4/F5/F6  sort name/ext/date/size (again: reverse)
