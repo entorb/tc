@@ -9,7 +9,10 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use regex::Regex;
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
@@ -35,7 +38,11 @@ impl Op {
 pub enum Mode {
     Normal,
     Confirm(Op, Vec<PathBuf>),
+    /// Copy/move: editable destination (a new name for a single item, or a directory).
+    Transfer(Op, Vec<PathBuf>, String),
     Mkdir(String),
+    /// Command prompt for the external editor (shown when the default is missing).
+    Editor(PathBuf, String),
     Message(String),
     View {
         title: String,
@@ -139,6 +146,8 @@ pub struct App {
     pub panels: [Panel; 2],
     /// Scroll state per panel, kept across frames so the list does not jump.
     pub lists: [ListState; 2],
+    /// Screen area of each panel, set by the UI, used for mouse clicks.
+    pub areas: [Rect; 2],
     pub active: usize,
     pub mode: Mode,
     pub quit: bool,
@@ -160,6 +169,7 @@ impl App {
         Self {
             panels: [left, right],
             lists: Default::default(),
+            areas: Default::default(),
             active: 0,
             mode: Mode::Normal,
             quit: false,
@@ -177,6 +187,9 @@ impl App {
 
     /// Wheel / touchpad scroll in viewer, editor and active file list (editor: moves the cursor, the window follows).
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        if ev.kind == MouseEventKind::Down(MouseButton::Left) {
+            return self.click(ev);
+        }
         let lines = match ev.kind {
             MouseEventKind::ScrollUp => -3,
             MouseEventKind::ScrollDown => 3,
@@ -199,17 +212,87 @@ impl App {
         }
     }
 
+    /// Left click on a file row moves the cursor there (and activates the panel); with Shift it selects the range from the old cursor.
+    fn click(&mut self, ev: MouseEvent) {
+        if self.input.is_some() || !matches!(self.mode, Mode::Normal) {
+            return;
+        }
+        let Some(i) = (0..2).find(|&i| self.areas[i].contains((ev.column, ev.row).into())) else {
+            return;
+        };
+        let area = self.areas[i];
+        // first row is the border
+        let Some(row) = usize::from(ev.row - area.y).checked_sub(1) else {
+            return;
+        };
+        let idx = self.lists[i].offset() + row;
+        if idx >= self.panels[i].entries().len()
+            || row >= usize::from(area.height.saturating_sub(2))
+        {
+            return;
+        }
+        self.active = i;
+        let panel = &mut self.panels[i];
+        if ev.modifiers.contains(KeyModifiers::SHIFT) {
+            panel.select_range(panel.cursor(), idx);
+        } else {
+            panel.set_cursor(idx);
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         self.note.clear();
         if self.input.is_some() {
             return self.input_key(key);
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Normal
+                if key.code == KeyCode::F(4) && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                if let Some(path) = self.current_file() {
+                    self.external_edit(path, "code".into());
+                }
+            }
+            Mode::Normal
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
+            {
+                let panel = &mut self.panels[self.active];
+                let c = panel.cursor();
+                // select the entry left behind
+                panel.select_range(c, c);
+                panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
+            }
             Mode::Normal => self.normal_key(key.code),
+            Mode::Editor(path, mut cmd) => match key.code {
+                KeyCode::Enter => self.external_edit(path, cmd),
+                KeyCode::Esc => {}
+                KeyCode::Backspace => {
+                    cmd.pop();
+                    self.mode = Mode::Editor(path, cmd);
+                }
+                KeyCode::Char(c) => {
+                    cmd.push(c);
+                    self.mode = Mode::Editor(path, cmd);
+                }
+                _ => self.mode = Mode::Editor(path, cmd),
+            },
             Mode::Confirm(op, targets) => match key.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.run(op, &targets),
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.delete(&targets),
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
                 _ => self.mode = Mode::Confirm(op, targets),
+            },
+            Mode::Transfer(op, targets, mut text) => match key.code {
+                KeyCode::Enter => self.run(op, &targets, &text),
+                KeyCode::Esc => {}
+                code => {
+                    match code {
+                        KeyCode::Backspace => drop(text.pop()),
+                        KeyCode::Char(c) => text.push(c),
+                        _ => {}
+                    }
+                    self.mode = Mode::Transfer(op, targets, text);
+                }
             },
             Mode::Mkdir(mut name) => match key.code {
                 KeyCode::Enter => self.mkdir(&name),
@@ -574,18 +657,41 @@ impl App {
 
     fn confirm(&mut self, op: Op) {
         let targets = self.panels[self.active].targets();
-        if !targets.is_empty() {
-            self.mode = Mode::Confirm(op, targets);
+        match targets.as_slice() {
+            [] => {}
+            _ if op == Op::Delete => self.mode = Mode::Confirm(op, targets),
+            [one] => {
+                let name = one.file_name().unwrap_or_default();
+                let text = self.other_dir().join(name).display().to_string();
+                self.mode = Mode::Transfer(op, targets, text);
+            }
+            _ => {
+                let text = self.other_dir().display().to_string();
+                self.mode = Mode::Transfer(op, targets, text);
+            }
         }
     }
 
-    /// Stops at the first error so the user sees it before anything else happens.
-    fn run(&mut self, op: Op, targets: &[PathBuf]) {
-        let dst = self.other_dir().to_owned();
-        let result = targets.iter().try_for_each(|src| match op {
-            Op::Copy => ops::copy(src, &dst),
-            Op::Move => ops::move_(src, &dst),
-            Op::Delete => ops::delete(src),
+    fn delete(&mut self, targets: &[PathBuf]) {
+        let result = targets.iter().try_for_each(|src| ops::delete(src));
+        self.finish(result.err().map(|e| e.to_string()));
+    }
+
+    /// Copy or move to `text`, relative to the active panel. A single item goes to
+    /// exactly that path (rename); several items, or a trailing separator, mean a directory.
+    fn run(&mut self, op: Op, targets: &[PathBuf], text: &str) {
+        let dest = self.panels[self.active].path().join(text);
+        let into_dir = targets.len() > 1 || text.ends_with(['/', std::path::MAIN_SEPARATOR]);
+        // Stops at the first error so the user sees it before anything else happens.
+        let result = targets.iter().try_for_each(|src| {
+            let target = match src.file_name() {
+                Some(name) if into_dir => dest.join(name),
+                _ => dest.clone(),
+            };
+            match op {
+                Op::Copy => ops::copy(src, &target),
+                _ => ops::move_(src, &target),
+            }
         });
         self.finish(result.err().map(|e| e.to_string()));
     }
@@ -612,6 +718,26 @@ impl App {
         let panel = &self.panels[self.active];
         let entry = panel.current().filter(|e| !e.is_dir)?;
         Some(panel.path().join(&entry.name))
+    }
+
+    /// Start `cmd path` detached; a missing command asks for another one.
+    // shortcut: no terminal suspend, so console editors (vim) do not work, upgrade if wanted
+    fn external_edit(&mut self, path: PathBuf, cmd: String) {
+        use std::process::{Command, Stdio};
+        let cmd = cmd.trim().to_string();
+        let spawned = Command::new(&cmd)
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.mode = Mode::Editor(path, String::new())
+            }
+            Err(e) => self.mode = Mode::Message(format!("{cmd}: {e}")),
+        }
     }
 
     fn open_viewer(&mut self, path: PathBuf) {
@@ -782,13 +908,53 @@ mod tests {
         assert_eq!(app.panels[0].current().unwrap().name, "..");
         key(&mut app, KeyCode::Down);
         key(&mut app, KeyCode::F(5));
-        assert!(matches!(app.mode, Mode::Confirm(Op::Copy, _)));
-        key(&mut app, KeyCode::Char('y'));
+        assert!(matches!(app.mode, Mode::Transfer(Op::Copy, _, _)));
+        key(&mut app, KeyCode::Enter);
         assert!(right.path().join("new").is_dir());
         assert!(matches!(app.mode, Mode::Normal));
         key(&mut app, KeyCode::F(5));
-        key(&mut app, KeyCode::Char('y'));
+        key(&mut app, KeyCode::Enter);
         assert!(matches!(app.mode, Mode::Message(_))); // already exists
+        key(&mut app, KeyCode::Char(' '));
+        // copy in the current dir under a new name (relative to the active panel)
+        key(&mut app, KeyCode::F(5));
+        for _ in 0..right.path().display().to_string().len() + 5 {
+            key(&mut app, KeyCode::Backspace);
+        }
+        for c in "copy".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Enter);
+        assert!(left.path().join("copy").is_dir());
+    }
+
+    #[test]
+    fn shift_arrows_and_clicks_select() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a", "b", "c", "d"] {
+            std::fs::write(dir.path().join(n), "").unwrap();
+        }
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        app.areas = [Rect::new(0, 0, 40, 10), Rect::new(40, 0, 40, 10)];
+        let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+        app.on_key(shift(KeyCode::Down)); // ".." is not selectable
+        app.on_key(shift(KeyCode::Down));
+        assert_eq!(app.panels[0].targets().len(), 1);
+        let click = |app: &mut App, column, row, modifiers| {
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers,
+            })
+        };
+        click(&mut app, 45, 3, KeyModifiers::NONE); // row 3 = entry 2 ("b") in right panel
+        assert_eq!((app.active, app.panels[1].cursor()), (1, 2));
+        click(&mut app, 45, 5, KeyModifiers::SHIFT); // entries 2..=4
+        assert_eq!(app.panels[1].targets().len(), 3);
     }
 
     fn wait(app: &mut App) {

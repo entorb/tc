@@ -7,20 +7,20 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{Error, Result, io_err};
 
-/// Copy `src` (file, symlink or directory tree) into directory `dst_dir`.
+/// Copy `src` (file, symlink or directory tree) to the new path `target`.
 /// On failure the partial target is removed.
-pub fn copy(src: &Path, dst_dir: &Path) -> Result<()> {
-    let target = prepare(src, dst_dir)?;
-    copy_tree(src, &target).inspect_err(|_| remove_partial(&target))
+pub fn copy(src: &Path, target: &Path) -> Result<()> {
+    prepare(src, target)?;
+    copy_tree(src, target).inspect_err(|_| remove_partial(target))
 }
 
-/// Move `src` into directory `dst_dir`. Across devices: copy, then delete source.
-pub fn move_(src: &Path, dst_dir: &Path) -> Result<()> {
-    let target = prepare(src, dst_dir)?;
-    match fs::rename(src, &target) {
+/// Move or rename `src` to the new path `target`. Across devices: copy, then delete source.
+pub fn move_(src: &Path, target: &Path) -> Result<()> {
+    prepare(src, target)?;
+    match fs::rename(src, target) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-            copy_tree(src, &target).inspect_err(|_| remove_partial(&target))?;
+            copy_tree(src, target).inspect_err(|_| remove_partial(target))?;
             delete(src)
         }
         Err(e) => Err(io_err(src)(e)),
@@ -53,16 +53,13 @@ pub fn mkdir(parent: &Path, name: &OsStr) -> Result<PathBuf> {
 }
 
 /// Target path for `src` in `dst_dir`, refusing existing targets and copies into itself.
-fn prepare(src: &Path, dst_dir: &Path) -> Result<PathBuf> {
-    let name = src
-        .file_name()
-        .ok_or_else(|| Error::InvalidName(src.display().to_string()))?;
-    let target = dst_dir.join(name);
-    if fs::symlink_metadata(&target).is_ok() {
-        return Err(Error::Exists(target));
+fn prepare(src: &Path, target: &Path) -> Result<()> {
+    if fs::symlink_metadata(target).is_ok() {
+        return Err(Error::Exists(target.to_owned()));
     }
     let src_meta = fs::symlink_metadata(src).map_err(io_err(src))?;
     if src_meta.is_dir() {
+        let dst_dir = target.parent().unwrap_or(target);
         // canonicalize so symlinked paths cannot hide the nesting
         let src_real = fs::canonicalize(src).map_err(io_err(src))?;
         let dst_real = fs::canonicalize(dst_dir).map_err(io_err(dst_dir))?;
@@ -70,7 +67,7 @@ fn prepare(src: &Path, dst_dir: &Path) -> Result<PathBuf> {
             return Err(Error::IntoItself(src.to_owned()));
         }
     }
-    Ok(target)
+    Ok(())
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
@@ -136,7 +133,7 @@ mod tests {
         let src = tree(tmp.path());
         let dst = tmp.path().join("dst");
         fs::create_dir(&dst).unwrap();
-        copy(&src, &dst).unwrap();
+        copy(&src, &dst.join("src")).unwrap();
         assert_eq!(fs::read_to_string(dst.join("src/sub/b.txt")).unwrap(), "b");
         assert!(src.join("a.txt").exists());
     }
@@ -149,11 +146,11 @@ mod tests {
         fs::create_dir(&dst).unwrap();
         fs::write(dst.join("a.txt"), "keep").unwrap();
         assert!(matches!(
-            copy(&src.join("a.txt"), &dst),
+            copy(&src.join("a.txt"), &dst.join("a.txt")),
             Err(Error::Exists(_))
         ));
         assert!(matches!(
-            move_(&src.join("a.txt"), &dst),
+            move_(&src.join("a.txt"), &dst.join("a.txt")),
             Err(Error::Exists(_))
         ));
         assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "keep");
@@ -165,20 +162,31 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = tree(tmp.path());
         assert!(matches!(
-            copy(&src, &src.join("sub")),
+            copy(&src, &src.join("sub/src")),
             Err(Error::IntoItself(_))
         ));
         assert!(matches!(
-            move_(&src, &src.join("sub")),
+            move_(&src, &src.join("sub/src")),
             Err(Error::IntoItself(_))
         ));
+    }
+
+    #[test]
+    fn copy_and_move_with_new_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tree(tmp.path());
+        copy(&src.join("a.txt"), &src.join("c.txt")).unwrap();
+        move_(&src.join("c.txt"), &src.join("d.txt")).unwrap();
+        assert!(!src.join("c.txt").exists());
+        assert_eq!(fs::read_to_string(src.join("d.txt")).unwrap(), "a");
+        assert!(src.join("a.txt").exists());
     }
 
     #[test]
     fn move_file() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tree(tmp.path());
-        move_(&src.join("a.txt"), &src.join("sub")).unwrap();
+        move_(&src.join("a.txt"), &src.join("sub/a.txt")).unwrap();
         assert!(!src.join("a.txt").exists());
         assert!(src.join("sub/a.txt").exists());
     }
@@ -210,7 +218,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, src.join("link")).unwrap();
         let dst = tmp.path().join("dst");
         fs::create_dir(&dst).unwrap();
-        copy(&src, &dst).unwrap();
+        copy(&src, &dst.join("src")).unwrap();
         assert!(
             fs::symlink_metadata(dst.join("src/link"))
                 .unwrap()
@@ -234,7 +242,7 @@ mod tests {
         }
         let dst = tmp.path().join("dst");
         fs::create_dir(&dst).unwrap();
-        assert!(copy(&src, &dst).is_err());
+        assert!(copy(&src, &dst.join("src")).is_err());
         assert!(!dst.join("src").exists());
         assert!(src.join("a.txt").exists());
     }

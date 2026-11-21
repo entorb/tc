@@ -10,8 +10,7 @@ use regex::Regex;
 use crate::app::{App, Mode, Step};
 use tc_core::edit::Eol;
 
-const HELP: &str =
-    "F3 View  F4 Edit  F5 Copy  F6 Move  F7 Mkdir  F8 Delete  Ins Select  Tab Switch  F10 Quit";
+const HELP: &str = "F3 View  F4 Edit  S-F4 Ext  F5 Copy  F6 Move  F7 Mkdir  F8 Delete  Ins Select  Tab Switch  F10 Quit";
 /// Length of "YY-MM-DD HH:MM".
 const DATE_WIDTH: usize = 14;
 
@@ -45,6 +44,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let [main, status] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
         let halves: [Rect; 2] = Layout::horizontal([Constraint::Fill(1); 2]).areas(main);
+        app.areas = halves;
         app.page = main.height.saturating_sub(2).max(1) as usize;
         for (i, area) in halves.into_iter().enumerate() {
             draw_panel(frame, app, i, area);
@@ -54,22 +54,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match &app.mode {
         Mode::Confirm(op, targets) => {
-            let to = if matches!(op, crate::app::Op::Delete) {
-                String::new()
-            } else {
-                format!(" to {}", app.other_dir().display())
-            };
             let text = format!(
-                "{} {} item(s){to}?\n\n[y] yes   [n] no",
+                "{} {} item(s)?\n\n[y] yes   [n] no",
                 op.verb(),
                 targets.len()
             );
             popup(frame, op.verb(), &text);
         }
+        Mode::Transfer(op, targets, text) => popup(
+            frame,
+            op.verb(),
+            &format!(
+                "{} {} item(s) to (edit name or directory):\n{text}_\n\nEnter ok   Esc cancel",
+                op.verb(),
+                targets.len()
+            ),
+        ),
         Mode::Mkdir(name) => popup(
             frame,
             "Make directory",
             &format!("{name}_\n\nEnter ok   Esc cancel"),
+        ),
+        Mode::Editor(_, cmd) => popup(
+            frame,
+            "Editor not found, enter editor command",
+            &format!("{cmd}_\n\nEnter ok   Esc cancel"),
         ),
         Mode::Message(msg) => popup(frame, "Error", &format!("{msg}\n\nany key")),
         Mode::Edit { error, .. } => {

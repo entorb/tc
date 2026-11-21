@@ -125,6 +125,25 @@ impl Panel {
         Ok(())
     }
 
+    /// Select entries `a..=b` (any order), not "..", and put the cursor on `b`.
+    pub fn select_range(&mut self, a: usize, b: usize) {
+        let last = self.entries.len().saturating_sub(1);
+        let (lo, hi) = (a.min(b).min(last), a.max(b).min(last));
+        let names = self.entries.get(lo..=hi).unwrap_or_default();
+        let names: Vec<_> = names
+            .iter()
+            .filter(|e| !e.is_parent())
+            .map(|e| e.name.clone())
+            .collect();
+        self.selected.extend(names);
+        self.cursor = b.min(last);
+    }
+
+    /// Put the cursor on entry `i`, clamped to the list.
+    pub fn set_cursor(&mut self, i: usize) {
+        self.cursor = i.min(self.entries.len().saturating_sub(1));
+    }
+
     /// Toggle selection of the cursor entry and move down.
     pub fn toggle_select(&mut self) {
         if let Some(entry) = self.current().filter(|e| !e.is_parent()) {
