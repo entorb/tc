@@ -144,8 +144,10 @@ pub fn shell_command(cmd: &str, dir: &Path) -> Command {
 
 #[cfg(windows)]
 pub fn shell_command(cmd: &str, dir: &Path) -> Command {
+    use std::os::windows::process::CommandExt;
     let mut c = Command::new("cmd");
-    c.arg("/C").arg(cmd).current_dir(dir);
+    // raw: cmd.exe does its own parsing, MSVC-style quoting from `arg` would break quotes
+    c.arg("/C").raw_arg(cmd).current_dir(dir);
     c
 }
 
