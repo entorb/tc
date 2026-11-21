@@ -23,6 +23,9 @@ pub struct Progress {
     pub files_total: AtomicU64,
     /// `total` and `files_total` are final.
     pub scanned: AtomicBool,
+    /// File Stats scan: directories found / directories whose listing is read.
+    pub dirs: AtomicU64,
+    pub dirs_done: AtomicU64,
     /// File being copied.
     pub current: Mutex<PathBuf>,
 }

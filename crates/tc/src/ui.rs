@@ -203,7 +203,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "Enter go  Esc close",
         ),
         Mode::Found(f) => draw_found(frame, f),
-        Mode::Stats(st) => draw_stats(frame, st),
+        Mode::Stats(st) => draw_stats(frame, st, None),
+        Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l)),
         Mode::Message(msg) => popup(frame, "Error", &format!("{msg}\n\nany key")),
         Mode::Edit { error, .. } => {
             if let Some(msg) = error {
@@ -315,7 +316,8 @@ fn draw_found(frame: &mut Frame, f: &Found) {
 }
 
 /// File Stats: entries of the browsed directory, largest first, with share and bar.
-fn draw_stats(frame: &mut Frame, st: &Stats) {
+/// `cmd`: command line typed from the stats, shown in the footer row.
+fn draw_stats(frame: &mut Frame, st: &Stats, cmd: Option<&LineEdit>) {
     const BAR_WIDTH: usize = 10;
     let area = frame.area();
     let h = usize::from(area.height.saturating_sub(3)).max(1);
@@ -338,13 +340,15 @@ fn draw_stats(frame: &mut Frame, st: &Stats) {
     });
     let footer = if st.scanning() {
         format!(
-            "scanning: {} files  Esc/F10 cancel",
-            thousands(st.progress.files.load(Ordering::Relaxed))
+            "scanning: {} files, {} / {} dirs  Esc/F10 cancel",
+            thousands(st.progress.files.load(Ordering::Relaxed)),
+            thousands(st.progress.dirs_done.load(Ordering::Relaxed)),
+            thousands(st.progress.dirs.load(Ordering::Relaxed))
         )
     } else {
         let mode = if st.by_files { "count" } else { "size" };
         format!(
-            "{}, {} files  Tab size/count ({mode})  Enter open  Bksp up  F1 Help  F3 View  F4 Edit  S-F4 Ext  F10 Quit",
+            "{}, {} files  Tab size/count ({mode})  Enter open  Bksp up  F1 Help  F3 View  F4 Edit  S-F4 Ext  F8 Del  : Cmd  F10 Quit",
             human(dir.size),
             thousands(dir.files)
         )
@@ -357,7 +361,17 @@ fn draw_stats(frame: &mut Frame, st: &Stats) {
     let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     frame.render_widget(Clear, area);
     frame.render_stateful_widget(list, main, &mut state);
-    frame.render_widget(Line::raw(footer).style(BAR), status);
+    match cmd {
+        Some(l) => {
+            let prompt = format!("{}> ", st.path().display());
+            let style = Style::new().fg(Color::Gray).bg(Color::Black);
+            draw_edit(frame, status, &prompt, l, style);
+        }
+        None => frame.render_widget(Line::raw(footer).style(BAR), status),
+    }
+    if let Some(text) = &st.confirm {
+        popup(frame, "Delete", text);
+    }
 }
 
 fn draw_input(frame: &mut Frame, app: &mut App) {
@@ -723,7 +737,12 @@ Tab  toggle size / file count
 F3  view file
 F4  edit file
 Shift+F4  edit in external editor
-Esc / q / F10  close";
+F8 / d  delete (y trash, p permanent), no rescan
+:  command line in this directory
+Esc / q / F10  close (while scanning: cancel)
+
+Scan runs in up to 8 threads; footer shows files and
+scanned / discovered directories.";
 
 const HELP_VIEW: &str = "\
 == Move ==
