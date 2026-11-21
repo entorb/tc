@@ -2,13 +2,14 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::num::NonZero;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use crate::ops::Progress;
-use crate::vfs::Remote;
+use crate::vfs::{self, Remote};
 
 /// One entry of the tree; a directory sums its children.
 #[derive(Debug, Default)]
@@ -25,15 +26,70 @@ pub struct Node {
 /// Most worker threads of a scan; more rarely helps, `read_dir` latency is the bottleneck.
 const MAX_THREADS: usize = 8;
 
+/// A directory entry as a scan needs it.
+struct Item {
+    name: OsString,
+    /// Directory, not a symlink to one.
+    dir: bool,
+    size: u64,
+}
+
+type List<'a> = dyn Fn(&Path) -> Vec<Item> + Sync + 'a;
+
 /// Scan `dir` recursively (symlinks not followed, unreadable parts count 0), children sorted
 /// by size. Subdirectories go to worker threads while one is free. `p.files`, `p.dirs` and
 /// `p.dirs_done` count live; stops early on `p.cancel`.
 // shortcut: thread count is automatic, spinning disks may seek more; upgrade with a thread option
 pub fn scan(dir: &Path, p: &Progress) -> Node {
     let threads = thread::available_parallelism().map_or(1, NonZero::get);
-    let free = AtomicUsize::new(threads.min(MAX_THREADS) - 1);
+    walk(dir, p, threads.min(MAX_THREADS), &|d| {
+        let items = fs::read_dir(d).into_iter().flatten().flatten();
+        items
+            .map(|i| Item {
+                dir: i.file_type().is_ok_and(|t| t.is_dir()),
+                size: i.metadata().map_or(0, |m| m.len()),
+                name: i.file_name(),
+            })
+            .collect()
+    })
+}
+
+/// Like [`scan`] on a remote `dir`: one `find` on the server if it can run commands (GNU find),
+/// else a walk with parallel listings, which hides the network latency of each request.
+pub fn scan_remote(r: &dyn Remote, dir: &Path, p: &Progress) -> Node {
+    let quoted = format!("'{}'", vfs::rpath(dir).replace('\'', r"'\''"));
+    let cmd = format!(r"find {quoted} -mindepth 1 -printf '%y %s %P\0'");
+    let mut found = None;
+    // no output at all (no GNU find, empty dir): the walk decides
+    let _ = r.exec(&cmd, &mut |out| {
+        found = parse_find(out, p)?;
+        Ok(())
+    });
+    let mut node = match found {
+        Some(node) => node,
+        None if p.cancel.load(Ordering::Relaxed) => Node::default(),
+        None => {
+            return walk(dir, p, MAX_THREADS, &|d| {
+                let entries = r.list(&vfs::rpath(d)).unwrap_or_default();
+                entries
+                    .into_iter()
+                    .map(|e| Item {
+                        dir: e.is_dir && !e.is_symlink,
+                        size: e.size,
+                        name: e.name,
+                    })
+                    .collect()
+            });
+        }
+    };
+    node.name = dir.file_name().unwrap_or(dir.as_os_str()).to_owned();
+    node
+}
+
+fn walk(dir: &Path, p: &Progress, threads: usize, list: &List) -> Node {
+    let free = AtomicUsize::new(threads - 1);
     p.dirs.fetch_add(1, Ordering::Relaxed);
-    let mut node = scan_dir(dir, p, &free);
+    let mut node = scan_dir(dir, p, &free, list);
     node.name = dir.file_name().unwrap_or(dir.as_os_str()).to_owned();
     node
 }
@@ -44,44 +100,43 @@ fn take_slot(free: &AtomicUsize) -> bool {
         .is_ok()
 }
 
-fn scan_dir(dir: &Path, p: &Progress, free: &AtomicUsize) -> Node {
+fn scan_dir(dir: &Path, p: &Progress, free: &AtomicUsize, list: &List) -> Node {
     let mut node = Node {
         is_dir: true,
         ..Node::default()
     };
     thread::scope(|s| {
         let mut workers = Vec::new();
-        for item in fs::read_dir(dir).into_iter().flatten().flatten() {
+        for item in list(dir) {
             if p.cancel.load(Ordering::Relaxed) {
                 break;
             }
-            if item.file_type().is_ok_and(|t| t.is_dir()) {
+            if item.dir {
                 p.dirs.fetch_add(1, Ordering::Relaxed);
-                let path = item.path();
+                let path = dir.join(&item.name);
                 if take_slot(free) {
                     let worker = s.spawn(move || {
-                        let c = scan_dir(&path, p, free);
+                        let c = scan_dir(&path, p, free, list);
                         free.fetch_add(1, Ordering::AcqRel);
                         c
                     });
-                    workers.push((item.file_name(), worker));
+                    workers.push((item.name, worker));
                     continue;
                 }
-                let mut c = scan_dir(&path, p, free);
-                c.name = item.file_name();
+                let mut c = scan_dir(&path, p, free, list);
+                c.name = item.name;
                 node.children.push(c);
             } else {
                 p.files.fetch_add(1, Ordering::Relaxed);
                 node.children.push(Node {
-                    name: item.file_name(),
-                    size: item.metadata().map_or(0, |m| m.len()),
+                    name: item.name,
+                    size: item.size,
                     files: 1,
                     ..Node::default()
                 });
             }
         }
         for (name, worker) in workers {
-            // a panicked worker counts as an empty directory
             let mut c = worker.join().unwrap_or_else(|_| Node {
                 is_dir: true,
                 ..Node::default()
@@ -90,56 +145,101 @@ fn scan_dir(dir: &Path, p: &Progress, free: &AtomicUsize) -> Node {
             node.children.push(c);
         }
     });
-    node.size = node.children.iter().map(|c| c.size).sum();
-    node.files = node.children.iter().map(|c| c.files).sum();
-    sort(&mut node.children, false);
+    finish(&mut node);
     p.dirs_done.fetch_add(1, Ordering::Relaxed);
     node
 }
 
-/// Like [`scan`] on a remote `dir`, single threaded since a connection serializes requests.
-/// Symlinks are counted as files, never descended into.
-pub fn scan_remote(r: &dyn Remote, dir: &str, p: &Progress) -> Node {
-    p.dirs.fetch_add(1, Ordering::Relaxed);
-    let mut node = scan_remote_dir(r, dir, p);
-    node.name = dir
-        .rsplit('/')
-        .find(|s| !s.is_empty())
-        .unwrap_or(dir)
-        .into();
-    node
+/// Sum the children and sort them by size.
+fn finish(node: &mut Node) {
+    node.size = node.children.iter().map(|c| c.size).sum();
+    node.files = node.children.iter().map(|c| c.files).sum();
+    sort(&mut node.children, false);
 }
 
-fn scan_remote_dir(r: &dyn Remote, dir: &str, p: &Progress) -> Node {
-    let mut node = Node {
-        is_dir: true,
-        ..Node::default()
-    };
-    for e in r.list(dir).into_iter().flatten() {
+/// Most bytes of one `find` record; a longer one ends the parse as garbage.
+const MAX_RECORD: usize = 64 << 10;
+
+/// Tree from `find -printf '%y %s %P\0'` output (pre-order: a directory before its contents).
+/// `None` without a single record; `Err(Cancelled)` on `p.cancel`.
+fn parse_find(out: &mut dyn Read, p: &Progress) -> crate::Result<Option<Node>> {
+    let mut out = BufReader::new(out);
+    // open directories from the root down, with their relative paths
+    let mut stack: Vec<(String, Node)> = vec![(
+        String::new(),
+        Node {
+            is_dir: true,
+            ..Node::default()
+        },
+    )];
+    let mut rec = Vec::new();
+    let mut any = false;
+    loop {
+        rec.clear();
+        let n = (&mut out)
+            .take(MAX_RECORD as u64)
+            .read_until(0, &mut rec)
+            .map_err(|e| crate::Error::Remote(e.to_string()))?;
         if p.cancel.load(Ordering::Relaxed) {
+            return Err(crate::Error::Cancelled);
+        }
+        if rec.pop() != Some(0) {
+            // a record cut off or too long: a broken stream, not a tree to trust
+            if n > 0 {
+                return Ok(None);
+            }
             break;
         }
-        if e.is_dir && !e.is_symlink {
+        let text = String::from_utf8_lossy(&rec);
+        let mut parts = text.splitn(3, ' ');
+        let (Some(kind), Some(size), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        any = true;
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        // close finished directories; an unknown parent lands in the root
+        while stack.len() > 1 && stack.last().is_some_and(|(d, _)| d != parent) {
+            pop(&mut stack, p);
+        }
+        let mut node = Node {
+            name: name.into(),
+            ..Node::default()
+        };
+        if kind == "d" {
             p.dirs.fetch_add(1, Ordering::Relaxed);
-            let path = format!("{}/{}", dir.trim_end_matches('/'), e.name.to_string_lossy());
-            let mut c = scan_remote_dir(r, &path, p);
-            c.name = e.name;
-            node.children.push(c);
+            node.is_dir = true;
+            stack.push((path.to_owned(), node));
         } else {
             p.files.fetch_add(1, Ordering::Relaxed);
-            node.children.push(Node {
-                name: e.name,
-                size: e.size,
-                files: 1,
-                ..Node::default()
-            });
+            node.size = size.parse().unwrap_or(0);
+            node.files = 1;
+            if let Some((_, dir)) = stack.last_mut() {
+                dir.children.push(node);
+            }
         }
     }
-    node.size = node.children.iter().map(|c| c.size).sum();
-    node.files = node.children.iter().map(|c| c.files).sum();
-    sort(&mut node.children, false);
+    while stack.len() > 1 {
+        pop(&mut stack, p);
+    }
+    let Some((_, mut root)) = stack.pop().filter(|_| any) else {
+        return Ok(None);
+    };
+    finish(&mut root);
+    p.dirs.fetch_add(1, Ordering::Relaxed);
     p.dirs_done.fetch_add(1, Ordering::Relaxed);
-    node
+    Ok(Some(root))
+}
+
+/// Finish the innermost open directory and add it to its parent.
+fn pop(stack: &mut Vec<(String, Node)>, p: &Progress) {
+    if let Some((_, mut dir)) = stack.pop() {
+        finish(&mut dir);
+        p.dirs_done.fetch_add(1, Ordering::Relaxed);
+        if let Some((_, parent)) = stack.last_mut() {
+            parent.children.push(dir);
+        }
+    }
 }
 
 /// Drop child `idx` of the directory at `path` below `root`; every ancestor loses its size
@@ -170,6 +270,41 @@ pub fn sort(children: &mut [Node], by_files: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn find(out: &[u8]) -> Option<Node> {
+        parse_find(&mut &out[..], &Progress::default()).unwrap()
+    }
+
+    #[test]
+    fn parse_find_builds_tree_in_preorder() {
+        let out = b"d 4096 a\0f 3 a/x y\0d 4096 a/b\0f 5 a/b/z\0f 1 a/w\0l 7 link\0d 0 empty\0";
+        let root = find(out).unwrap();
+        assert_eq!((root.size, root.files), (16, 4));
+        let names: Vec<_> = root
+            .children
+            .iter()
+            .map(|c| c.name.to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["a", "link", "empty"]);
+        let a = &root.children[0];
+        assert_eq!(
+            (a.size, a.files, a.children[0].name.to_str()),
+            (9, 3, Some("b"))
+        );
+        assert!(root.children[2].is_dir && root.children[2].children.is_empty());
+    }
+
+    #[test]
+    fn parse_find_rejects_empty_cut_and_out_of_order() {
+        assert!(find(b"").is_none());
+        assert!(find(b"f 1 a\0f 2 b").is_none());
+        // a parent never listed: the entry still counts, in the root
+        let root = find(b"f 2 gone/x\0").unwrap();
+        assert_eq!((root.size, root.children[0].name.to_str()), (2, Some("x")));
+        let p = Progress::default();
+        p.cancel.store(true, Ordering::Relaxed);
+        assert!(parse_find(&mut &b"f 1 a\0"[..], &p).is_err());
+    }
 
     #[test]
     #[cfg_attr(

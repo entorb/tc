@@ -14,7 +14,7 @@ use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tc_core::panel::Entry;
 use tc_core::vfs::Remote;
 use tc_core::{Error, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::runtime::Runtime;
 
 use crate::{Ask, Prompt, Url, err, join};
@@ -63,7 +63,7 @@ pub struct Sftp {
     home: String,
     rt: Runtime,
     sftp: SftpSession,
-    _ssh: Handle<Client>,
+    ssh: Handle<Client>,
 }
 
 impl std::fmt::Debug for Sftp {
@@ -156,7 +156,7 @@ impl Sftp {
             home,
             rt,
             sftp,
-            _ssh: ssh,
+            ssh,
         })
     }
 
@@ -231,19 +231,19 @@ fn entry(name: String, a: &FileAttributes, link_dir: Option<bool>) -> Entry {
     }
 }
 
-/// Blocking adapters over the async file, driven by the backend's runtime.
-struct Blocking<'a> {
+/// Blocking adapters over an async file or channel, driven by the backend's runtime.
+struct Blocking<'a, T> {
     rt: &'a Runtime,
-    file: russh_sftp::client::fs::File,
+    file: T,
 }
 
-impl Read for Blocking<'_> {
+impl<T: AsyncRead + Unpin> Read for Blocking<'_, T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.rt.block_on(self.file.read(buf))
     }
 }
 
-impl Write for Blocking<'_> {
+impl<T: AsyncWrite + Unpin> Write for Blocking<'_, T> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.rt.block_on(self.file.write(buf))
     }
@@ -295,6 +295,22 @@ impl Remote for Sftp {
             Err(e) if not_found(&e) => Ok(None),
             Err(e) => Err(err(e)),
         }
+    }
+
+    fn exec(&self, cmd: &str, f: &mut dyn FnMut(&mut dyn Read) -> Result<()>) -> Result<()> {
+        let ch = self.rt.block_on(async {
+            let ch = self.ssh.channel_open_session().await?;
+            ch.exec(true, cmd).await.map(|()| ch)
+        });
+        let mut b = Blocking {
+            rt: &self.rt,
+            file: ch.map_err(err)?.into_stream(),
+        };
+        let r = f(&mut b);
+        // dropping the stream spawns its channel close, which panics outside the runtime
+        let _rt = self.rt.enter();
+        drop(b);
+        r
     }
 
     fn read(&self, path: &str, f: &mut dyn FnMut(&mut dyn Read) -> Result<()>) -> Result<()> {

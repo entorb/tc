@@ -38,6 +38,10 @@ pub trait Remote: Send + Sync + fmt::Debug {
     fn remove_dir(&self, path: &str) -> Result<()>;
     /// Target must not exist.
     fn rename(&self, from: &str, to: &str) -> Result<()>;
+    /// Run `cmd` in the server's shell and stream its stdout into `f` (stderr dropped).
+    fn exec(&self, _cmd: &str, _f: &mut dyn FnMut(&mut dyn Read) -> Result<()>) -> Result<()> {
+        Err(crate::Error::Remote(format!("{}: no commands", self.url())))
+    }
     /// Directory a new connection starts in.
     fn home(&self) -> String {
         "/".into()
@@ -891,7 +895,7 @@ mod tests {
         m.put("/d/sub/a", b"abc");
         m.put("/d/b", b"de");
         m.link("/d/loop", "/d");
-        let root = crate::stats::scan_remote(m.as_ref(), "/d", &Progress::default());
+        let root = crate::stats::scan_remote(m.as_ref(), Path::new("/d"), &Progress::default());
         assert_eq!(
             (root.name.to_str(), root.size, root.files),
             (Some("d"), 5, 3)

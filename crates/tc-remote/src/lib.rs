@@ -225,6 +225,15 @@ mod tests {
             let p = Progress::default();
             let mut d = |_: &Path, _: &Path| Decision::Overwrite;
             transfer(&Side::Local, &src, &side, &remote, false, &mut d, &p).unwrap();
+            let tree = tc_core::stats::scan_remote(r.as_ref(), &remote, &p);
+            assert_eq!((tree.size, tree.files), (5, 1));
+            if var == "TC_TEST_SFTP" {
+                let out = ssh_command(&url, "cat a", &tc_core::vfs::rpath(&remote))
+                    .unwrap()
+                    .output()
+                    .unwrap();
+                assert_eq!(String::from_utf8_lossy(&out.stdout), "hello", "{out:?}");
+            }
             let back = tmp.path().join("back");
             transfer(&side, &remote, &Side::Local, &back, true, &mut d, &p).unwrap();
             assert_eq!(std::fs::read_to_string(back.join("a")).unwrap(), "hello");

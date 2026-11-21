@@ -1293,7 +1293,7 @@ impl App {
             sel: 0,
             by_files: false,
             job: Some(thread::spawn(move || match r {
-                Some(r) => stats::scan_remote(r.as_ref(), &vfs::rpath(&d), &p),
+                Some(r) => stats::scan_remote(r.as_ref(), &d, &p),
                 None => stats::scan(&d, &p),
             })),
             progress,
