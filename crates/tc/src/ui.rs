@@ -79,7 +79,7 @@ fn fit(s: &str, w: usize) -> String {
 pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Mode::View { title, view } = &mut app.mode {
         let bottom = format!(
-            " {}%  {}  {}  / or f Find  n/N Next/Prev  g Goto  e Encoding  w Wrap  l Lines ",
+            " {}%  {}  {}  / or f Find  n/N Next/Prev  g Goto  w Wrap  l Lines ",
             view.percent(),
             view.encoding_name(),
             app.note
@@ -637,7 +637,6 @@ n  next match
 N  previous match
 
 == View ==
-e  next encoding
 w  wrap long lines
 l  line numbers
 Esc / q / F3 / F10  close";

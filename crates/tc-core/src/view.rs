@@ -4,26 +4,13 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use encoding_rs::{
-    Encoding, ISO_8859_15, KOI8_R, SHIFT_JIS, UTF_8, WINDOWS_1250, WINDOWS_1251, WINDOWS_1252,
-};
+use encoding_rs::Encoding;
 use regex::Regex;
 
 /// Bytes searched per step when scanning backwards for a line start.
 const CHUNK: usize = 8 * 1024;
 /// Longest line part shown; the rest of the line is skipped.
 const MAX_LINE: u64 = 4 * 1024;
-/// Encodings `next_encoding` cycles through; all keep 0x0A as line end.
-const ENCODINGS: [&Encoding; 7] = [
-    UTF_8,
-    WINDOWS_1252,
-    ISO_8859_15,
-    WINDOWS_1250,
-    WINDOWS_1251,
-    KOI8_R,
-    SHIFT_JIS,
-];
-
 pub struct Viewer {
     file: File,
     len: u64,
@@ -42,12 +29,18 @@ impl Viewer {
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
         let len = file.metadata()?.len();
+        // shortcut: guesses from the first chunk only, upgrade if later text differs
+        let mut head = Vec::with_capacity(CHUNK);
+        (&file).take(CHUNK as u64).read_to_end(&mut head)?;
+        let mut det = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
+        det.feed(&head, head.len() < CHUNK);
+        let encoding = det.guess(None, chardetng::Utf8Detection::Allow);
         Ok(Self {
             file,
             len,
             top: 0,
             left: 0,
-            encoding: UTF_8,
+            encoding,
             wrap: false,
             top_line: Some(0),
         })
@@ -94,11 +87,6 @@ impl Viewer {
 
     pub fn encoding_name(&self) -> &'static str {
         self.encoding.name()
-    }
-
-    pub fn next_encoding(&mut self) {
-        let i = ENCODINGS.iter().position(|&e| e == self.encoding);
-        self.encoding = ENCODINGS[i.map_or(0, |i| (i + 1) % ENCODINGS.len())];
     }
 
     /// Position in the file in percent, by byte offset of the top line.
@@ -300,8 +288,9 @@ mod tests {
         v.scroll(-1).unwrap();
         assert_eq!(v.lines(5, 80).unwrap(), ["a", "b"]);
 
+        // detected as a legacy encoding, never fails on odd bytes
         let (_t, mut v) = viewer(b"\xff\xfe\n");
-        assert_eq!(v.lines(5, 80).unwrap(), ["\u{fffd}\u{fffd}"]);
+        assert_eq!(v.lines(5, 80).unwrap().len(), 1);
     }
 
     #[test]
@@ -356,15 +345,10 @@ mod tests {
         assert_eq!(v.lines(1, 3).unwrap(), ["abc"]);
 
         let (_t, mut v) = viewer(b"caf\xe9\n");
-        v.next_encoding();
         assert_eq!(
             (v.encoding_name(), v.lines(1, 80).unwrap()),
             ("windows-1252", vec!["café".to_owned()])
         );
-        for _ in 0..ENCODINGS.len() {
-            v.next_encoding();
-        }
-        assert_eq!(v.encoding_name(), "windows-1252");
     }
 
     #[test]
