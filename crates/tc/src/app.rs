@@ -222,6 +222,8 @@ pub struct App {
     /// Bookmarked directories and the file they are saved to (none: not persisted).
     pub hotlist: Vec<PathBuf>,
     pub hotlist_file: Option<PathBuf>,
+    /// Time and cell of the last left click, to detect double clicks (terminals send none).
+    last_click: Option<(Instant, u16, u16)>,
 }
 
 impl App {
@@ -241,6 +243,7 @@ impl App {
             clipboard: String::new(),
             hotlist: Vec::new(),
             hotlist_file: None,
+            last_click: None,
         }
     }
 
@@ -309,8 +312,22 @@ impl App {
         let panel = &mut self.panels[i];
         if ev.modifiers.contains(KeyModifiers::SHIFT) {
             panel.select_range(panel.cursor(), idx);
-        } else {
-            panel.set_cursor(idx);
+            return;
+        }
+        panel.set_cursor(idx);
+        let now = Instant::now();
+        let double = self.last_click.is_some_and(|(t, c, r)| {
+            (c, r) == (ev.column, ev.row) && now.duration_since(t) < Duration::from_millis(400)
+        });
+        self.last_click = (!double).then_some((now, ev.column, ev.row));
+        if double {
+            let is_dir = self.panels[i].current().is_some_and(|e| e.is_dir);
+            let code = if is_dir {
+                KeyCode::Enter
+            } else {
+                KeyCode::F(3)
+            };
+            self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
         }
     }
 
@@ -349,6 +366,10 @@ impl App {
                 }
                 KeyCode::Char('d') => self.hotlist_add(),
                 KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
+                KeyCode::Char('y') => {
+                    let [a, b] = &mut self.panels;
+                    a.compare_with(b);
+                }
                 _ => {}
             },
             Mode::Normal
@@ -1240,6 +1261,10 @@ mod tests {
         assert_eq!((app.active, app.panels[1].cursor()), (1, 2));
         click(&mut app, 45, 5, KeyModifiers::SHIFT); // entries 2..=4
         assert_eq!(app.panels[1].targets().len(), 3);
+        click(&mut app, 45, 1, KeyModifiers::NONE); // ".." twice quickly: enters the parent
+        let before = app.panels[1].path().to_path_buf();
+        click(&mut app, 45, 1, KeyModifiers::NONE);
+        assert_ne!(app.panels[1].path(), before);
     }
 
     fn wait(app: &mut App) {

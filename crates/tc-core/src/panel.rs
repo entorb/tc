@@ -1,6 +1,6 @@
 //! One file panel: a directory listing with cursor and selection.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,22 @@ impl Entry {
             modified: None,
         }
     }
+}
+
+/// Names to select on each side: present only there, or (files) different size or newer than the same name on the other side.
+pub fn compare(a: &[Entry], b: &[Entry]) -> (HashSet<OsString>, HashSet<OsString>) {
+    let pick = |x: &[Entry], y: &[Entry]| {
+        let other: HashMap<&OsString, &Entry> = y.iter().map(|e| (&e.name, e)).collect();
+        x.iter()
+            .filter(|e| !e.is_parent())
+            .filter(|e| match other.get(&e.name) {
+                None => true,
+                Some(o) => !e.is_dir && (e.size != o.size || e.modified > o.modified),
+            })
+            .map(|e| e.name.clone())
+            .collect()
+    };
+    (pick(a, b), pick(b, a))
 }
 
 #[derive(Debug)]
@@ -268,6 +284,13 @@ impl Panel {
         }
     }
 
+    /// Replace the selection of both panels with their differences (see [`compare`]); visible entries only.
+    pub fn compare_with(&mut self, other: &mut Panel) {
+        let (sa, sb) = compare(&self.entries, &other.entries);
+        self.selected = sa;
+        other.selected = sb;
+    }
+
     /// Invert the selection of visible files; directories are left alone.
     pub fn invert_selection(&mut self) {
         for e in self.entries.iter().filter(|e| !e.is_dir) {
@@ -393,6 +416,38 @@ fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compare_selects_only_differences() {
+        let t = SystemTime::UNIX_EPOCH;
+        let e = |n: &str, dir: bool, size: u64, s: u64| Entry {
+            name: n.into(),
+            is_dir: dir,
+            is_symlink: false,
+            size,
+            modified: Some(t + std::time::Duration::from_secs(s)),
+        };
+        let a = [
+            e("same", false, 1, 5),
+            e("only_a", false, 1, 1),
+            e("newer", false, 1, 9),
+            e("older", false, 1, 1),
+            e("size", false, 2, 5),
+            e("d", true, 0, 9),
+        ];
+        let b = [
+            e("same", false, 1, 5),
+            e("only_b", true, 0, 1),
+            e("newer", false, 1, 5),
+            e("older", false, 1, 5),
+            e("size", false, 3, 5),
+            e("d", true, 0, 1),
+        ];
+        let (sa, sb) = compare(&a, &b);
+        let n = |v: &[&str]| v.iter().map(OsString::from).collect::<HashSet<_>>();
+        assert_eq!(sa, n(&["only_a", "newer", "size"]));
+        assert_eq!(sb, n(&["only_b", "older", "size"]));
+    }
 
     #[test]
     fn history_back_forward_bounded() {
