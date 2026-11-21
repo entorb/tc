@@ -63,6 +63,8 @@ pub enum Mode {
     },
     /// Load or save running in a worker thread.
     Work(Job),
+    /// Copy or move running in a worker thread, which may ask about name conflicts.
+    Xfer(Xfer),
     /// Size prompt: `y` viewer, `n` loads into the editor when `can_load`.
     AskViewer {
         path: PathBuf,
@@ -147,6 +149,84 @@ impl Found {
                     return;
                 }
             }
+        }
+    }
+}
+
+enum XMsg {
+    /// Conflict: (source, existing target); the worker waits for an `Answer`.
+    Ask(PathBuf, PathBuf),
+    /// Finished with an error text, if any.
+    Done(Option<String>),
+}
+
+#[derive(Clone, Copy)]
+enum Policy {
+    Overwrite,
+    Skip,
+    Newer,
+}
+
+enum Answer {
+    One(Policy),
+    /// Same policy for all further conflicts.
+    All(Policy),
+    Rename(String),
+    Cancel,
+}
+
+pub struct Xfer {
+    pub ask: Option<(PathBuf, PathBuf)>,
+    /// Name being typed after `r`.
+    pub rename: Option<String>,
+    rx: Receiver<XMsg>,
+    reply: mpsc::Sender<Answer>,
+    cancel: Arc<AtomicBool>,
+    started: Instant,
+}
+
+impl Xfer {
+    /// Quick copies finish before a popup would only flicker.
+    pub fn visible(&self) -> bool {
+        self.ask.is_some() || self.started.elapsed() > Duration::from_secs(1)
+    }
+
+    fn answer(&mut self, a: Answer) {
+        self.ask = None;
+        self.rename = None;
+        let _ = self.reply.send(a);
+    }
+
+    fn key(&mut self, code: KeyCode) {
+        if let Some(text) = &mut self.rename {
+            match code {
+                KeyCode::Enter => {
+                    let name = std::mem::take(text);
+                    self.answer(Answer::Rename(name));
+                }
+                KeyCode::Esc => self.rename = None,
+                KeyCode::Backspace => drop(text.pop()),
+                KeyCode::Char(c) => text.push(c),
+                _ => {}
+            }
+        } else if let Some((_, target)) = &self.ask {
+            use Policy::*;
+            match code {
+                KeyCode::Char('o') => self.answer(Answer::One(Overwrite)),
+                KeyCode::Char('s') => self.answer(Answer::One(Skip)),
+                KeyCode::Char('n') => self.answer(Answer::One(Newer)),
+                KeyCode::Char('O') => self.answer(Answer::All(Overwrite)),
+                KeyCode::Char('S') => self.answer(Answer::All(Skip)),
+                KeyCode::Char('N') => self.answer(Answer::All(Newer)),
+                KeyCode::Char('r') => {
+                    let name = target.file_name().unwrap_or_default();
+                    self.rename = Some(name.to_string_lossy().into_owned());
+                }
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('c') => self.answer(Answer::Cancel),
+                _ => {}
+            }
+        } else if code == KeyCode::Esc {
+            self.cancel.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -474,6 +554,10 @@ impl App {
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
             Mode::Found(f) => self.found_key(key.code, f),
             Mode::Message(_) => {}
+            Mode::Xfer(mut x) => {
+                x.key(key.code);
+                self.mode = Mode::Xfer(x);
+            }
             Mode::Work(job) => {
                 if key.code == KeyCode::Esc {
                     job.cancel.store(true, Ordering::Relaxed);
@@ -951,21 +1035,61 @@ impl App {
 
     /// Copy or move to `text`, relative to the active panel. A single item goes to
     /// exactly that path (rename); several items, or a trailing separator, mean a directory.
+    /// Runs in a worker; conflicts are put to the user through `Mode::Xfer`.
     fn run(&mut self, op: Op, targets: &[PathBuf], text: &str) {
         let dest = self.panels[self.active].path().join(text);
         let into_dir = targets.len() > 1 || text.ends_with(['/', std::path::MAIN_SEPARATOR]);
-        // Stops at the first error so the user sees it before anything else happens.
-        let result = targets.iter().try_for_each(|src| {
-            let target = match src.file_name() {
-                Some(name) if into_dir => dest.join(name),
-                _ => dest.clone(),
+        let jobs: Vec<(PathBuf, PathBuf)> = targets
+            .iter()
+            .map(|src| match src.file_name() {
+                Some(name) if into_dir => (src.clone(), dest.join(name)),
+                _ => (src.clone(), dest.clone()),
+            })
+            .collect();
+        let (tx, rx) = mpsc::channel();
+        let (reply, answers) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        thread::spawn(move || {
+            let mut sticky: Option<Policy> = None;
+            let mut ask = |src: &Path, target: &Path| {
+                let policy = match sticky {
+                    Some(p) => p,
+                    None => {
+                        let msg = XMsg::Ask(src.to_owned(), target.to_owned());
+                        if tx.send(msg).is_err() {
+                            return ops::Decision::Cancel;
+                        }
+                        match answers.recv() {
+                            Ok(Answer::One(p)) => p,
+                            Ok(Answer::All(p)) => *sticky.insert(p),
+                            Ok(Answer::Rename(n)) => return ops::Decision::Rename(n.into()),
+                            Ok(Answer::Cancel) | Err(_) => return ops::Decision::Cancel,
+                        }
+                    }
+                };
+                match policy {
+                    Policy::Overwrite => ops::Decision::Overwrite,
+                    Policy::Newer if ops::is_newer(src, target) => ops::Decision::Overwrite,
+                    Policy::Newer | Policy::Skip => ops::Decision::Skip,
+                }
             };
-            match op {
-                Op::Copy => ops::copy(src, &target),
-                _ => ops::move_(src, &target),
-            }
+            // Stops at the first error so the user sees it before anything else happens.
+            let result = jobs.iter().try_for_each(|(src, target)| match op {
+                Op::Copy => ops::copy(src, target, &mut ask, &c),
+                _ => ops::move_(src, target, &mut ask, &c),
+            });
+            let error = result.err().filter(|e| !matches!(e, Error::Cancelled));
+            let _ = tx.send(XMsg::Done(error.map(|e| e.to_string())));
         });
-        self.finish(result.err().map(|e| e.to_string()));
+        self.mode = Mode::Xfer(Xfer {
+            ask: None,
+            rename: None,
+            rx,
+            reply,
+            cancel,
+            started: Instant::now(),
+        });
     }
 
     fn mkdir(&mut self, name: &str) {
@@ -1122,6 +1246,20 @@ impl App {
         if let Mode::Found(f) = &mut self.mode {
             return f.pump();
         }
+        if let Mode::Xfer(x) = &mut self.mode {
+            match x.rx.try_recv() {
+                Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
+                Ok(XMsg::Done(error)) => {
+                    self.mode = Mode::Normal;
+                    self.finish(error);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.mode = Mode::Message("worker thread failed".into())
+                }
+            }
+            return;
+        }
         let Mode::Work(job) = &self.mode else {
             return;
         };
@@ -1198,6 +1336,38 @@ mod tests {
     }
 
     #[test]
+    fn conflict_dialog_overwrite_all_and_rename() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(left.path().join(f), "new").unwrap();
+            std::fs::write(right.path().join(f), "old").unwrap();
+        }
+        let mut app = App::new(
+            Panel::open(left.path()).unwrap(),
+            Panel::open(right.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        key(&mut app, KeyCode::Char('r'));
+        key(&mut app, KeyCode::Char('2'));
+        key(&mut app, KeyCode::Enter); // "a2"
+        wait(&mut app);
+        key(&mut app, KeyCode::Char('O')); // overwrite all
+        wait(&mut app);
+        assert!(matches!(app.mode, Mode::Normal));
+        let read = |f| std::fs::read_to_string(right.path().join(f)).unwrap();
+        assert_eq!(
+            (read("a"), read("a2"), read("b")),
+            ("old".into(), "new".into(), "new".into())
+        );
+    }
+
+    #[test]
     fn mkdir_then_copy_to_other_panel() {
         let left = tempfile::tempdir().unwrap();
         let right = tempfile::tempdir().unwrap();
@@ -1216,12 +1386,13 @@ mod tests {
         key(&mut app, KeyCode::F(5));
         assert!(matches!(app.mode, Mode::Transfer(Op::Copy, _, _)));
         key(&mut app, KeyCode::Enter);
+        wait(&mut app);
         assert!(right.path().join("new").is_dir());
         assert!(matches!(app.mode, Mode::Normal));
         key(&mut app, KeyCode::F(5));
         key(&mut app, KeyCode::Enter);
-        assert!(matches!(app.mode, Mode::Message(_))); // already exists
-        key(&mut app, KeyCode::Char(' '));
+        wait(&mut app);
+        assert!(matches!(app.mode, Mode::Normal)); // existing dir is merged, no conflict
         // copy in the current dir under a new name (relative to the active panel)
         key(&mut app, KeyCode::F(5));
         for _ in 0..right.path().display().to_string().len() + 5 {
@@ -1231,6 +1402,7 @@ mod tests {
             key(&mut app, KeyCode::Char(c));
         }
         key(&mut app, KeyCode::Enter);
+        wait(&mut app);
         assert!(left.path().join("copy").is_dir());
     }
 
@@ -1268,7 +1440,9 @@ mod tests {
     }
 
     fn wait(app: &mut App) {
-        while matches!(app.mode, Mode::Work(_)) {
+        while matches!(app.mode, Mode::Work(_))
+            || matches!(&app.mode, Mode::Xfer(x) if x.ask.is_none())
+        {
             app.tick();
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
