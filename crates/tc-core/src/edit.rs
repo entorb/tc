@@ -181,6 +181,17 @@ impl Editor {
         self.rope.len_lines()
     }
 
+    /// Markdown: is `line` inside a ``` code fence.
+    // shortcut: scans from the file start on every call (each frame), upgrade to a cache if big markdown files lag
+    pub fn in_fence(&self, line: usize) -> bool {
+        let fences = self.rope.lines().take(line);
+        fences
+            .filter(|l| crate::syntax::is_fence(&l.chars().take(80).collect::<String>()))
+            .count()
+            % 2
+            == 1
+    }
+
     fn line_len(&self, line: usize) -> usize {
         let l = self.rope.line(line);
         let n = l.len_chars();
