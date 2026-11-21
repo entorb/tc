@@ -112,6 +112,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &format!("{}%\n\nEsc cancel", job.percent()),
         ),
         Mode::Work(_) => {}
+        Mode::Xfer(x) => {
+            if let Some(text) = &x.rename {
+                popup(frame, "Rename", &format!("{text}_\n\nEnter ok   Esc back"));
+            } else if let Some((_, target)) = &x.ask {
+                popup(
+                    frame,
+                    "File exists",
+                    &format!(
+                        "{}\n\no overwrite  s skip  r rename  n newer\nO all  S skip all  N newer all\nEsc cancel",
+                        target.display()
+                    ),
+                );
+            } else if x.visible() {
+                popup(frame, "Working", "Esc cancel");
+            }
+        }
         Mode::AskViewer { text, .. } => popup(frame, "Edit", text),
         Mode::AskSave { editor, step, .. } => {
             let text = match step {

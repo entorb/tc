@@ -15,8 +15,10 @@ pub mod view;
 pub enum Error {
     #[error("{}: {source}", path.display())]
     Io { path: PathBuf, source: io::Error },
-    #[error("{}: already exists", .0.display())]
+    #[error("{}: is the same file", .0.display())]
     Exists(PathBuf),
+    #[error("{}: file and directory cannot replace each other", .0.display())]
+    TypeMismatch(PathBuf),
     #[error("{}: cannot copy or move a directory into itself", .0.display())]
     IntoItself(PathBuf),
     #[error("invalid name: {0}")]
