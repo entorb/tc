@@ -293,6 +293,7 @@ impl Archive {
                 is_symlink: !dir && it.link,
                 size: if dir { 0 } else { it.size },
                 modified: it.modified,
+                link: None,
             });
             if dir && !nested {
                 e.modified = it.modified;

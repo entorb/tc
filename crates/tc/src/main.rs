@@ -5,9 +5,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
+use crossterm::clipboard::CopyToClipboard;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -29,18 +31,27 @@ fn main() -> anyhow::Result<()> {
     if let Some(file) = &app.history_file {
         app.history = tc_core::cmdline::load_history(file).context("cannot read history")?;
     }
-    execute!(std::io::stdout(), EnableMouseCapture)?;
+    execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = ratatui::run(|terminal| {
         while !app.quit {
-            terminal.draw(|frame| ui::draw(frame, &mut app))?;
+            // shortcut: a save slower than 2 s shows its popup over the panels, not the editor
+            let hidden = matches!(&app.mode, app::Mode::Work(j) if !j.visible());
+            if !hidden {
+                terminal.draw(|frame| ui::draw(frame, &mut app))?;
+            }
             // short poll so worker results show up without a keypress
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     // Windows also reports key releases
                     Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
                     Event::Mouse(ev) => app.on_mouse(ev),
+                    Event::Paste(text) => app.on_paste(text),
                     _ => {}
                 }
+            }
+            // OSC 52: the terminal sets the clipboard, works over SSH
+            if let Some(text) = app.copied.take() {
+                execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(text))?;
             }
             if let Some((cmd, dir)) = app.run.take() {
                 run_shell(terminal, &cmd, &dir)?;
@@ -50,14 +61,23 @@ fn main() -> anyhow::Result<()> {
         }
         Ok(())
     });
-    execute!(std::io::stdout(), DisableMouseCapture)?;
+    execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture
+    )?;
     result
 }
 
 /// Give the terminal to the shell command, wait for it and a key, then take it back.
 fn run_shell(terminal: &mut DefaultTerminal, cmd: &str, dir: &Path) -> std::io::Result<()> {
     let mut out = std::io::stdout();
-    execute!(out, DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        out,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     disable_raw_mode()?;
     let status = tc_core::cmdline::shell_command(cmd, dir).status();
     match status {
@@ -67,6 +87,11 @@ fn run_shell(terminal: &mut DefaultTerminal, cmd: &str, dir: &Path) -> std::io::
     }
     enable_raw_mode()?;
     while !matches!(event::read()?, Event::Key(k) if k.kind == KeyEventKind::Press) {}
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     terminal.clear()
 }

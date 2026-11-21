@@ -32,6 +32,10 @@ pub struct Viewer {
     /// First visible column.
     left: usize,
     encoding: &'static Encoding,
+    /// Wrap long lines at the view width instead of scrolling sideways.
+    pub wrap: bool,
+    /// 0-based number of the top line, `None` once a jump made it unknown.
+    top_line: Option<u64>,
 }
 
 impl Viewer {
@@ -44,6 +48,8 @@ impl Viewer {
             top: 0,
             left: 0,
             encoding: UTF_8,
+            wrap: false,
+            top_line: Some(0),
         })
     }
 
@@ -57,17 +63,26 @@ impl Viewer {
                     break;
                 }
                 self.top = next;
+                self.top_line = self.top_line.map(|n| n + 1);
             } else {
                 if self.top == 0 {
                     break;
                 }
                 self.top = self.prev_line_start(self.top)?;
+                self.top_line = self.top_line.map(|n| n.saturating_sub(1));
             }
         }
         Ok(())
     }
 
+    /// 0-based number of the top line; unknown after a jump (counting would read the file up to there).
+    // shortcut: numbers stay unknown after goto percent, search and End until Home or `g`, upgrade with a lazy line index
+    pub fn top_line(&self) -> Option<u64> {
+        self.top_line
+    }
+
     pub fn home(&mut self) {
+        self.top_line = Some(0);
         self.top = 0;
         self.left = 0;
     }
@@ -95,15 +110,17 @@ impl Viewer {
     pub fn goto_line(&mut self, n: u64) -> io::Result<()> {
         self.file.seek(SeekFrom::Start(0))?;
         let mut reader = BufReader::new(&self.file);
-        let mut pos = 0;
+        let (mut pos, mut skipped) = (0, 0);
         for _ in 1..n {
             let k = reader.skip_until(b'\n')? as u64;
             if pos + k >= self.len {
                 break;
             }
             pos += k;
+            skipped += 1;
         }
         self.top = pos;
+        self.top_line = Some(skipped);
         Ok(())
     }
 
@@ -111,6 +128,7 @@ impl Viewer {
     pub fn goto_percent(&mut self, percent: u64) -> io::Result<()> {
         // u128: size * percent cannot overflow
         let off = (self.len as u128 * percent.min(100) as u128 / 100) as u64;
+        self.top_line = (off == 0).then_some(0);
         self.top = if self.len == 0 || off == 0 {
             0
         } else {
@@ -135,6 +153,7 @@ impl Viewer {
                 }
                 if re.is_match(&self.encoding.decode_without_bom_handling(&buf).0) {
                     self.top = pos;
+                    self.top_line = None;
                     return Ok(true);
                 }
                 pos += n;
@@ -147,6 +166,7 @@ impl Viewer {
             read_line(&mut BufReader::new(&self.file), &mut buf)?;
             if re.is_match(&self.encoding.decode_without_bom_handling(&buf).0) {
                 self.top = pos;
+                self.top_line = None;
                 return Ok(true);
             }
         }
@@ -156,29 +176,44 @@ impl Viewer {
     /// Show the last `page` lines.
     pub fn end(&mut self, page: usize) -> io::Result<()> {
         self.top = self.prev_line_start(self.len)?;
+        self.top_line = None;
         self.scroll(1 - page.max(1) as isize)
     }
 
     /// Up to `count` lines from the top, decoded, tabs expanded, `width` columns from `left`.
     pub fn lines(&mut self, count: usize, width: usize) -> io::Result<Vec<String>> {
+        Ok(self.rows(count, width)?.into_iter().map(|r| r.1).collect())
+    }
+
+    /// Up to `count` screen rows from the top; the flag marks the first row of a line.
+    /// Wrap on: lines are cut into `width` columns (`left` ignored), else one row per line.
+    pub fn rows(&mut self, count: usize, width: usize) -> io::Result<Vec<(bool, String)>> {
         self.file.seek(SeekFrom::Start(self.top))?;
         let mut reader = BufReader::new(&self.file);
-        let mut lines = Vec::with_capacity(count);
+        let mut rows = Vec::with_capacity(count);
         let mut buf = Vec::new();
-        while lines.len() < count {
+        while rows.len() < count {
             if read_line(&mut reader, &mut buf)? == 0 {
                 break;
             }
-            let text = self.encoding.decode_without_bom_handling(&buf).0;
-            lines.push(
-                text.replace('\t', "    ")
-                    .chars()
-                    .skip(self.left)
-                    .take(width)
-                    .collect(),
-            );
+            let text = self
+                .encoding
+                .decode_without_bom_handling(&buf)
+                .0
+                .replace('\t', "    ");
+            if !self.wrap {
+                rows.push((true, text.chars().skip(self.left).take(width).collect()));
+                continue;
+            }
+            let chars: Vec<char> = text.chars().collect();
+            let mut parts = chars.chunks(width.max(1));
+            rows.push((true, parts.next().unwrap_or_default().iter().collect()));
+            for part in parts.take(count - rows.len().min(count)) {
+                rows.push((false, part.iter().collect()));
+            }
         }
-        Ok(lines)
+        rows.truncate(count);
+        Ok(rows)
     }
 
     /// Start of the line after the one at `pos`, or `len` if there is none.
@@ -330,5 +365,29 @@ mod tests {
             v.next_encoding();
         }
         assert_eq!(v.encoding_name(), "windows-1252");
+    }
+
+    #[test]
+    fn wrap_rows_and_line_numbers() {
+        let (_t, mut v) = viewer(b"abcdef\nx\ny\n");
+        v.wrap = true;
+        assert_eq!(
+            v.rows(10, 4).unwrap(),
+            [
+                (true, "abcd".into()),
+                (false, "ef".into()),
+                (true, "x".into()),
+                (true, "y".into())
+            ]
+        );
+        assert_eq!(v.top_line(), Some(0));
+        v.scroll(1).unwrap();
+        assert_eq!(v.top_line(), Some(1));
+        v.goto_line(3).unwrap();
+        assert_eq!(v.top_line(), Some(2));
+        v.goto_percent(50).unwrap();
+        assert_eq!(v.top_line(), None);
+        v.home();
+        assert_eq!(v.top_line(), Some(0));
     }
 }

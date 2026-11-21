@@ -1,6 +1,6 @@
 //! App state and key handling, independent of the terminal.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::ui::{DATE_WIDTH, SIZE_WIDTH};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -19,7 +20,7 @@ use tc_core::archive::{Archive, Format, TempDir};
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::eta::Estimator;
-use tc_core::panel::{Entry, Panel};
+use tc_core::panel::{Entry, Panel, SortKey};
 use tc_core::{Error, find, hotlist, ops, search, view::Viewer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,20 +42,25 @@ impl Op {
 
 pub enum Mode {
     Normal,
-    Confirm(Op, Vec<PathBuf>),
+    /// Delete: targets and the question shown.
+    Confirm(Op, Vec<PathBuf>, String),
     /// Copy/move: editable destination (a new name for a single item, or a directory).
-    Transfer(Op, Vec<PathBuf>, String),
-    Mkdir(String),
+    Transfer(Op, Vec<PathBuf>, LineEdit),
+    Mkdir(LineEdit),
+    /// Shift+F4: name of the file to create (if missing) and edit externally.
+    NewFile(LineEdit),
     /// Quick search text (cursor jumps to the next match).
     Search(String),
     /// Quick filter text (non-matching entries hidden).
     Filter(String),
     /// Command prompt for the external editor (shown when the default is missing).
-    Editor(PathBuf, String),
+    Editor(PathBuf, LineEdit),
     /// Command line, run with Enter.
     Cmd(LineEdit),
     /// Bookmark list with the selected row.
     Hotlist(usize),
+    /// Mount points, selected row and the panel Enter jumps.
+    Drives(Vec<PathBuf>, usize, usize),
     Message(String),
     /// Find results, filled live by a worker thread.
     Found(Found),
@@ -118,7 +124,7 @@ impl Ask {
 
 pub struct Input {
     pub ask: Ask,
-    pub text: String,
+    pub text: LineEdit,
     pattern: String,
     pub error: Option<String>,
 }
@@ -185,7 +191,7 @@ enum Answer {
 pub struct Xfer {
     pub ask: Option<(PathBuf, PathBuf)>,
     /// Name being typed after `r`.
-    pub rename: Option<String>,
+    pub rename: Option<LineEdit>,
     rx: Receiver<XMsg>,
     reply: mpsc::Sender<Answer>,
     pub progress: Arc<ops::Progress>,
@@ -206,17 +212,18 @@ impl Xfer {
         let _ = self.reply.send(a);
     }
 
-    fn key(&mut self, code: KeyCode) {
+    fn key(&mut self, key: KeyEvent) {
+        let code = key.code;
         if let Some(text) = &mut self.rename {
             match code {
                 KeyCode::Enter => {
-                    let name = std::mem::take(text);
+                    let name = std::mem::take(&mut text.text);
                     self.answer(Answer::Rename(name));
                 }
                 KeyCode::Esc => self.rename = None,
-                KeyCode::Backspace => drop(text.pop()),
-                KeyCode::Char(c) => text.push(c),
-                _ => {}
+                _ => {
+                    edit_key(text, key);
+                }
             }
         } else if let Some((_, target)) = &self.ask {
             use Policy::*;
@@ -229,7 +236,7 @@ impl Xfer {
                 KeyCode::Char('N') => self.answer(Answer::All(Newer)),
                 KeyCode::Char('r') => {
                     let name = target.file_name().unwrap_or_default();
-                    self.rename = Some(name.to_string_lossy().into_owned());
+                    self.rename = Some(LineEdit::from(name.to_string_lossy().into_owned()));
                 }
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('c') => self.answer(Answer::Cancel),
                 _ => {}
@@ -262,6 +269,35 @@ impl Job {
     }
 }
 
+/// Edit keys shared by all text prompts; true if `key` was one of them.
+fn edit_key(l: &mut LineEdit, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Left => l.left(),
+        KeyCode::Right => l.right(),
+        KeyCode::Home => l.home(),
+        KeyCode::End => l.end(),
+        KeyCode::Backspace => l.backspace(),
+        KeyCode::Delete => l.delete(),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => l.clear(),
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            l.insert(c)
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Pasted text goes into a one-line prompt without line breaks.
+fn paste_line(l: &mut LineEdit, text: &str) {
+    text.chars()
+        .filter(|c| !matches!(c, '\r' | '\n'))
+        .for_each(|c| l.insert(c));
+}
+
 impl Mode {
     /// The editor shown behind prompts.
     pub fn editor_mut(&mut self) -> Option<&mut Editor> {
@@ -279,7 +315,7 @@ pub const FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
-    ("S-F4 Ext", KeyCode::F(4), KeyModifiers::SHIFT),
+    ("S-F4 New", KeyCode::F(4), KeyModifiers::SHIFT),
     ("F5 Copy", KeyCode::F(5), KeyModifiers::NONE),
     ("F6 Move", KeyCode::F(6), KeyModifiers::NONE),
     ("F7 Mkdir", KeyCode::F(7), KeyModifiers::NONE),
@@ -309,9 +345,14 @@ pub struct App {
     pub search: Option<Regex>,
     /// Short result of the last key, shown in the viewer or editor, e.g. "not found".
     pub note: String,
-    /// Editor clipboard, kept across files.
-    // shortcut: not the system clipboard, upgrade when pasting to other programs matters
+    /// Editor clipboard, kept across files (Ctrl+V); the system clipboard is fed through `copied`.
     clipboard: String,
+    /// Text for the main loop to put on the system clipboard (OSC 52).
+    pub copied: Option<String>,
+    /// Size calculation in a worker thread: directory and its progress (`scanned` = result ready).
+    pub dir_job: Option<(PathBuf, Arc<ops::Progress>)>,
+    /// Viewer line numbers on (`l`).
+    pub view_numbers: bool,
     /// Bookmarked directories and the file they are saved to (none: not persisted).
     pub hotlist: Vec<PathBuf>,
     pub hotlist_file: Option<PathBuf>,
@@ -347,6 +388,9 @@ impl App {
             search: None,
             note: String::new(),
             clipboard: String::new(),
+            copied: None,
+            dir_job: None,
+            view_numbers: false,
             hotlist: Vec::new(),
             hotlist_file: None,
             last_click: None,
@@ -408,6 +452,21 @@ impl App {
             return;
         };
         let area = self.areas[i];
+        if ev.row == area.y {
+            // title row: columns of the size and date fields sort by them
+            let col = usize::from(ev.column - area.x).saturating_sub(1);
+            let w = usize::from(area.width).saturating_sub(2);
+            let key = if col >= w.saturating_sub(DATE_WIDTH) {
+                SortKey::Date
+            } else if col >= w.saturating_sub(DATE_WIDTH + 1 + SIZE_WIDTH) {
+                SortKey::Size
+            } else {
+                SortKey::Name
+            };
+            self.active = i;
+            self.panels[i].set_sort(key);
+            return;
+        }
         // first row is the border
         let Some(row) = usize::from(ev.row - area.y).checked_sub(1) else {
             return;
@@ -472,9 +531,45 @@ impl App {
             Mode::Normal
                 if key.code == KeyCode::F(4) && key.modifiers.contains(KeyModifiers::SHIFT) =>
             {
-                if let Some(path) = self.current_file() {
-                    self.external_edit(path, "code".into());
+                self.new_file_prompt();
+            }
+            Mode::Normal
+                if key.code == KeyCode::F(6) && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.rename();
+            }
+            Mode::Normal if key.code == KeyCode::Enter && self.default_open().is_some() => {
+                if let Some(path) = self.default_open() {
+                    self.open_default(path);
                 }
+            }
+            Mode::Normal
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && matches!(key.code, KeyCode::F(1 | 2)) =>
+            {
+                let panel = usize::from(key.code == KeyCode::F(2));
+                self.mode = Mode::Drives(hotlist::mounts(), 0, panel);
+            }
+            Mode::Normal
+                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('.') =>
+            {
+                if let Err(e) = self.panels[self.active].toggle_hidden() {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
+            Mode::Normal
+                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('=') =>
+            {
+                let path = self.panels[self.active].path().to_owned();
+                self.go(1 - self.active, path);
+            }
+            Mode::Normal
+                if key
+                    .modifiers
+                    .contains(KeyModifiers::ALT | KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char('c' | 'C')) =>
+            {
+                self.copy_paths();
             }
             Mode::Normal
                 if key.modifiers.contains(KeyModifiers::SHIFT)
@@ -501,6 +596,27 @@ impl App {
                 KeyCode::Char('y') => {
                     let [a, b] = &mut self.panels;
                     a.compare_with(b);
+                }
+                KeyCode::Char('u') => {
+                    self.panels.swap(0, 1);
+                    self.lists.swap(0, 1);
+                }
+                KeyCode::Char('r') => {
+                    if let Err(e) = self.panels[self.active].reload() {
+                        self.mode = Mode::Message(e.to_string());
+                    }
+                }
+                // terminals send Ctrl+\ as 0x1c, which crossterm reports as '4'
+                KeyCode::Char('\\' | '4') => {
+                    let root = self.panels[self.active].path().ancestors().last();
+                    if let Some(root) = root.map(Path::to_owned) {
+                        self.go(self.active, root);
+                    }
+                }
+                KeyCode::Insert => self.copy_paths(),
+                KeyCode::F(n @ 3..=6) => {
+                    let key = [SortKey::Name, SortKey::Ext, SortKey::Date, SortKey::Size];
+                    self.panels[self.active].set_sort(key[usize::from(n) - 3]);
                 }
                 _ => {}
             },
@@ -561,47 +677,42 @@ impl App {
                 self.mode = Mode::Filter(text);
             }
             Mode::Editor(path, mut cmd) => match key.code {
-                KeyCode::Enter => self.external_edit(path, cmd),
+                KeyCode::Enter => self.external_edit(path, cmd.text),
                 KeyCode::Esc => {}
-                KeyCode::Backspace => {
-                    cmd.pop();
+                _ => {
+                    edit_key(&mut cmd, key);
                     self.mode = Mode::Editor(path, cmd);
                 }
-                KeyCode::Char(c) => {
-                    cmd.push(c);
-                    self.mode = Mode::Editor(path, cmd);
-                }
-                _ => self.mode = Mode::Editor(path, cmd),
             },
-            Mode::Confirm(op, targets) => match key.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.delete(&targets),
+            Mode::Confirm(op, targets, text) => match key.code {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.delete(&targets, true),
+                KeyCode::Char('p' | 'P') => self.delete(&targets, false),
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
-                _ => self.mode = Mode::Confirm(op, targets),
+                _ => self.mode = Mode::Confirm(op, targets, text),
             },
             Mode::Transfer(op, targets, mut text) => match key.code {
-                KeyCode::Enter => self.run(op, &targets, &text),
+                KeyCode::Enter => self.run(op, &targets, &text.text),
                 KeyCode::Esc => {}
-                code => {
-                    match code {
-                        KeyCode::Backspace => drop(text.pop()),
-                        KeyCode::Char(c) => text.push(c),
-                        _ => {}
-                    }
+                _ => {
+                    edit_key(&mut text, key);
                     self.mode = Mode::Transfer(op, targets, text);
                 }
             },
             Mode::Mkdir(mut name) => match key.code {
-                KeyCode::Enter => self.mkdir(&name),
+                KeyCode::Enter => self.mkdir(&name.text),
                 KeyCode::Esc => {}
-                KeyCode::Backspace => {
-                    name.pop();
+                _ => {
+                    edit_key(&mut name, key);
                     self.mode = Mode::Mkdir(name);
                 }
-                KeyCode::Char(c) => {
-                    name.push(c);
-                    self.mode = Mode::Mkdir(name);
+            },
+            Mode::NewFile(mut name) => match key.code {
+                KeyCode::Enter => self.new_file(&name.text),
+                KeyCode::Esc => {}
+                _ => {
+                    edit_key(&mut name, key);
+                    self.mode = Mode::NewFile(name);
                 }
-                _ => self.mode = Mode::Mkdir(name),
             },
             Mode::Cmd(mut l) => {
                 match key.code {
@@ -609,31 +720,18 @@ impl App {
                     KeyCode::Enter => return self.run_cmd(&l.text),
                     KeyCode::Up => l.prev(&self.history),
                     KeyCode::Down => l.next(&self.history),
-                    KeyCode::Left => l.left(),
-                    KeyCode::Right => l.right(),
-                    KeyCode::Home => l.home(),
-                    KeyCode::End => l.end(),
-                    KeyCode::Backspace => l.backspace(),
-                    KeyCode::Delete => l.delete(),
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        l.clear()
+                    _ => {
+                        edit_key(&mut l, key);
                     }
-                    KeyCode::Char(c)
-                        if !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                    {
-                        l.insert(c)
-                    }
-                    _ => {}
                 }
                 self.mode = Mode::Cmd(l);
             }
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
+            Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
             Mode::Found(f) => self.found_key(key.code, f),
             Mode::Message(_) => {}
             Mode::Xfer(mut x) => {
-                x.key(key.code);
+                x.key(key);
                 self.mode = Mode::Xfer(x);
             }
             Mode::Work(job) => {
@@ -770,11 +868,16 @@ impl App {
                     KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
                         'z' => editor.undo(),
                         'y' => editor.redo(),
-                        'c' => {
-                            self.clipboard = editor.copy().unwrap_or(mem::take(&mut self.clipboard))
-                        }
-                        'x' => {
-                            self.clipboard = editor.cut().unwrap_or(mem::take(&mut self.clipboard))
+                        'c' | 'x' => {
+                            let text = if c.eq_ignore_ascii_case(&'c') {
+                                editor.copy()
+                            } else {
+                                editor.cut()
+                            };
+                            if let Some(text) = text {
+                                self.clipboard.clone_from(&text);
+                                self.copied = Some(text);
+                            }
                         }
                         'v' => editor.insert(&self.clipboard, false),
                         'k' => editor.delete_line(),
@@ -809,6 +912,14 @@ impl App {
                     }
                     KeyCode::Char('e') => {
                         view.next_encoding();
+                        Ok(())
+                    }
+                    KeyCode::Char('w') => {
+                        view.wrap = !view.wrap;
+                        Ok(())
+                    }
+                    KeyCode::Char('l') => {
+                        self.view_numbers = !self.view_numbers;
                         Ok(())
                     }
                     KeyCode::Char('/' | 'f' | 'n' | 'N' | 'g') | KeyCode::F(7) => {
@@ -947,7 +1058,7 @@ impl App {
     fn ask(&mut self, ask: Ask) {
         self.input = Some(Input {
             ask,
-            text: String::new(),
+            text: LineEdit::default(),
             pattern: String::new(),
             error: None,
         });
@@ -1005,22 +1116,18 @@ impl App {
                 Ok(false) => {}
                 Err(e) => input.error = Some(e),
             },
-            KeyCode::Backspace => {
-                input.text.pop();
-                input.error = None;
+            _ => {
+                if edit_key(&mut input.text, key) {
+                    input.error = None;
+                }
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.text.push(c);
-                input.error = None;
-            }
-            _ => {}
         }
         self.input = Some(input);
     }
 
     /// `Ok(true)` when done, `Ok(false)` when the prompt goes on with its next step.
     fn submit(&mut self, input: &mut Input) -> Result<bool, String> {
-        let text = input.text.clone();
+        let text = input.text.text.clone();
         let compile = |p: &str| search::compile(p).map_err(|e| e.to_string());
         match input.ask {
             Ask::Goto => self.goto(&text)?,
@@ -1081,11 +1188,26 @@ impl App {
             KeyCode::PageDown => panel.move_cursor(page),
             KeyCode::Home => panel.move_cursor(isize::MIN),
             KeyCode::End => panel.move_cursor(isize::MAX),
-            KeyCode::Insert | KeyCode::Char(' ') => panel.toggle_select(),
+            KeyCode::Insert => panel.toggle_select(),
+            KeyCode::Char(' ') => {
+                let dir = panel
+                    .current()
+                    .filter(|e| e.is_dir && !e.is_parent() && panel.archive().is_none())
+                    .map(|e| panel.path().join(&e.name));
+                panel.toggle_select();
+                if let Some(dir) = dir {
+                    self.calc_dir_size(dir);
+                }
+            }
             KeyCode::Char('+') => self.ask(Ask::Select),
             KeyCode::Char('-') => self.ask(Ask::Deselect),
             KeyCode::Char('*') => panel.invert_selection(),
             KeyCode::Char(':') => self.mode = Mode::Cmd(LineEdit::default()),
+            KeyCode::Char('~') => {
+                if let Some(home) = std::env::home_dir() {
+                    self.go(self.active, home);
+                }
+            }
             KeyCode::Enter | KeyCode::Backspace => {
                 let archive = panel
                     .current()
@@ -1117,7 +1239,7 @@ impl App {
             KeyCode::F(5) => self.confirm(Op::Copy),
             KeyCode::F(6) => self.confirm(Op::Move),
             KeyCode::F(8) => self.confirm(Op::Delete),
-            KeyCode::F(7) => self.mode = Mode::Mkdir(String::new()),
+            KeyCode::F(7) => self.mode = Mode::Mkdir(LineEdit::default()),
             _ => {}
         }
     }
@@ -1142,22 +1264,175 @@ impl App {
         let targets = self.panels[self.active].targets();
         match targets.as_slice() {
             [] => {}
-            _ if op == Op::Delete => self.mode = Mode::Confirm(op, targets),
+            _ if op == Op::Delete => {
+                let text = self.delete_question();
+                self.mode = Mode::Confirm(op, targets, text);
+            }
             [one] => {
                 let name = one.file_name().unwrap_or_default();
                 let text = self.other_dir().join(name).display().to_string();
-                self.mode = Mode::Transfer(op, targets, text);
+                self.mode = Mode::Transfer(op, targets, LineEdit::from(text));
             }
             _ => {
                 let text = self.other_dir().display().to_string();
-                self.mode = Mode::Transfer(op, targets, text);
+                self.mode = Mode::Transfer(op, targets, LineEdit::from(text));
             }
         }
     }
 
-    fn delete(&mut self, targets: &[PathBuf]) {
-        let result = targets.iter().try_for_each(|src| ops::delete(src));
+    /// "Delete a, b, c…?" from the entries in memory, no I/O.
+    fn delete_question(&self) -> String {
+        let entries = self.panels[self.active].target_entries();
+        let names: Vec<_> = entries
+            .iter()
+            .take(3)
+            .map(|e| e.name.to_string_lossy())
+            .collect();
+        let more = if entries.len() > 3 { "…" } else { "" };
+        let mut text = match entries.len() {
+            1 => format!("Delete {}?", names[0]),
+            n => format!("Delete {n} items: {}{more}?", names.join(", ")),
+        };
+        // a symlink is removed as a link, not recursed into
+        if entries.iter().any(|e| e.is_dir && !e.is_symlink) {
+            text.push_str("\nDirectories are deleted recursively.");
+        }
+        text + "\n\n[y] trash   [p] delete permanently   [n] no"
+    }
+
+    fn delete(&mut self, targets: &[PathBuf], to_trash: bool) {
+        let result = targets.iter().try_for_each(|src| {
+            if to_trash {
+                ops::trash(src)
+            } else {
+                ops::delete(src)
+            }
+        });
         self.finish(result.err().map(|e| e.to_string()));
+    }
+
+    /// Space on a directory: sum its size in a worker thread (a newer request cancels the older one).
+    fn calc_dir_size(&mut self, dir: PathBuf) {
+        if let Some((_, old)) = self.dir_job.take() {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
+        let progress = Arc::new(ops::Progress::default());
+        let (p, d) = (progress.clone(), dir.clone());
+        thread::spawn(move || ops::scan(&[d], &p));
+        self.dir_job = Some((dir, progress));
+    }
+
+    fn go(&mut self, i: usize, path: PathBuf) {
+        if let Err(e) = self.panels[i].go(path) {
+            self.mode = Mode::Message(e.to_string());
+        }
+    }
+
+    fn drives_key(&mut self, code: KeyCode, rows: Vec<PathBuf>, sel: usize, panel: usize) {
+        let last = rows.len().saturating_sub(1);
+        let mut sel = sel.min(last);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => return,
+            KeyCode::Up => sel = sel.saturating_sub(1),
+            KeyCode::Down => sel = (sel + 1).min(last),
+            KeyCode::Enter if !rows.is_empty() => return self.go(panel, rows[sel].clone()),
+            _ => {}
+        }
+        self.mode = Mode::Drives(rows, sel, panel);
+    }
+
+    /// Shift+F6: rename the cursor entry through the move prompt (bare name = same directory).
+    fn rename(&mut self) {
+        let panel = &self.panels[self.active];
+        if panel.archive().is_some() {
+            self.mode = Mode::Message(READ_ONLY.into());
+            return;
+        }
+        let Some(entry) = panel.current().filter(|e| !e.is_parent()) else {
+            return;
+        };
+        let name = entry.name.to_string_lossy().into_owned();
+        let path = panel.path().join(&entry.name);
+        self.mode = Mode::Transfer(Op::Move, vec![path], LineEdit::from(name));
+    }
+
+    /// Ctrl+Insert: paths of the selection or cursor entry to the system clipboard.
+    fn copy_paths(&mut self) {
+        let paths = self.panels[self.active].targets();
+        if !paths.is_empty() {
+            let lines: Vec<_> = paths.iter().map(|p| p.to_string_lossy()).collect();
+            self.copied = Some(lines.join("\n"));
+        }
+    }
+
+    /// Regular file under the cursor that Enter hands to the desktop (archives open in the panel).
+    fn default_open(&self) -> Option<PathBuf> {
+        self.current_file().filter(|p| Format::detect(p).is_none())
+    }
+
+    /// Start the default application detached; `xdg-open` and friends return at once.
+    fn open_default(&mut self, path: PathBuf) {
+        use std::process::Stdio;
+        let spawned = cmdline::open_command(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Err(e) = spawned {
+            self.mode = Mode::Message(format!("{}: {e}", path.display()));
+        }
+    }
+
+    /// Shift+F4: ask for a file name, prefilled with the cursor file.
+    fn new_file_prompt(&mut self) {
+        if self.panels[self.active].archive().is_some() {
+            self.mode = Mode::Message(READ_ONLY.into());
+            return;
+        }
+        let name = self
+            .current_file()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        self.mode = Mode::NewFile(LineEdit::from(name));
+    }
+
+    /// Create `name` unless it exists (never truncates), then edit it externally.
+    fn new_file(&mut self, name: &str) {
+        let dir = self.panels[self.active].path().to_owned();
+        let path = dir.join(name);
+        if name.is_empty() || path.is_dir() {
+            return;
+        }
+        if std::fs::symlink_metadata(&path).is_err() {
+            if let Err(e) = ops::touch(&dir, &OsString::from(name)) {
+                self.mode = Mode::Message(e.to_string());
+                return;
+            }
+            self.finish(None);
+            self.panels[self.active].focus(OsStr::new(name));
+        }
+        self.external_edit(path, "code".into());
+    }
+
+    /// Text pasted by the terminal (bracketed paste): into the editor or the open prompt.
+    pub fn on_paste(&mut self, text: String) {
+        if let Some(input) = &mut self.input {
+            return paste_line(&mut input.text, &text);
+        }
+        match &mut self.mode {
+            Mode::Edit {
+                editor,
+                error: None,
+            } => editor.insert(&text.replace("\r\n", "\n"), false),
+            Mode::Cmd(l) | Mode::Transfer(_, _, l) | Mode::Mkdir(l) | Mode::NewFile(l) => {
+                paste_line(l, &text)
+            }
+            Mode::Editor(_, l) => paste_line(l, &text),
+            Mode::Xfer(Xfer {
+                rename: Some(l), ..
+            }) => paste_line(l, &text),
+            _ => {}
+        }
     }
 
     /// Copy or move to `text`, relative to the active panel. A single item goes to
@@ -1282,7 +1557,7 @@ impl App {
         match spawned {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.mode = Mode::Editor(path, String::new())
+                self.mode = Mode::Editor(path, LineEdit::default())
             }
             Err(e) => self.mode = Mode::Message(format!("{cmd}: {e}")),
         }
@@ -1427,6 +1702,19 @@ impl App {
 
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
+        if let Some((dir, p)) = &self.dir_job
+            && p.scanned.load(Ordering::Acquire)
+        {
+            let (dir, bytes) = (dir.clone(), p.total.load(Ordering::Relaxed));
+            self.dir_job = None;
+            if let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
+                for panel in &mut self.panels {
+                    if panel.path() == parent && !panel.is_virtual() && panel.archive().is_none() {
+                        panel.set_dir_size(name.to_owned(), bytes);
+                    }
+                }
+            }
+        }
         if self.view_tmp.is_some() && !matches!(self.mode, Mode::View { .. }) {
             self.view_tmp = None;
         }
@@ -1506,6 +1794,122 @@ mod tests {
 
     fn key(app: &mut App, code: KeyCode) {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn two_panels(l: &Path, r: &Path) -> App {
+        App::new(Panel::open(l).unwrap(), Panel::open(r).unwrap())
+    }
+
+    fn with(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+        app.on_key(KeyEvent::new(code, mods));
+    }
+
+    #[test]
+    fn delete_confirm_text_trash_choice_and_permanent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("d")).unwrap();
+        for n in ["a", "b", "c"] {
+            std::fs::write(dir.path().join(n), "").unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        for c in "+".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        type_text(&mut app, ""); // select all files
+        key(&mut app, KeyCode::Down); // "d"
+        key(&mut app, KeyCode::Char(' ')); // select the dir too
+        key(&mut app, KeyCode::F(8));
+        let Mode::Confirm(_, _, text) = &app.mode else {
+            panic!("no confirm")
+        };
+        assert!(text.contains("recursively") && text.contains('…'));
+        key(&mut app, KeyCode::Esc);
+        assert!(dir.path().join("a").exists() && dir.path().join("d").exists());
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        assert!(!dir.path().join("a").exists() && !dir.path().join("d").exists());
+    }
+
+    #[test]
+    fn prompt_edits_at_cursor_and_rename_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::F(7));
+        for c in "ac".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Left);
+        key(&mut app, KeyCode::Char('b'));
+        key(&mut app, KeyCode::Enter);
+        assert!(dir.path().join("abc").is_dir());
+        key(&mut app, KeyCode::Down);
+        with(&mut app, KeyCode::F(6), KeyModifiers::SHIFT);
+        with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        type_text(&mut app, "xyz");
+        wait(&mut app);
+        assert!(dir.path().join("xyz").is_dir() && !dir.path().join("abc").exists());
+    }
+
+    #[test]
+    fn swap_root_sort_click_and_hidden() {
+        let (l, r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(l.path().join(".h"), "").unwrap();
+        let mut app = two_panels(l.path(), r.path());
+        app.areas = [Rect::new(0, 0, 40, 10), Rect::new(40, 0, 40, 10)];
+        with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.panels[0].path(), r.path());
+        with(&mut app, KeyCode::Char('='), KeyModifiers::ALT); // right gets left's dir
+        assert_eq!(app.panels[1].path(), r.path());
+        with(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL);
+        assert!(app.panels[0].path().parent().is_none());
+        with(&mut app, KeyCode::Char('.'), KeyModifiers::ALT);
+        assert!(!app.panels[0].shows_hidden());
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 40 + 20,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.panels[1].sort().0, SortKey::Size);
+        with(&mut app, KeyCode::F(5), KeyModifiers::CONTROL); // active panel is 1 now: by date
+        assert_eq!(app.panels[1].sort().0, SortKey::Date);
+    }
+
+    #[test]
+    fn clipboard_and_paste() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        with(&mut app, KeyCode::Insert, KeyModifiers::CONTROL);
+        assert_eq!(
+            app.copied.take(),
+            Some(dir.path().join("a.txt").display().to_string())
+        );
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        with(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+        with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.copied.as_deref(), Some("o"));
+        app.on_paste("a\r\nb".into());
+        assert_eq!(rows(&mut app)[..2], ["a", "bne"]);
+    }
+
+    #[test]
+    fn space_on_dir_calculates_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("d/e")).unwrap();
+        std::fs::write(dir.path().join("d/a"), "123").unwrap();
+        std::fs::write(dir.path().join("d/e/b"), "45").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // "d"
+        key(&mut app, KeyCode::Char(' '));
+        while app.dir_job.is_some() {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(app.panels[0].dir_size(&app.panels[0].entries()[1]), Some(5));
+        assert_eq!(app.panels[0].selection_info(), (1, 5));
     }
 
     #[test]

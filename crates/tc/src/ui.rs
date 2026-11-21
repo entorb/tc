@@ -9,13 +9,21 @@ use regex::Regex;
 
 use crate::app::{App, FOOTER, Found, Mode, Step, Xfer};
 use ratatui::widgets::ListState;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use tc_core::cmdline::LineEdit;
 use tc_core::edit::{Eol, human};
 use tc_core::find::MAX_RESULTS;
+use tc_core::panel::SortKey;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // Norton Commander look: blue panels, light-cyan files, white dirs, cyan cursor bar.
 const PANEL: Style = Style::new().fg(Color::LightCyan).bg(Color::Blue);
 const BAR: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
+/// Cursor bar of the inactive panel: background only, entry colors stay readable.
+const BAR_INACTIVE: Style = Style::new().bg(Color::DarkGray);
+/// Marked files and search hits.
+const MARK: Style = Style::new().fg(Color::Rgb(255, 255, 0)).bold();
 
 /// Border and fill of viewer, editor and find list, same look as the panels.
 fn themed_block() -> Block<'static> {
@@ -25,12 +33,53 @@ fn themed_block() -> Block<'static> {
 }
 
 /// Length of "YY-MM-DD HH:MM".
-const DATE_WIDTH: usize = 14;
+pub(crate) const DATE_WIDTH: usize = 14;
+/// Length of "1023.9 K".
+pub(crate) const SIZE_WIDTH: usize = 8;
+
+/// `1234567` as `1,234,567`.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `s` cut to `w` display columns with a trailing `…`, or padded with spaces to `w`.
+fn fit(s: &str, w: usize) -> String {
+    if w == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    if s.width() <= w {
+        out.push_str(s);
+        used = s.width();
+    } else {
+        for c in s.chars() {
+            let cw = c.width().unwrap_or(0);
+            if used + cw > w - 1 {
+                break;
+            }
+            out.push(c);
+            used += cw;
+        }
+        out.push('…');
+        used += 1;
+    }
+    out.extend(std::iter::repeat_n(' ', w - used));
+    out
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Mode::View { title, view } = &mut app.mode {
         let bottom = format!(
-            " {}%  {}  {}  / or f Find  n/N Next/Prev  g Goto  e Encoding ",
+            " {}%  {}  {}  / or f Find  n/N Next/Prev  g Goto  e Encoding  w Wrap  l Lines ",
             view.percent(),
             view.encoding_name(),
             app.note
@@ -39,13 +88,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let inner = block.inner(frame.area());
         let height = inner.height as usize;
         app.page = height.max(1);
-        let visible: Vec<Line> = match view.lines(height, inner.width as usize) {
-            Ok(lines) => lines
-                .into_iter()
-                .map(|l| highlight(l, app.search.as_ref(), None, 0))
-                .collect(),
-            Err(e) => vec![Line::raw(e.to_string())],
-        };
+        // numbers only while the top line is known, see `Viewer::top_line`
+        let top = view.top_line().filter(|_| app.view_numbers);
+        let gutter = if top.is_some() { 7 } else { 0 };
+        let visible: Vec<Line> =
+            match view.rows(height, (inner.width as usize).saturating_sub(gutter)) {
+                Ok(rows) => {
+                    let mut n = top.unwrap_or(0);
+                    rows.into_iter()
+                        .map(|(first, text)| {
+                            let mut line = highlight(text, app.search.as_ref(), None, 0);
+                            if top.is_some() {
+                                let num = if first {
+                                    format!("{:>6} ", n + 1)
+                                } else {
+                                    " ".repeat(7)
+                                };
+                                line.spans.insert(0, Span::raw(num));
+                            }
+                            n += u64::from(first);
+                            line
+                        })
+                        .collect()
+                }
+                Err(e) => vec![Line::raw(e.to_string())],
+            };
         frame.render_widget(
             Paragraph::new(visible).style(PANEL).block(block),
             frame.area(),
@@ -76,49 +143,49 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     match &app.mode {
-        Mode::Confirm(op, targets) => {
-            let text = format!(
-                "{} {} item(s)?\n\n[y] yes   [n] no",
-                op.verb(),
-                targets.len()
-            );
-            popup(frame, op.verb(), &text);
-        }
-        Mode::Transfer(op, targets, text) => popup(
+        Mode::Confirm(op, _, text) => popup(frame, op.verb(), text),
+        Mode::Transfer(op, targets, l) => popup_edit(
             frame,
             op.verb(),
             &format!(
-                "{} {} item(s) to (edit name or directory):\n{text}_\n\nEnter ok   Esc cancel",
+                "{} {} item(s) to (edit name or directory):",
                 op.verb(),
                 targets.len()
             ),
+            l,
+            "Enter ok   Esc cancel",
         ),
-        Mode::Mkdir(name) => popup(
+        Mode::Mkdir(l) => popup_edit(frame, "Make directory", "", l, "Enter ok   Esc cancel"),
+        Mode::NewFile(l) => popup_edit(
             frame,
-            "Make directory",
-            &format!("{name}_\n\nEnter ok   Esc cancel"),
+            "New file (created if missing, opened in editor)",
+            "",
+            l,
+            "Enter ok   Esc cancel",
         ),
-        Mode::Editor(_, cmd) => popup(
+        Mode::Editor(_, l) => popup_edit(
             frame,
             "Editor not found, enter editor command",
-            &format!("{cmd}_\n\nEnter ok   Esc cancel"),
+            "",
+            l,
+            "Enter ok   Esc cancel",
         ),
-        Mode::Hotlist(sel) => {
-            let rows = &app.hotlist;
-            let start = (sel + 1).saturating_sub(4);
-            let mut text: String = rows
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(4)
-                .map(|(i, p)| format!("{}{}\n", if i == *sel { "> " } else { "  " }, p.display()))
-                .collect();
-            if rows.is_empty() {
-                text.push_str("(empty, Ctrl+D adds the current directory)\n");
-            }
-            text.push_str("\nEnter go  Del remove  Esc close");
-            popup(frame, "Hotlist", &text);
-        }
+        Mode::Hotlist(sel) => list_popup(
+            frame,
+            "Hotlist",
+            &app.hotlist,
+            *sel,
+            "(empty, Ctrl+D adds the current directory)",
+            "Enter go  Del remove  Esc close",
+        ),
+        Mode::Drives(rows, sel, _) => list_popup(
+            frame,
+            "Drives",
+            rows,
+            *sel,
+            "(no drives found)",
+            "Enter go  Esc close",
+        ),
         Mode::Found(f) => draw_found(frame, f),
         Mode::Message(msg) => popup(frame, "Error", &format!("{msg}\n\nany key")),
         Mode::Edit { error, .. } => {
@@ -133,8 +200,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ),
         Mode::Work(_) => {}
         Mode::Xfer(x) => {
-            if let Some(text) = &x.rename {
-                popup(frame, "Rename", &format!("{text}_\n\nEnter ok   Esc back"));
+            if let Some(l) = &x.rename {
+                popup_edit(frame, "Rename", "", l, "Enter ok   Esc back");
             } else if let Some((_, target)) = &x.ask {
                 popup(
                     frame,
@@ -171,23 +238,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_input(frame, app);
 }
 
-/// `dir> text` row; a long line shows its tail so the cursor stays visible.
+/// `dir> text` row.
 fn draw_cmdline(frame: &mut Frame, app: &App, area: Rect) {
     let prompt = format!("{}> ", app.panels[app.active].path().display());
-    let (text, cur) = match &app.mode {
-        Mode::Cmd(l) => (l.text.as_str(), Some(l.text[..l.cur].chars().count())),
-        _ => ("", None),
-    };
-    let line = format!("{prompt}{text}");
-    let skip =
-        (prompt.chars().count() + text.chars().count() + 1).saturating_sub(usize::from(area.width));
-    let shown: String = line.chars().skip(skip).collect();
-    frame.render_widget(
-        Line::raw(shown).style(Style::new().fg(Color::Gray).bg(Color::Black)),
-        area,
-    );
-    if let Some(c) = cur {
-        let col = (prompt.chars().count() + c).saturating_sub(skip);
+    let style = Style::new().fg(Color::Gray).bg(Color::Black);
+    match &app.mode {
+        Mode::Cmd(l) => draw_edit(frame, area, &prompt, l, style),
+        _ => frame.render_widget(Line::raw(prompt).style(style), area),
+    }
+}
+
+/// `prompt` and the text of `l` in one row; scrolls so the cursor stays visible, and sets the terminal cursor.
+fn draw_edit(frame: &mut Frame, area: Rect, prompt: &str, l: &LineEdit, style: Style) {
+    let before = prompt.width() + l.text[..l.cur].width();
+    let skip = (before + 1).saturating_sub(usize::from(area.width));
+    let mut passed = 0;
+    let shown: String = format!("{prompt}{}", l.text)
+        .chars()
+        .skip_while(|c| {
+            let skipping = passed < skip;
+            passed += c.width().unwrap_or(0);
+            skipping
+        })
+        .collect();
+    frame.render_widget(Line::raw(shown).style(style), area);
+    let col = before.saturating_sub(skip);
+    if col < usize::from(area.width) && area.height > 0 {
         frame.set_cursor_position((area.x + col as u16, area.y));
     }
 }
@@ -216,7 +292,7 @@ fn draw_found(frame: &mut Frame, f: &Found) {
         .style(PANEL)
         .block(themed_block().title(title))
         .highlight_style(BAR);
-    let mut st = ListState::default().with_selected(Some(f.sel - start));
+    let mut st = ListState::default().with_selected(Some(f.sel.saturating_sub(start)));
     frame.render_widget(Clear, area);
     frame.render_stateful_widget(list, area, &mut st);
 }
@@ -254,10 +330,12 @@ fn draw_input(frame: &mut Frame, app: &mut App) {
     }
     if let Some(input) = &app.input {
         let error = input.error.as_deref().unwrap_or_default();
-        popup(
+        popup_edit(
             frame,
             input.ask.title(),
-            &format!("{}_\n{error}\nEnter ok   Esc cancel", input.text),
+            "",
+            &input.text,
+            &format!("{error}\nEnter ok   Esc cancel"),
         );
     }
 }
@@ -284,10 +362,13 @@ fn draw_editor(
         .collect();
     frame.render_widget(Paragraph::new(lines).style(PANEL).block(block), main);
     let (line, col) = editor.cursor;
-    frame.set_cursor_position((
-        inner.x + (col - editor.left) as u16,
-        inner.y + (line - editor.top) as u16,
-    ));
+    let (dx, dy) = (
+        col.saturating_sub(editor.left),
+        line.saturating_sub(editor.top),
+    );
+    if dx < usize::from(inner.width) && dy < usize::from(inner.height) {
+        frame.set_cursor_position((inner.x + dx as u16, inner.y + dy as u16));
+    }
     let eol = match editor.eol() {
         Eol::Lf => "LF",
         Eol::Crlf => "CRLF",
@@ -315,7 +396,7 @@ fn highlight(
     let mut styles = vec![Style::new(); row.chars().count()];
     let at = |byte: usize| row[..byte].chars().count();
     for m in re.into_iter().flat_map(|re| re.find_iter(&row)) {
-        styles[at(m.start())..at(m.end())].fill(Style::new().fg(Color::Black).bg(Color::Yellow));
+        styles[at(m.start())..at(m.end())].fill(MARK);
     }
     if let Some((a, b)) = sel {
         let end = styles.len();
@@ -343,25 +424,44 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
     let active = i == app.active;
     let width = area.width.saturating_sub(2) as usize;
     let today = jiff::ZonedDateTime::now().date();
+    let date_of = |e: &tc_core::panel::Entry| {
+        e.modified
+            .and_then(|t| jiff::ZonedDateTime::try_from(t).ok())
+            .map_or_else(String::new, |z| fmt_date(&z, today))
+    };
+    let dir_size = |e: &tc_core::panel::Entry| -> Option<String> {
+        if !e.is_dir || e.is_parent() || panel.archive().is_some() {
+            return None;
+        }
+        match &app.dir_job {
+            Some((p, _)) if *p == panel.path().join(&e.name) => Some("...".into()),
+            _ => panel.dir_size(e).map(human),
+        }
+    };
     let items: Vec<ListItem> = panel
         .entries()
         .iter()
         .map(|e| {
-            let prefix = if e.is_dir { "/" } else { " " };
+            let prefix = match (e.is_symlink, e.is_dir) {
+                (true, true) => '~',
+                (true, false) => '@',
+                (false, true) => '/',
+                _ => ' ',
+            };
             let name = format!("{prefix}{}", e.name.to_string_lossy());
             let size = if e.is_dir {
-                "<DIR>".to_owned()
+                dir_size(e).unwrap_or_else(|| "<DIR>".to_owned())
             } else {
-                e.size.to_string()
+                human(e.size)
             };
-            let date = e
-                .modified
-                .and_then(|t| jiff::ZonedDateTime::try_from(t).ok())
-                .map_or_else(String::new, |z| fmt_date(&z, today));
-            let pad = width.saturating_sub(size.len() + DATE_WIDTH + 2);
-            let row = format!("{name:<pad$.pad$} {size} {date:>DATE_WIDTH$}");
+            let date = date_of(e);
+            let pad = width.saturating_sub(SIZE_WIDTH + DATE_WIDTH + 2);
+            let row = format!(
+                "{} {size:>SIZE_WIDTH$} {date:>DATE_WIDTH$}",
+                fit(&name, pad)
+            );
             let style = if panel.is_selected(e) {
-                Style::new().fg(Color::Yellow).bold()
+                MARK
             } else if e.is_symlink {
                 Style::new().fg(Color::Magenta)
             } else if e.is_dir {
@@ -376,17 +476,50 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
     if panel.is_virtual() {
         title += " [found]";
     }
+    match panel.sort() {
+        (SortKey::Name, false) => {}
+        (key, rev) => {
+            let key = format!("{key:?}").to_lowercase();
+            title += &format!(" [{key}{}]", if rev { " desc" } else { "" });
+        }
+    }
+    if !panel.shows_hidden() {
+        title += " [no hidden]";
+    }
     match &app.mode {
         Mode::Search(t) if active => title += &format!(" [search: {t}]"),
         Mode::Filter(t) if active => title += &format!(" [filter: {t}]"),
         _ if !panel.filter().is_empty() => title += &format!(" [filter: {}]", panel.filter()),
         _ => {}
     }
+    // status line: selection sum (cached in the panel), else the cursor entry in full
+    let (count, bytes) = panel.selection_info();
+    let info = match panel.current().filter(|e| !e.is_parent()) {
+        _ if count > 0 => format!(" {count} selected, {} bytes ", thousands(bytes)),
+        Some(e) => {
+            let size = match dir_size(e) {
+                Some(s) => s,
+                None if e.is_dir => "<DIR>".to_owned(),
+                None => thousands(e.size),
+            };
+            let link = e
+                .link
+                .as_ref()
+                .map_or(String::new(), |l| format!("  -> {}", l.display()));
+            format!(
+                " {}  {size}  {}{link} ",
+                e.name.to_string_lossy(),
+                date_of(e)
+            )
+        }
+        None => String::new(),
+    };
     let block = Block::bordered()
         .border_type(BorderType::Double)
         .title(title)
+        .title_bottom(info)
         .style(PANEL);
-    let highlight = if active { BAR } else { PANEL };
+    let highlight = if active { BAR } else { BAR_INACTIVE };
     let list = List::new(items).block(block).highlight_style(highlight);
     let state = &mut app.lists[i];
     state.select(Some(panel.cursor()));
@@ -449,9 +582,17 @@ const HELP_MAIN: &str = "\
 == Navigation ==
 Up/Down/PgUp/PgDn/Home/End  move cursor
 Tab  switch panel
-Enter  open directory, file or archive
+Enter  open directory, archive or file (default app)
 Backspace  parent directory
 Alt+Left / Alt+Right  history back / forward
+~  home directory
+Ctrl+\\  root directory
+Ctrl+R  refresh
+Alt+F1 / Alt+F2  drives for left / right panel
+Ctrl+U  swap panels
+Alt+=  other panel to this directory
+Alt+.  show / hide hidden files
+Ctrl+F3/F4/F5/F6  sort name/ext/date/size (again: reverse)
 Ctrl+B  hotlist
 Ctrl+D  add directory to hotlist
 Esc  clear filter, leave found list
@@ -473,9 +614,11 @@ Alt+F7  find files
 == Files ==
 F3  view
 F4  edit
-Shift+F4  edit in external editor
+Shift+F4  create file, edit in external editor
+Ctrl+Insert / Alt+Shift+C  copy paths to clipboard
 F5  copy
 F6  move
+Shift+F6  rename
 F7  make directory
 F8  delete
 F10 / q  quit";
@@ -493,6 +636,8 @@ N  previous match
 
 == View ==
 e  next encoding
+w  wrap long lines
+l  line numbers
 Esc / q / F3 / F10  close";
 
 const HELP_EDIT: &str = "\
@@ -515,30 +660,91 @@ F4 / Ctrl+R  replace all
 Ctrl+Z  undo
 Ctrl+Y  redo
 Shift+arrows  select
-Ctrl+C  copy
+Ctrl+C  copy (also system clipboard)
 Ctrl+X  cut
-Ctrl+V  paste
+Ctrl+V  paste (terminal paste works too)
 Ctrl+K  delete line";
 
 fn popup(frame: &mut Frame, title: &str, text: &str) {
-    let width = frame.area().width.min(60);
-    let [h] = Layout::horizontal([Constraint::Length(width)])
+    popup_area(frame, title, text);
+}
+
+/// Centered popup sized to its text; returns the inner area.
+fn popup_area(frame: &mut Frame, title: &str, text: &str) -> Rect {
+    let screen = frame.area();
+    let longest = text.lines().map(UnicodeWidthStr::width).max().unwrap_or(0);
+    let width = (longest + 4)
+        .max(60)
+        .min(usize::from(screen.width.saturating_sub(2)));
+    let inner_w = width.saturating_sub(2).max(1);
+    let rows: usize = text
+        .lines()
+        .map(|l| l.width().div_ceil(inner_w).max(1))
+        .sum::<usize>()
+        + 2;
+    let rows = rows.max(7).min(usize::from(screen.height));
+    let [h] = Layout::horizontal([Constraint::Length(width as u16)])
         .flex(Flex::Center)
-        .areas(frame.area());
-    let rows = (text.lines().count() as u16 + 2).max(7);
-    let [area] = Layout::vertical([Constraint::Length(rows)])
+        .areas(screen);
+    let [area] = Layout::vertical([Constraint::Length(rows as u16)])
         .flex(Flex::Center)
         .areas(h);
     frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Double)
+        .title(title);
+    let inner = block.inner(area);
     let para = Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .style(BAR)
-        .block(
-            Block::bordered()
-                .border_type(BorderType::Double)
-                .title(title),
-        );
+        .block(block);
     frame.render_widget(para, area);
+    inner
+}
+
+/// Popup with a text field: `head` lines, the field, then `tail`.
+fn popup_edit(frame: &mut Frame, title: &str, head: &str, l: &LineEdit, tail: &str) {
+    let text = if head.is_empty() {
+        format!("\n{tail}")
+    } else {
+        format!("{head}\n\n{tail}")
+    };
+    let inner = popup_area(frame, title, &text);
+    let row = head.lines().count() as u16;
+    if row < inner.height {
+        let line = Rect {
+            y: inner.y + row,
+            height: 1,
+            ..inner
+        };
+        draw_edit(frame, line, "", l, BAR);
+    }
+}
+
+/// Bookmark-like list: up to 4 rows around the selection.
+fn list_popup(
+    frame: &mut Frame,
+    title: &str,
+    rows: &[PathBuf],
+    sel: usize,
+    empty: &str,
+    footer: &str,
+) {
+    let start = (sel + 1).saturating_sub(4);
+    let mut text: String = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(4)
+        .map(|(i, p)| format!("{}{}\n", if i == sel { "> " } else { "  " }, p.display()))
+        .collect();
+    if rows.is_empty() {
+        text.push_str(empty);
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str(footer);
+    popup(frame, title, &text);
 }
 
 #[cfg(test)]
@@ -553,7 +759,7 @@ mod tests {
         std::fs::write(tmp.path().join("file.txt"), "hi").unwrap();
         let open = || Panel::open(tmp.path()).unwrap();
         let mut app = App::new(open(), open());
-        app.mode = Mode::Mkdir("x".into());
+        app.mode = Mode::Mkdir(LineEdit::from("x".to_owned()));
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
         let screen: String = term
@@ -644,7 +850,7 @@ mod tests {
         let marked: String = line
             .spans
             .iter()
-            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .filter(|s| s.style == MARK)
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(marked, "ooo");
@@ -652,5 +858,89 @@ mod tests {
         // selection overlay and multibyte text do not panic or shift columns
         let line = highlight("é o".into(), Some(&re), Some((0, 2)), 0);
         assert_eq!(line.to_string(), "é o");
+    }
+
+    #[test]
+    fn thousands_and_fit() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1000), "1,000");
+        assert_eq!(thousands(1234567), "1,234,567");
+        assert_eq!(fit("abcdef", 4), "abc…");
+        assert_eq!(fit("ab", 4), "ab  ");
+        assert_eq!(fit("x", 0), "");
+        let w = fit("日本語", 5);
+        assert_eq!(w.width(), 5);
+        assert!(w.trim_end().ends_with('…'));
+    }
+
+    fn screen(term: &Terminal<TestBackend>) -> String {
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn status_line_shows_selection_and_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "123").unwrap();
+        std::fs::write(tmp.path().join("b"), "12345").unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.panels[0].select_mask("*", true);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&term).contains("2 selected, 8 bytes"));
+    }
+
+    #[test]
+    fn draws_every_screen_on_tiny_terminals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("e.txt");
+        std::fs::write(&file, "hello\nworld").unwrap();
+        for (w, h) in [(1, 1), (10, 3), (20, 5), (80, 4)] {
+            let open = || Panel::open(tmp.path()).unwrap();
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut app = App::new(open(), open());
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            app.mode = Mode::Mkdir(LineEdit::from("x".to_owned()));
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            app.mode = Mode::Normal;
+            app.help = true;
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            app.help = false;
+            app.mode = Mode::View {
+                title: "t".into(),
+                view: tc_core::view::Viewer::open(&file).unwrap(),
+            };
+            app.view_numbers = true;
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let editor = tc_core::edit::Editor::open(
+                &file,
+                &std::sync::atomic::AtomicU64::new(0),
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap();
+            app.mode = Mode::Edit {
+                editor,
+                error: None,
+            };
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            app.mode = Mode::Normal;
+            let alt_f7 = ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::F(7),
+                ratatui::crossterm::event::KeyModifiers::ALT,
+            );
+            app.on_key(alt_f7);
+            for _ in 0..2 {
+                app.on_key(ratatui::crossterm::event::KeyEvent::from(
+                    ratatui::crossterm::event::KeyCode::Enter,
+                ));
+            }
+            term.draw(|f| draw(f, &mut app)).unwrap();
+        }
     }
 }

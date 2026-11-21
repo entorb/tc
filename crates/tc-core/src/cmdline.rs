@@ -18,6 +18,16 @@ pub struct LineEdit {
     draft: String,
 }
 
+impl From<String> for LineEdit {
+    fn from(text: String) -> Self {
+        Self {
+            cur: text.len(),
+            text,
+            ..Self::default()
+        }
+    }
+}
+
 impl LineEdit {
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cur, c);
@@ -139,6 +149,28 @@ pub fn shell_command(cmd: &str, dir: &Path) -> Command {
     c
 }
 
+/// Open `path` with the desktop's default application.
+#[cfg(target_os = "macos")]
+pub fn open_command(path: &Path) -> Command {
+    let mut c = Command::new("open");
+    c.arg(path);
+    c
+}
+
+#[cfg(windows)]
+pub fn open_command(path: &Path) -> Command {
+    let mut c = Command::new("cmd");
+    c.args(["/C", "start", ""]).arg(path);
+    c
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn open_command(path: &Path) -> Command {
+    let mut c = Command::new("xdg-open");
+    c.arg(path);
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +232,20 @@ mod tests {
         assert!(load_history(&file).unwrap().is_empty());
         save_history(&file, &h).unwrap();
         assert_eq!(load_history(&file).unwrap(), h);
+    }
+
+    #[test]
+    fn open_command_per_platform() {
+        let c = open_command(Path::new("f.txt"));
+        let prog = if cfg!(windows) {
+            "cmd"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(c.get_program(), prog);
+        assert_eq!(LineEdit::from("äb".to_owned()).cur, 3);
     }
 
     #[test]

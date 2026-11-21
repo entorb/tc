@@ -34,12 +34,15 @@ pub enum SizeCheck {
 }
 
 pub fn human(n: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    const UNITS: [&str; 4] = ["B", "K", "M", "G"];
     let mut v = n as f64;
     let mut i = 0;
     while v >= 1024.0 && i < UNITS.len() - 1 {
         v /= 1024.0;
         i += 1;
+    }
+    if i == 0 {
+        return format!("{n} B");
     }
     format!("{v:.1} {}", UNITS[i])
 }
@@ -714,6 +717,12 @@ impl<W: Write> Sink<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_plain_bytes() {
+        assert_eq!(human(512), "512 B");
+        assert_eq!(human(2048), "2.0 K");
+    }
 
     fn open(p: &Path) -> Result<Editor> {
         Editor::open(p, &AtomicU64::new(0), &AtomicBool::new(false))
