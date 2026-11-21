@@ -463,7 +463,7 @@ pub struct App {
     /// Entry extracted from an archive for the viewer; removed once the viewer is closed.
     view_tmp: Option<TempDir>,
     /// File Stats left for a viewer or editor; back once the mode is `Normal` again.
-    stats: Option<Stats>,
+    pub stats: Option<Stats>,
 }
 
 /// Largest archive entry F3/F4 extracts to a temp file.
@@ -1097,7 +1097,7 @@ impl App {
         if cmd.is_empty() {
             return;
         }
-        if self.panels[self.active].archive().is_some() {
+        if self.stats.is_none() && self.panels[self.active].archive().is_some() {
             self.mode = Mode::Message("No commands inside an archive.".into());
             return;
         }
@@ -1107,7 +1107,14 @@ impl App {
         {
             self.mode = Mode::Message(e.to_string());
         }
-        self.run = Some((cmd.to_owned(), self.panels[self.active].path().to_owned()));
+        self.run = Some((cmd.to_owned(), self.cmd_dir()));
+    }
+
+    /// Where the command line runs: the browsed File Stats directory, else the active panel.
+    pub fn cmd_dir(&self) -> PathBuf {
+        self.stats
+            .as_ref()
+            .map_or_else(|| self.panels[self.active].path().to_owned(), Stats::path)
     }
 
     /// After a command ran: files may have changed in both panels.
@@ -1199,6 +1206,72 @@ impl App {
             progress,
             confirm: None,
         });
+    }
+
+    /// Keys in File Stats; only Esc/q/F10 (cancel) work while scanning.
+    fn stats_mode_key(&mut self, mut st: Stats, key: KeyEvent) {
+        if st.confirm.is_some() {
+            return self.stats_confirm_key(st, key.code);
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(10) => {
+                st.progress.cancel.store(true, Ordering::Relaxed);
+                return;
+            }
+            _ if st.scanning() => {}
+            KeyCode::F(3 | 4) => return self.stats_open(st, key),
+            KeyCode::F(8) | KeyCode::Char('d') => {
+                st.confirm = st.current().children.get(st.sel).map(|n| {
+                    let mut text = format!("Delete {}?", n.name.to_string_lossy());
+                    if n.is_dir {
+                        text.push_str("\nDirectories are deleted recursively.");
+                    }
+                    text + "\n\n[y] trash   [p] delete permanently   [n] no"
+                });
+            }
+            KeyCode::Char(':') => {
+                self.stats = Some(st);
+                self.mode = Mode::Cmd(LineEdit::default());
+                return;
+            }
+            code => st.key(code, self.page),
+        }
+        self.mode = Mode::Stats(st);
+    }
+
+    /// Answer to the File Stats delete question: the entry leaves the tree without a rescan.
+    fn stats_confirm_key(&mut self, mut st: Stats, code: KeyCode) {
+        let to_trash = match code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => true,
+            KeyCode::Char('p' | 'P') => false,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                st.confirm = None;
+                self.mode = Mode::Stats(st);
+                return;
+            }
+            _ => {
+                self.mode = Mode::Stats(st);
+                return;
+            }
+        };
+        st.confirm = None;
+        let Some(name) = st.current().children.get(st.sel).map(|n| n.name.clone()) else {
+            self.mode = Mode::Stats(st);
+            return;
+        };
+        let target = st.path().join(name);
+        let result = if to_trash {
+            ops::trash(&target)
+        } else {
+            ops::delete(&target)
+        };
+        if result.is_ok() {
+            stats::remove(&mut st.root, &st.path, st.sel);
+            st.sel = st.sel.min(st.current().children.len().saturating_sub(1));
+        }
+        // `tick` brings the stats back once any error message is closed
+        self.stats = Some(st);
+        self.finish(result.err().map(|e| e.to_string()));
     }
 
     /// F3 view, F4 edit, Shift+F4 external editor on the selected file of File Stats.
@@ -2153,6 +2226,40 @@ mod tests {
         assert_eq!(app.panels[0].selection_info(), (1, 5));
         // the right panel shows the same directory but was not asked
         assert_eq!(app.panels[1].dir_size(&app.panels[1].entries()[1]), None);
+    }
+
+    #[test]
+    fn stats_deletes_without_rescan_and_runs_cmd_in_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("many")).unwrap();
+        std::fs::write(tmp.path().join("many").join("a"), "x").unwrap();
+        std::fs::write(tmp.path().join("big"), "x".repeat(100)).unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('n'));
+        assert!(tmp.path().join("big").exists());
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        app.tick();
+        assert!(!tmp.path().join("big").exists());
+        match &app.mode {
+            Mode::Stats(st) => {
+                assert_eq!((st.root.size, st.root.files), (1, 1));
+                assert_eq!(st.current().children[0].name, "many");
+            }
+            _ => panic!("not in stats"),
+        }
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char(':'));
+        type_text(&mut app, "ls");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.run, Some(("ls".into(), tmp.path().join("many"))));
+        app.tick();
+        assert!(matches!(app.mode, Mode::Stats(_)));
     }
 
     #[test]
