@@ -9,6 +9,8 @@ use std::time::SystemTime;
 use crate::{Result, io_err};
 
 const PARENT: &str = "..";
+/// Directory history entries kept per panel.
+const HISTORY_MAX: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -45,6 +47,9 @@ pub struct Panel {
     /// Lowercased name filter; `all` keeps the unfiltered list while it is set.
     filter: String,
     all: Option<Vec<Entry>>,
+    /// Visited directories, oldest first, `pos` is the current one.
+    history: Vec<PathBuf>,
+    pos: usize,
 }
 
 impl Panel {
@@ -52,6 +57,8 @@ impl Panel {
         let path = std::path::absolute(path).map_err(io_err(path))?;
         let entries = read_entries(&path)?;
         Ok(Self {
+            history: vec![path.clone()],
+            pos: 0,
             path,
             entries,
             cursor: 0,
@@ -251,8 +258,41 @@ impl Panel {
         names.into_iter().map(|n| self.path.join(n)).collect()
     }
 
-    /// Read the new directory first so a failure leaves the panel unchanged.
+    /// Jump to `path` (e.g. a bookmark); a failure leaves the panel unchanged.
+    pub fn go(&mut self, path: PathBuf) -> Result<()> {
+        self.change_dir(path)
+    }
+
+    /// Step back (`-1`) or forward (`1`) in the directory history.
+    pub fn history_step(&mut self, delta: isize) -> Result<()> {
+        let Some(i) = self
+            .pos
+            .checked_add_signed(delta)
+            .filter(|&i| i < self.history.len())
+        else {
+            return Ok(());
+        };
+        self.load(self.history[i].clone())?;
+        self.pos = i;
+        Ok(())
+    }
+
+    /// New directory: visiting it drops the forward history; repeats are not recorded.
     fn change_dir(&mut self, path: PathBuf) -> Result<()> {
+        self.load(path.clone())?;
+        if self.history.get(self.pos) != Some(&path) {
+            self.history.truncate(self.pos + 1);
+            self.history.push(path);
+            if self.history.len() > HISTORY_MAX {
+                self.history.remove(0);
+            }
+            self.pos = self.history.len() - 1;
+        }
+        Ok(())
+    }
+
+    /// Read the new directory first so a failure leaves the panel unchanged.
+    fn load(&mut self, path: PathBuf) -> Result<()> {
         self.entries = read_entries(&path)?;
         self.all = None;
         self.filter.clear();
@@ -312,6 +352,39 @@ fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_back_forward_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = a.join("b");
+        fs::create_dir_all(&b).unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        p.go(a.clone()).unwrap();
+        p.go(a.clone()).unwrap(); // consecutive duplicate
+        p.go(b.clone()).unwrap();
+        assert_eq!(p.history.len(), 3);
+        p.history_step(-1).unwrap();
+        assert_eq!(p.path(), a);
+        p.history_step(-1).unwrap();
+        p.history_step(-1).unwrap(); // at start: no-op
+        assert_eq!(p.path(), std::path::absolute(tmp.path()).unwrap());
+        p.history_step(1).unwrap();
+        assert_eq!(p.path(), a);
+        p.go(tmp.path().to_owned()).unwrap(); // drops forward entries
+        assert_eq!(p.history.len(), 3);
+        p.history_step(1).unwrap();
+        assert_eq!(p.path(), tmp.path());
+        for i in 0..HISTORY_MAX + 5 {
+            p.go(if i % 2 == 0 {
+                a.clone()
+            } else {
+                tmp.path().to_owned()
+            })
+            .unwrap();
+        }
+        assert_eq!(p.history.len(), HISTORY_MAX);
+    }
 
     fn names(p: &Panel) -> Vec<String> {
         p.entries()
