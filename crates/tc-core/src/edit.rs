@@ -1,11 +1,14 @@
 //! Text editor buffer: rope in UTF-8 with LF line ends, original encoding and EOL kept as metadata.
 
+use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use encoding_rs::{Encoder, EncoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE};
+use regex::Regex;
 use ropey::{Rope, RopeBuilder};
 
 use crate::{Error, Result, io_err};
@@ -14,6 +17,8 @@ use crate::{Error, Result, io_err};
 const LARGE: u64 = 1 << 30;
 const CHUNK: usize = 64 * 1024;
 const BINARY_PROBE: usize = 8 * 1024;
+/// Undo steps kept; older ones are dropped.
+const MAX_UNDO: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Eol {
@@ -62,6 +67,13 @@ pub(crate) fn check_size_with(path: &Path, free: u64) -> Result<SizeCheck> {
     })
 }
 
+/// One text change in char indices, enough to undo and redo it.
+struct Change {
+    at: usize,
+    removed: String,
+    inserted: String,
+}
+
 pub struct Editor {
     rope: Rope,
     path: PathBuf,
@@ -75,6 +87,11 @@ pub struct Editor {
     pub top: usize,
     pub left: usize,
     dirty: bool,
+    /// Selection anchor as char index; the other end is the cursor.
+    sel: Option<usize>,
+    /// Steps of changes, each undone as one unit.
+    undo: VecDeque<Vec<Change>>,
+    redo: Vec<Vec<Change>>,
 }
 
 impl Editor {
@@ -131,6 +148,9 @@ impl Editor {
             top: 0,
             left: 0,
             dirty: false,
+            sel: None,
+            undo: VecDeque::new(),
+            redo: Vec::new(),
         })
     }
 
@@ -172,39 +192,287 @@ impl Editor {
         self.rope.line_to_char(self.cursor.0) + self.cursor.1
     }
 
-    pub fn insert_char(&mut self, c: char) {
-        self.rope.insert_char(self.idx(), c);
-        self.dirty = true;
-        if c == '\n' {
-            self.cursor = (self.cursor.0 + 1, 0);
-        } else {
-            self.cursor.1 += 1;
+    fn line_text(&self, i: usize) -> String {
+        let mut s: String = self.rope.line(i).chunks().collect();
+        if s.ends_with('\n') {
+            s.pop();
         }
+        s
+    }
+
+    /// Replaces `remove` chars at `at` by `ins`; the caller records the returned change.
+    fn splice(&mut self, at: usize, remove: usize, ins: &str) -> Change {
+        let removed = self.rope.slice(at..at + remove).to_string();
+        if remove > 0 {
+            self.rope.remove(at..at + remove);
+        }
+        if !ins.is_empty() {
+            self.rope.insert(at, ins);
+        }
+        self.dirty = true;
+        Change {
+            at,
+            removed,
+            inserted: ins.to_owned(),
+        }
+    }
+
+    /// Adds an undo step; with `merge` consecutive typing or deleting joins the last step.
+    fn record(&mut self, c: Change, merge: bool) {
+        self.redo.clear();
+        let len = |s: &str| s.chars().count();
+        if merge && let Some([last]) = self.undo.back_mut().map(Vec::as_mut_slice) {
+            if c.removed.is_empty()
+                && last.removed.is_empty()
+                && last.at + len(&last.inserted) == c.at
+                && !c.inserted.contains('\n')
+                && !last.inserted.contains('\n')
+            {
+                last.inserted.push_str(&c.inserted);
+                return;
+            }
+            if c.inserted.is_empty() && last.inserted.is_empty() {
+                if c.at + len(&c.removed) == last.at {
+                    last.at = c.at;
+                    last.removed.insert_str(0, &c.removed);
+                    return;
+                }
+                if c.at == last.at {
+                    last.removed.push_str(&c.removed);
+                    return;
+                }
+            }
+        }
+        self.undo.push_back(vec![c]);
+        if self.undo.len() > MAX_UNDO {
+            self.undo.pop_front();
+        }
+    }
+
+    pub fn undo(&mut self) {
+        let Some(step) = self.undo.pop_back() else {
+            return;
+        };
+        let mut cursor = 0;
+        for c in step.iter().rev() {
+            self.splice(c.at, c.inserted.chars().count(), &c.removed);
+            cursor = c.at + c.removed.chars().count();
+        }
+        self.redo.push(step);
+        self.sel = None;
+        self.goto_idx(cursor);
+    }
+
+    pub fn redo(&mut self) {
+        let Some(step) = self.redo.pop() else {
+            return;
+        };
+        let mut cursor = 0;
+        for c in &step {
+            self.splice(c.at, c.removed.chars().count(), &c.inserted);
+            cursor = c.at + c.inserted.chars().count();
+        }
+        self.undo.push_back(step);
+        self.sel = None;
+        self.goto_idx(cursor);
+    }
+
+    /// Selected char range, `None` if empty.
+    fn selection(&self) -> Option<Range<usize>> {
+        let (a, b) = (self.sel?, self.idx());
+        (a != b).then(|| a.min(b)..a.max(b))
+    }
+
+    /// Selected columns of `line`, line end excluded.
+    pub fn selection_cols(&self, line: usize) -> Option<(usize, usize)> {
+        let r = self.selection()?;
+        let start = self.rope.line_to_char(line);
+        let (a, b) = (r.start.max(start), r.end.min(start + self.line_len(line)));
+        (a < b).then(|| (a - start, b - start))
+    }
+
+    /// Call before a cursor move: keeps or drops the selection (shift held or not).
+    pub fn select(&mut self, extend: bool) {
+        let idx = self.idx();
+        self.sel = extend.then(|| self.sel.unwrap_or(idx));
+    }
+
+    pub fn copy(&self) -> Option<String> {
+        self.selection().map(|r| self.rope.slice(r).to_string())
+    }
+
+    pub fn cut(&mut self) -> Option<String> {
+        let text = self.copy();
+        self.delete_selection();
+        text
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some(r) = self.selection() else {
+            self.sel = None;
+            return false;
+        };
+        let c = self.splice(r.start, r.len(), "");
+        self.record(c, false);
+        self.sel = None;
+        self.goto_idx(r.start);
+        true
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.insert(&c.to_string(), true);
+    }
+
+    /// Insert at the cursor, replacing the selection.
+    pub fn insert(&mut self, s: &str, merge: bool) {
+        self.delete_selection();
+        let at = self.idx();
+        let c = self.splice(at, 0, s);
+        self.record(c, merge);
+        self.goto_idx(at + s.chars().count());
     }
 
     pub fn backspace(&mut self) {
         let idx = self.idx();
-        if idx == 0 {
+        if self.delete_selection() || idx == 0 {
             return;
         }
-        self.move_h(-1);
-        self.rope.remove(idx - 1..idx);
-        self.dirty = true;
+        let c = self.splice(idx - 1, 1, "");
+        self.record(c, true);
+        self.goto_idx(idx - 1);
     }
 
     pub fn delete(&mut self) {
         let idx = self.idx();
-        if idx < self.rope.len_chars() {
-            self.rope.remove(idx..idx + 1);
-            self.dirty = true;
+        if self.delete_selection() || idx >= self.rope.len_chars() {
+            return;
         }
+        let c = self.splice(idx, 1, "");
+        self.record(c, true);
+    }
+
+    pub fn delete_line(&mut self) {
+        let line = self.cursor.0;
+        let start = self.rope.line_to_char(line);
+        let end = if line + 1 < self.line_count() {
+            self.rope.line_to_char(line + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        let c = self.splice(start, end - start, "");
+        self.record(c, false);
+        self.sel = None;
+        self.goto_idx(start);
+    }
+
+    /// Cursor to char index `idx`, clamped to the text.
+    pub fn goto_idx(&mut self, idx: usize) {
+        let idx = idx.min(self.rope.len_chars());
+        let line = self.rope.char_to_line(idx);
+        self.cursor = (line, idx - self.rope.line_to_char(line));
+    }
+
+    /// Cursor to the start of line `n` (1-based), clamped.
+    pub fn goto_line(&mut self, n: usize) {
+        let line = n.saturating_sub(1).min(self.line_count() - 1);
+        self.goto_idx(self.rope.line_to_char(line));
+    }
+
+    /// Cursor to the next (or previous) word start (end).
+    pub fn move_word(&mut self, forward: bool) {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let n = self.rope.len_chars();
+        let mut i = self.idx();
+        if forward {
+            while i < n && !word(self.rope.char(i)) {
+                i += 1;
+            }
+            while i < n && word(self.rope.char(i)) {
+                i += 1;
+            }
+        } else {
+            while i > 0 && !word(self.rope.char(i - 1)) {
+                i -= 1;
+            }
+            while i > 0 && word(self.rope.char(i - 1)) {
+                i -= 1;
+            }
+        }
+        self.goto_idx(i);
+    }
+
+    /// Selects the next (or previous) match of `re`, wrapping around; false if none.
+    /// Matches are per line. Runs on the caller's thread.
+    // shortcut: scans on the UI thread, upgrade to a worker if huge buffers feel slow
+    pub fn find(&mut self, re: &Regex, forward: bool) -> bool {
+        let n = self.line_count();
+        let (line, col) = self.cursor;
+        // n + 1 passes: the cursor line is searched again whole after wrapping
+        for step in 0..=n {
+            let l = if forward {
+                (line + step) % n
+            } else {
+                (line + n - step % n) % n
+            };
+            let text = self.line_text(l);
+            let m = if forward {
+                let from = if step == 0 {
+                    byte_of(&text, col + 1)
+                } else {
+                    Some(0)
+                };
+                from.and_then(|b| re.find_at(&text, b))
+            } else {
+                let limit = if step == 0 {
+                    byte_of(&text, col).unwrap_or(text.len())
+                } else {
+                    usize::MAX
+                };
+                re.find_iter(&text).filter(|m| m.start() < limit).last()
+            };
+            if let Some(m) = m {
+                let base = self.rope.line_to_char(l);
+                let cols = |b: usize| text[..b].chars().count();
+                // anchor at the end so the cursor stays at the match start
+                self.sel = Some(base + cols(m.end()));
+                self.goto_idx(base + cols(m.start()));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Replaces every match (`$1` or `${1}` for groups) as one undo step; returns the count.
+    // shortcut: undo keeps old and new text of every changed line, upgrade if replacing in huge files
+    pub fn replace_all(&mut self, re: &Regex, with: &str) -> usize {
+        let (mut step, mut count) = (Vec::new(), 0);
+        // bottom up, so earlier char indices stay valid
+        for l in (0..self.line_count()).rev() {
+            let text = self.line_text(l);
+            let k = re.find_iter(&text).count();
+            if k == 0 {
+                continue;
+            }
+            count += k;
+            let at = self.rope.line_to_char(l);
+            step.push(self.splice(at, text.chars().count(), &re.replace_all(&text, with)));
+        }
+        if !step.is_empty() {
+            self.redo.clear();
+            self.undo.push_back(step);
+            if self.undo.len() > MAX_UNDO {
+                self.undo.pop_front();
+            }
+        }
+        self.sel = None;
+        self.move_v(0);
+        count
     }
 
     /// Left/right across line ends.
     pub fn move_h(&mut self, delta: isize) {
-        let idx = (self.idx() as isize + delta).clamp(0, self.rope.len_chars() as isize) as usize;
-        let line = self.rope.char_to_line(idx);
-        self.cursor = (line, idx - self.rope.line_to_char(line));
+        let idx = self.idx() as isize + delta;
+        self.goto_idx(idx.max(0) as usize);
     }
 
     /// Up/down, column clamped to the new line.
@@ -327,6 +595,14 @@ fn bom_bytes(enc: &'static Encoding) -> &'static [u8] {
     } else {
         &[0xEF, 0xBB, 0xBF]
     }
+}
+
+/// Byte offset of char `col`; `text.len()` for the end, `None` beyond it.
+fn byte_of(text: &str, col: usize) -> Option<usize> {
+    text.char_indices()
+        .map(|(i, _)| i)
+        .chain([text.len()])
+        .nth(col)
 }
 
 /// `read` until `buf` is full or EOF.
@@ -588,5 +864,137 @@ mod tests {
         e.end();
         e.delete(); // joins "ab" and "x"
         assert_eq!(e.visible(5, 5), ["abx"]);
+    }
+
+    fn editor(text: &str) -> (tempfile::TempDir, Editor) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f");
+        fs::write(&p, text).unwrap();
+        let e = open(&p).unwrap();
+        (dir, e)
+    }
+
+    fn text(e: &Editor) -> String {
+        e.visible(100, 100).join("|")
+    }
+
+    #[test]
+    fn undo_redo_merges_typing() {
+        let (_d, mut e) = editor("x");
+        e.end();
+        for c in "abc".chars() {
+            e.insert_char(c);
+        }
+        e.insert_char('\n');
+        e.insert_char('d');
+        assert_eq!(text(&e), "xabc|d");
+        e.undo();
+        assert_eq!(text(&e), "xabc|");
+        e.undo();
+        assert_eq!(text(&e), "xabc");
+        e.undo();
+        assert_eq!((text(&e), e.cursor), ("x".into(), (0, 1)));
+        e.undo(); // nothing left
+        e.redo();
+        e.redo();
+        assert_eq!(text(&e), "xabc|");
+        e.insert_char('z'); // new edit drops redo
+        e.redo();
+        assert_eq!(text(&e), "xabc|z");
+    }
+
+    #[test]
+    fn backspace_run_undone_at_once() {
+        let (_d, mut e) = editor("hello");
+        e.end();
+        for _ in 0..3 {
+            e.backspace();
+        }
+        assert_eq!(text(&e), "he");
+        e.undo();
+        assert_eq!((text(&e), e.cursor), ("hello".into(), (0, 5)));
+        e.home();
+        e.delete();
+        e.delete();
+        assert_eq!(text(&e), "llo");
+        e.undo();
+        assert_eq!(text(&e), "hello");
+    }
+
+    #[test]
+    fn selection_copy_cut_paste_replace() {
+        let (_d, mut e) = editor("one two\nthree");
+        e.select(true);
+        e.move_word(true);
+        assert_eq!(e.copy().as_deref(), Some("one"));
+        assert_eq!(e.selection_cols(0), Some((0, 3)));
+        assert_eq!(e.selection_cols(1), None);
+        assert_eq!(e.cut().as_deref(), Some("one"));
+        assert_eq!(text(&e), " two|three");
+        e.select(false);
+        e.goto_idx(usize::MAX);
+        e.insert("X\nY", false);
+        assert_eq!(text(&e), " two|threeX|Y");
+        e.goto_idx(0);
+        e.select(true);
+        e.move_h(4);
+        e.insert_char('_'); // typing replaces the selection
+        assert_eq!(text(&e), "_|threeX|Y");
+        e.delete_line();
+        assert_eq!(text(&e), "threeX|Y");
+        e.goto_line(99);
+        assert_eq!(e.cursor, (1, 0));
+        e.delete_line(); // last line
+        assert_eq!(text(&e), "threeX|");
+    }
+
+    #[test]
+    fn word_moves_and_goto() {
+        let (_d, mut e) = editor("foo, bar_1\nbaz");
+        e.move_word(true);
+        assert_eq!(e.cursor, (0, 3));
+        e.move_word(true);
+        assert_eq!(e.cursor, (0, 10));
+        e.move_word(false);
+        assert_eq!(e.cursor, (0, 5));
+        e.goto_line(2);
+        assert_eq!(e.cursor, (1, 0));
+        e.goto_idx(usize::MAX);
+        assert_eq!(e.cursor, (1, 3));
+    }
+
+    #[test]
+    fn find_wraps_both_ways() {
+        let (_d, mut e) = editor("foo bar\nbaz foo\né foo");
+        let re = crate::search::compile("foo").unwrap();
+        assert!(e.find(&re, true));
+        assert_eq!(e.cursor, (1, 4));
+        assert_eq!(e.copy().as_deref(), Some("foo"));
+        assert!(e.find(&re, true));
+        assert_eq!(e.cursor, (2, 2)); // char column, not byte
+        assert!(e.find(&re, true));
+        assert_eq!(e.cursor, (0, 0)); // wrapped
+        assert!(e.find(&re, false));
+        assert_eq!(e.cursor, (2, 2));
+        assert!(e.find(&re, false));
+        assert_eq!(e.cursor, (1, 4));
+        assert!(!e.find(&crate::search::compile("nope").unwrap(), true));
+        let (_d, mut e) = editor("one foo");
+        assert!(e.find(&re, true)); // single match is found again after wrapping
+        assert!(e.find(&re, true));
+    }
+
+    #[test]
+    fn replace_all_is_one_undo_step() {
+        let (_d, mut e) = editor("a1 b2\nc\nd3");
+        e.goto_idx(usize::MAX);
+        let re = crate::search::compile(r"([a-z])(\d)").unwrap();
+        assert_eq!(e.replace_all(&re, "${2}${1}"), 3);
+        assert_eq!(text(&e), "1a 2b|c|3d");
+        assert_eq!(e.replace_all(&re, "x"), 0);
+        e.undo();
+        assert_eq!(text(&e), "a1 b2|c|d3");
+        e.redo();
+        assert_eq!(text(&e), "1a 2b|c|3d");
     }
 }
