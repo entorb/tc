@@ -10,6 +10,8 @@ use crate::app::{App, Mode};
 
 const HELP: &str =
     "F3 View  F5 Copy  F6 Move  F7 Mkdir  F8 Delete  Ins Select  Tab Switch  F10 Quit";
+/// Length of "YY-MM-DD HH:MM".
+const DATE_WIDTH: usize = 14;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Mode::View { title, view } = &mut app.mode {
@@ -61,6 +63,7 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
     let panel = &app.panels[i];
     let active = i == app.active;
     let width = area.width.saturating_sub(2) as usize;
+    let today = jiff::ZonedDateTime::now().date();
     let items: Vec<ListItem> = panel
         .entries()
         .iter()
@@ -72,10 +75,18 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
             } else {
                 e.size.to_string()
             };
-            let pad = width.saturating_sub(size.len() + 1);
-            let row = format!("{name:<pad$.pad$} {size}");
+            let date = e
+                .modified
+                .and_then(|t| jiff::ZonedDateTime::try_from(t).ok())
+                .map_or_else(String::new, |z| fmt_date(&z, today));
+            let pad = width.saturating_sub(size.len() + DATE_WIDTH + 2);
+            let row = format!("{name:<pad$.pad$} {size} {date:>DATE_WIDTH$}");
             let style = if panel.is_selected(e) {
                 Style::new().fg(Color::Yellow).bold()
+            } else if e.is_symlink {
+                Style::new().fg(Color::Cyan)
+            } else if e.is_dir {
+                Style::new().fg(Color::Blue).bold()
             } else {
                 Style::new()
             };
@@ -98,6 +109,16 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
     let state = &mut app.lists[i];
     state.select(Some(panel.cursor()));
     frame.render_stateful_widget(list, area, state);
+}
+
+/// Time only for today's files, else short date and time.
+fn fmt_date(z: &jiff::ZonedDateTime, today: jiff::civil::Date) -> String {
+    let fmt = if z.date() == today {
+        "%H:%M:%S"
+    } else {
+        "%y-%m-%d %H:%M"
+    };
+    z.strftime(fmt).to_string()
 }
 
 fn popup(frame: &mut Frame, title: &str, text: &str) {
@@ -140,5 +161,17 @@ mod tests {
         assert!(screen.contains("file.txt"));
         assert!(screen.contains("Make directory"));
         assert!(screen.contains("F5 Copy"));
+    }
+
+    #[test]
+    fn date_today_shows_time_only() {
+        let z = jiff::ZonedDateTime::now();
+        let today = z.date();
+        assert_eq!(fmt_date(&z, today), z.strftime("%H:%M:%S").to_string());
+        let yesterday = today.yesterday().unwrap();
+        assert_eq!(
+            fmt_date(&z, yesterday),
+            z.strftime("%y-%m-%d %H:%M").to_string()
+        );
     }
 }
