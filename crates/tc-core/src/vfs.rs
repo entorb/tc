@@ -348,8 +348,9 @@ impl Xfer<'_> {
 
     /// The old file stays until the new one is complete.
     fn replace(&self, s: &Path, t: &Path) -> Result<()> {
-        let tmp = ops::temp_name(t);
-        let staged = if self.mv && self.src.same(self.dst) {
+        let tmp = self.dst.free_temp(t)?;
+        let moved = self.mv && self.src.same(self.dst);
+        let staged = if moved {
             self.dst.rename(s, &tmp)
         } else {
             self.copy_file(s, &tmp).inspect_err(|_| {
@@ -357,15 +358,32 @@ impl Xfer<'_> {
             })
         };
         staged?;
-        // remote renames do not replace: drop the old file only once the new one is complete
-        if self.dst.rename(&tmp, t).is_err() {
-            self.dst.remove_file(t)?;
-            self.dst.rename(&tmp, t)?;
+        if let Err(e) = self.dst.rename(&tmp, t) {
+            // remote renames do not replace: drop the old file only once the new one is complete
+            if !self.dst.exists(t).unwrap_or(false) {
+                return Err(self.unstage(&tmp, moved, e));
+            }
+            if let Err(e) = self.dst.remove_file(t) {
+                return Err(self.unstage(&tmp, moved, e));
+            }
+            // the old file is gone: `tmp` holds the only copy of the new one
+            self.dst
+                .rename(&tmp, t)
+                .map_err(|e| self.unstage(&tmp, true, e))?;
         }
         if self.mv && !self.src.same(self.dst) {
             self.src.delete(s)?;
         }
         Ok(())
+    }
+
+    /// After a failed swap: a copied `tmp` is dropped while the old target is intact, else it
+    /// is kept and named in the error.
+    fn unstage(&self, tmp: &Path, keep: bool, e: Error) -> Error {
+        if !keep && self.dst.delete(tmp).is_ok() {
+            return e;
+        }
+        Error::Remote(format!("{e}; the new content is kept as {}", tmp.display()))
     }
 
     fn copy_tree(&self, s: &Path, t: &Path, is_dir: bool) -> Result<()> {
@@ -412,6 +430,37 @@ impl Xfer<'_> {
 }
 
 impl Side {
+    /// Something (also a dangling symlink) is at `p`.
+    fn exists(&self, p: &Path) -> Result<bool> {
+        match self {
+            Side::Remote(r) => Ok(r.lstat(&rpath(p))?.is_some()),
+            Side::Local => match fs::symlink_metadata(p) {
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(io_err(p)(e)),
+            },
+        }
+    }
+
+    /// Unused `.tc-tmp-[<n>-]<name>` next to `t`, so a failed transfer never deletes a user's file.
+    // shortcut: a file created there between this check and the exclusive create would be
+    // removed on failure, upgrade if remote backends report AlreadyExists distinctly
+    fn free_temp(&self, t: &Path) -> Result<PathBuf> {
+        let name = t.file_name().unwrap_or_default();
+        for n in 0..100 {
+            let mut tmp = OsString::from(".tc-tmp-");
+            if n > 0 {
+                tmp.push(format!("{n}-"));
+            }
+            tmp.push(name);
+            let tmp = t.with_file_name(tmp);
+            if !self.exists(&tmp)? {
+                return Ok(tmp);
+            }
+        }
+        Err(io_err(t)(io::ErrorKind::AlreadyExists.into()))
+    }
+
     fn delete_empty_dir(&self, p: &Path) -> Result<()> {
         match self {
             Side::Remote(r) => r.remove_dir(&rpath(p)),
@@ -485,8 +534,9 @@ pub mod mem {
         Link(String),
     }
 
+    /// Tree, and a path every rename to fails (fault injection).
     #[derive(Debug, Default)]
-    pub struct Mem(Mutex<BTreeMap<String, Node>>);
+    pub struct Mem(Mutex<BTreeMap<String, Node>>, Mutex<Option<String>>);
 
     fn missing(p: &str) -> Error {
         io_err(p)(io::ErrorKind::NotFound.into())
@@ -512,6 +562,11 @@ pub mod mem {
                 .lock()
                 .unwrap()
                 .insert(p.into(), Node::File(data.into(), t));
+        }
+
+        /// Every later rename to `p` fails.
+        pub fn fail_renames_to(&self, p: &str) {
+            *self.1.lock().unwrap() = Some(p.into());
         }
 
         pub fn dir(&self, p: &str) {
@@ -643,6 +698,9 @@ pub mod mem {
         }
 
         fn rename(&self, from: &str, to: &str) -> Result<()> {
+            if self.1.lock().unwrap().as_deref() == Some(to) {
+                return Err(Error::Remote("injected rename failure".into()));
+            }
             let mut m = self.0.lock().unwrap();
             if m.contains_key(to) {
                 return Err(io_err(to)(io::ErrorKind::AlreadyExists.into()));
@@ -747,6 +805,30 @@ mod tests {
             go(&Side::Local, s, &r, "/d", false, Decision::Overwrite),
             Err(Error::TypeMismatch(_))
         ));
+    }
+
+    #[test]
+    fn overwrite_spares_foreign_temp_names_and_keeps_new_content_on_failed_swap() {
+        let m = Mem::new();
+        let r = Side::Remote(m.clone());
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("a");
+        fs::write(&src, "new").unwrap();
+        let s = src.to_str().unwrap();
+        m.put("/a", b"old");
+        m.put("/.tc-tmp-a", b"mine");
+        go(&Side::Local, s, &r, "/a", false, Decision::Overwrite).unwrap();
+        assert_eq!(m.get("/a").unwrap(), b"new");
+        assert_eq!(m.paths(), ["/", "/.tc-tmp-a", "/a"]);
+        assert_eq!(m.get("/.tc-tmp-a").unwrap(), b"mine");
+        // the swap fails after the old file is removed: the new content survives in the temp
+        m.fail_renames_to("/a");
+        let e = go(&Side::Local, s, &r, "/a", false, Decision::Overwrite)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("kept as /.tc-tmp-1-a"), "{e}");
+        assert_eq!(m.get("/.tc-tmp-1-a").unwrap(), b"new");
+        assert_eq!(m.get("/.tc-tmp-a").unwrap(), b"mine");
     }
 
     #[test]
