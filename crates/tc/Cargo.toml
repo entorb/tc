@@ -3,6 +3,10 @@ name = "tc"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "tc-cli"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 crossterm = { version = "0.29", features = ["osc52", "bracketed-paste"] }
