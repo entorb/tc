@@ -14,6 +14,9 @@ use tc_core::{Error, Result};
 use crate::{Ask, Prompt, Scheme, Url, err, split};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest wait for a server reply, so a silently dropped connection fails instead of hanging
+/// (long: some servers scan an upload before they confirm it).
+const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn connect(url: &Url, ask: Ask) -> Result<Arc<dyn Remote>> {
     use std::net::ToSocketAddrs;
@@ -61,6 +64,9 @@ impl<T: TlsStream> std::fmt::Debug for Ftp<T> {
 
 impl<T: TlsStream> Ftp<T> {
     fn login(url: &Url, mut ftp: ImplFtpStream<T>, user: &str, pass: &str) -> Result<Self> {
+        ftp.get_ref()
+            .set_read_timeout(Some(REPLY_TIMEOUT))
+            .map_err(err)?;
         ftp.login(user, pass).map_err(err)?;
         ftp.transfer_type(FileType::Binary).map_err(err)?;
         let home = ftp.pwd().unwrap_or_else(|_| "/".into());
@@ -132,17 +138,17 @@ impl<T: TlsStream + Send + 'static> Remote for Ftp<T> {
                 link: None,
             }));
         }
-        match self.list(dir) {
-            Ok(list) => Ok(list.into_iter().find(|e| e.name == name)),
-            Err(_) => Ok(None),
-        }
+        // a failed listing is an error, never "absent": write_new and rename would overwrite
+        Ok(self.list(dir)?.into_iter().find(|e| e.name == name))
     }
 
     fn read(&self, path: &str, f: &mut dyn FnMut(&mut dyn Read) -> Result<()>) -> Result<()> {
         let mut c = self.conn()?;
         let mut s = c.retr_as_stream(path).map_err(err)?;
-        f(&mut s)?;
-        s.finish().map_err(err)
+        // finish also after a failure: it reads the transfer reply, else the next command
+        // gets it as its own answer
+        let r = f(&mut s);
+        r.and(s.finish().map_err(err))
     }
 
     fn write_new(&self, path: &str, f: &mut dyn FnMut(&mut dyn Write) -> Result<()>) -> Result<()> {
@@ -155,8 +161,8 @@ impl<T: TlsStream + Send + 'static> Remote for Ftp<T> {
         }
         let mut c = self.conn()?;
         let mut s = c.put_with_stream(path).map_err(err)?;
-        f(&mut s)?;
-        s.finish().map_err(err)
+        let r = f(&mut s);
+        r.and(s.finish().map_err(err))
     }
 
     fn mkdir(&self, path: &str) -> Result<()> {
