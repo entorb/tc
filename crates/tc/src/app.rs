@@ -718,17 +718,7 @@ impl App {
                 }
             },
             Mode::Connecting(c) => self.connecting_key(c, key),
-            // no trash on remote panels: only `p`
-            Mode::Confirm(op, targets, text) => match key.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter
-                    if self.panels[self.active].remote().is_none() =>
-                {
-                    self.delete(&targets, true)
-                }
-                KeyCode::Char('p' | 'P') => self.delete(&targets, false),
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
-                _ => self.mode = Mode::Confirm(op, targets, text),
-            },
+            Mode::Confirm(op, targets, text) => self.confirm_key(op, targets, text, key.code),
             Mode::Transfer(op, targets, mut text) => match key.code {
                 KeyCode::Enter => self.run(op, &targets, &text.text),
                 KeyCode::Esc => {}
@@ -753,18 +743,7 @@ impl App {
                     self.mode = Mode::NewFile(name);
                 }
             },
-            Mode::Cmd(mut l) => {
-                match key.code {
-                    KeyCode::Esc => return,
-                    KeyCode::Enter => return self.run_cmd(&l.text),
-                    KeyCode::Up => l.prev(&self.history),
-                    KeyCode::Down => l.next(&self.history),
-                    _ => {
-                        edit_key(&mut l, key);
-                    }
-                }
-                self.mode = Mode::Cmd(l);
-            }
+            Mode::Cmd(l) => self.cmd_key(l, key),
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
             Mode::Found(f) => self.found_key(key.code, f),
@@ -784,18 +763,7 @@ impl App {
                 path,
                 text,
                 can_load,
-            } => match key.code {
-                KeyCode::Char('y' | 'Y') => self.open_viewer(path),
-                KeyCode::Char('n' | 'N') if can_load => self.spawn_load(path),
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
-                _ => {
-                    self.mode = Mode::AskViewer {
-                        path,
-                        text,
-                        can_load,
-                    }
-                }
-            },
+            } => self.ask_viewer_key(path, text, can_load, key.code),
             Mode::AskExit(editor) => match key.code {
                 KeyCode::Char('y' | 'Y') => {
                     self.next_save_prompt(editor, true, false, Step::Encoding)
@@ -848,6 +816,64 @@ impl App {
             },
             Mode::Edit { editor, error } => self.editor_key(editor, error, key),
             Mode::View { title, view } => self.viewer_key(title, view, key),
+        }
+    }
+
+    fn dir_job_tick(&mut self) {
+        if let Some((side, dir, p)) = &self.dir_job
+            && p.scanned.load(Ordering::Acquire)
+        {
+            let (side, dir, bytes) = (*side, dir.clone(), p.total.load(Ordering::Relaxed));
+            self.dir_job = None;
+            if let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
+                // only the panel Space was pressed in, the other one may show the same directory
+                let panel = &mut self.panels[side];
+                if panel.path() == parent && !panel.is_virtual() && panel.archive().is_none() {
+                    panel.set_dir_size(name.to_owned(), bytes);
+                }
+            }
+        }
+    }
+
+    // no trash on remote panels: only `p`
+    fn confirm_key(&mut self, op: Op, targets: Vec<PathBuf>, text: String, code: KeyCode) {
+        match code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter
+                if self.panels[self.active].remote().is_none() =>
+            {
+                self.delete(&targets, true)
+            }
+            KeyCode::Char('p' | 'P') => self.delete(&targets, false),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
+            _ => self.mode = Mode::Confirm(op, targets, text),
+        }
+    }
+
+    fn cmd_key(&mut self, mut l: LineEdit, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => return,
+            KeyCode::Enter => return self.run_cmd(&l.text),
+            KeyCode::Up => l.prev(&self.history),
+            KeyCode::Down => l.next(&self.history),
+            _ => {
+                edit_key(&mut l, key);
+            }
+        }
+        self.mode = Mode::Cmd(l);
+    }
+
+    fn ask_viewer_key(&mut self, path: PathBuf, text: String, can_load: bool, code: KeyCode) {
+        match code {
+            KeyCode::Char('y' | 'Y') => self.open_viewer(path),
+            KeyCode::Char('n' | 'N') if can_load => self.spawn_load(path),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
+            _ => {
+                self.mode = Mode::AskViewer {
+                    path,
+                    text,
+                    can_load,
+                }
+            }
         }
     }
 
@@ -2457,6 +2483,32 @@ impl App {
         }
     }
 
+    fn xfer_tick(&mut self) {
+        let Mode::Xfer(x) = &mut self.mode else {
+            return;
+        };
+        let done = x.progress.done.load(Ordering::Relaxed);
+        x.eta.push(x.started.elapsed().as_secs_f64(), done as f64);
+        match x.rx.try_recv() {
+            Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
+            Ok(XMsg::Done(error)) => {
+                self.mode = Mode::Normal;
+                if let Some(st) = &mut self.stats
+                    && let Some(i) = st.deleting.take()
+                    && error.is_none()
+                {
+                    stats::remove(&mut st.root, &st.path, i);
+                    st.sel = st.sel.min(st.current().children.len().saturating_sub(1));
+                }
+                self.finish(error);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.mode = Mode::Message("worker thread failed".into())
+            }
+        }
+    }
+
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
         // dialogs keep a pending listing waiting so its error cannot replace them
@@ -2472,19 +2524,7 @@ impl App {
         {
             self.mode = Mode::Stats(st);
         }
-        if let Some((side, dir, p)) = &self.dir_job
-            && p.scanned.load(Ordering::Acquire)
-        {
-            let (side, dir, bytes) = (*side, dir.clone(), p.total.load(Ordering::Relaxed));
-            self.dir_job = None;
-            if let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
-                // only the panel Space was pressed in, the other one may show the same directory
-                let panel = &mut self.panels[side];
-                if panel.path() == parent && !panel.is_virtual() && panel.archive().is_none() {
-                    panel.set_dir_size(name.to_owned(), bytes);
-                }
-            }
-        }
+        self.dir_job_tick();
         if self.view_tmp.is_some() && !matches!(self.mode, Mode::View { .. }) {
             self.view_tmp = None;
         }
@@ -2511,28 +2551,8 @@ impl App {
             }
             return;
         }
-        if let Mode::Xfer(x) = &mut self.mode {
-            let done = x.progress.done.load(Ordering::Relaxed);
-            x.eta.push(x.started.elapsed().as_secs_f64(), done as f64);
-            match x.rx.try_recv() {
-                Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
-                Ok(XMsg::Done(error)) => {
-                    self.mode = Mode::Normal;
-                    if let Some(st) = &mut self.stats
-                        && let Some(i) = st.deleting.take()
-                        && error.is_none()
-                    {
-                        stats::remove(&mut st.root, &st.path, i);
-                        st.sel = st.sel.min(st.current().children.len().saturating_sub(1));
-                    }
-                    self.finish(error);
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    self.mode = Mode::Message("worker thread failed".into())
-                }
-            }
-            return;
+        if matches!(self.mode, Mode::Xfer(_)) {
+            return self.xfer_tick();
         }
         let Mode::Work(job) = &self.mode else {
             return;

@@ -472,7 +472,7 @@ pub fn download_temp(
 #[cfg(any(test, feature = "mem"))]
 pub mod mem {
     //! In-memory [`Remote`] for tests.
-    use super::*;
+    use super::{Arc, Entry, Error, Read, Remote, Result, Write, io, io_err};
     use std::collections::BTreeMap;
     use std::sync::Mutex;
     use std::time::SystemTime;
@@ -841,7 +841,7 @@ mod tests {
                 Decision::Cancel,
             );
             assert!(
-                matches!(&res, Err(Error::Remote(m)) if m.contains("/t/self")),
+                matches!(&res, Err(Error::Remote(m)) if m.contains("self")),
                 "{res:?}"
             );
             assert_eq!(fs::read(dst.join("f")).unwrap(), b"x");

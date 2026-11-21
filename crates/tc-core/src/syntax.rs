@@ -435,21 +435,10 @@ pub fn is_fence(line: &str) -> bool {
 /// Highlighted byte ranges of `line`, in order. `fence` is the markdown code-fence
 /// state, carried from row to row by the caller.
 pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, Kind)> {
-    if lang.markdown {
-        if is_fence(line) {
-            *fence = !*fence;
-            return vec![(0..line.len(), Kind::Str)];
-        }
-        if *fence {
-            return line
-                .find('#')
-                .map(|i| (i..line.len(), Kind::Comment))
-                .into_iter()
-                .collect();
-        }
-        if line.trim_start().starts_with('#') {
-            return vec![(0..line.len(), Kind::Keyword)];
-        }
+    if lang.markdown
+        && let Some(out) = markdown_line(line, fence)
+    {
+        return out;
     }
     let mut out = Vec::new();
     let mut it = line.char_indices().peekable();
@@ -470,18 +459,7 @@ pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, K
             continue;
         }
         if lang.quotes.contains(c) {
-            let mut end = line.len();
-            let mut escaped = false;
-            for (j, d) in it.by_ref() {
-                if escaped {
-                    escaped = false;
-                } else if d == '\\' {
-                    escaped = true;
-                } else if d == c {
-                    end = j + d.len_utf8();
-                    break;
-                }
-            }
+            let end = quote_end(&mut it, c, line.len());
             out.push((i..end, Kind::Str));
             prev_word = false;
             continue;
@@ -501,12 +479,7 @@ pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, K
             continue;
         }
         if c.is_alphanumeric() || c == '_' {
-            let mut end = i + c.len_utf8();
-            while let Some((j, d)) = it.next_if(|&(_, d)| {
-                d.is_alphanumeric() || d == '_' || d == '.' && c.is_ascii_digit()
-            }) {
-                end = j + d.len_utf8();
-            }
+            let end = word_end(&mut it, i, c);
             if !prev_word {
                 if c.is_ascii_digit() {
                     if !lang.markdown {
@@ -522,6 +495,51 @@ pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, K
         prev_word = false;
     }
     out
+}
+
+/// Markdown line classified as a whole (fence, fenced text, heading); `None` means inline scan.
+fn markdown_line(line: &str, fence: &mut bool) -> Option<Vec<(Range<usize>, Kind)>> {
+    if is_fence(line) {
+        *fence = !*fence;
+        return Some(vec![(0..line.len(), Kind::Str)]);
+    }
+    if *fence {
+        return Some(
+            line.find('#')
+                .map(|i| (i..line.len(), Kind::Comment))
+                .into_iter()
+                .collect(),
+        );
+    }
+    line.trim_start()
+        .starts_with('#')
+        .then(|| vec![(0..line.len(), Kind::Keyword)])
+}
+
+/// Consume a string body after its opening quote `q`; returns the end byte (line end if unclosed).
+fn quote_end(it: &mut impl Iterator<Item = (usize, char)>, q: char, len: usize) -> usize {
+    let mut escaped = false;
+    for (j, d) in it {
+        if escaped {
+            escaped = false;
+        } else if d == '\\' {
+            escaped = true;
+        } else if d == q {
+            return j + d.len_utf8();
+        }
+    }
+    len
+}
+
+/// Consume the rest of a word/number starting with `c` at byte `i`; returns its end byte.
+fn word_end(it: &mut std::iter::Peekable<std::str::CharIndices>, i: usize, c: char) -> usize {
+    let mut end = i + c.len_utf8();
+    while let Some((j, d)) =
+        it.next_if(|&(_, d)| d.is_alphanumeric() || d == '_' || d == '.' && c.is_ascii_digit())
+    {
+        end = j + d.len_utf8();
+    }
+    end
 }
 
 /// Byte length of `**x**`/`*x*` (or `_`) at the start of `rest`, if closed on this line.

@@ -89,52 +89,58 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
+fn draw_view(frame: &mut Frame, app: &mut App) {
+    let Mode::View { title, view } = &mut app.mode else {
+        return;
+    };
+    let bottom = format!(
+        " {}%  {}  {}  / or f Find  n/N Next/Prev  g Goto  w Wrap  l Lines ",
+        view.percent(),
+        view.encoding_name(),
+        app.note
+    );
+    let block = themed_block().title(title.as_str()).title_bottom(bottom);
+    let inner = block.inner(frame.area());
+    let height = inner.height as usize;
+    app.page = height.max(1);
+    // numbers only while the top line is known, see `Viewer::top_line`
+    let top = view.top_line().filter(|_| app.view_numbers);
+    let gutter = if top.is_some() { 7 } else { 0 };
+    let lang = syntax::lang(Path::new(title.as_str()));
+    // shortcut: viewer assumes no code fence open above the screen, upgrade with a fence index in `Viewer`
+    let mut fence = false;
+    let visible: Vec<Line> = match view.rows(height, (inner.width as usize).saturating_sub(gutter))
+    {
+        Ok(rows) => {
+            let mut n = top.unwrap_or(0);
+            rows.into_iter()
+                .map(|(first, text)| {
+                    let mut line =
+                        highlight(text, lang, &mut fence, app.search.as_ref(), None, (0, &[]));
+                    if top.is_some() {
+                        let num = if first {
+                            format!("{:>6} ", n + 1)
+                        } else {
+                            " ".repeat(7)
+                        };
+                        line.spans.insert(0, Span::raw(num));
+                    }
+                    n += u64::from(first);
+                    line
+                })
+                .collect()
+        }
+        Err(e) => vec![Line::raw(e.to_string())],
+    };
+    frame.render_widget(
+        Paragraph::new(visible).style(PANEL).block(block),
+        frame.area(),
+    );
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    if let Mode::View { title, view } = &mut app.mode {
-        let bottom = format!(
-            " {}%  {}  {}  / or f Find  n/N Next/Prev  g Goto  w Wrap  l Lines ",
-            view.percent(),
-            view.encoding_name(),
-            app.note
-        );
-        let block = themed_block().title(title.as_str()).title_bottom(bottom);
-        let inner = block.inner(frame.area());
-        let height = inner.height as usize;
-        app.page = height.max(1);
-        // numbers only while the top line is known, see `Viewer::top_line`
-        let top = view.top_line().filter(|_| app.view_numbers);
-        let gutter = if top.is_some() { 7 } else { 0 };
-        let lang = syntax::lang(Path::new(title.as_str()));
-        // shortcut: viewer assumes no code fence open above the screen, upgrade with a fence index in `Viewer`
-        let mut fence = false;
-        let visible: Vec<Line> = match view
-            .rows(height, (inner.width as usize).saturating_sub(gutter))
-        {
-            Ok(rows) => {
-                let mut n = top.unwrap_or(0);
-                rows.into_iter()
-                    .map(|(first, text)| {
-                        let mut line =
-                            highlight(text, lang, &mut fence, app.search.as_ref(), None, (0, &[]));
-                        if top.is_some() {
-                            let num = if first {
-                                format!("{:>6} ", n + 1)
-                            } else {
-                                " ".repeat(7)
-                            };
-                            line.spans.insert(0, Span::raw(num));
-                        }
-                        n += u64::from(first);
-                        line
-                    })
-                    .collect()
-            }
-            Err(e) => vec![Line::raw(e.to_string())],
-        };
-        frame.render_widget(
-            Paragraph::new(visible).style(PANEL).block(block),
-            frame.area(),
-        );
+    if matches!(app.mode, Mode::View { .. }) {
+        draw_view(frame, app);
         draw_input(frame, app);
         return;
     }
