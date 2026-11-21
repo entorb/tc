@@ -16,6 +16,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use regex::Regex;
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
+use tc_core::eta::Estimator;
 use tc_core::panel::{Entry, Panel};
 use tc_core::{Error, find, hotlist, ops, search, view::Viewer};
 
@@ -181,7 +182,9 @@ pub struct Xfer {
     pub rename: Option<String>,
     rx: Receiver<XMsg>,
     reply: mpsc::Sender<Answer>,
-    cancel: Arc<AtomicBool>,
+    pub progress: Arc<ops::Progress>,
+    /// Fed from `App::tick`.
+    pub eta: Estimator,
     started: Instant,
 }
 
@@ -226,7 +229,7 @@ impl Xfer {
                 _ => {}
             }
         } else if code == KeyCode::Esc {
-            self.cancel.store(true, Ordering::Relaxed);
+            self.progress.cancel.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -1048,9 +1051,11 @@ impl App {
             .collect();
         let (tx, rx) = mpsc::channel();
         let (reply, answers) = mpsc::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let c = cancel.clone();
+        let progress = Arc::new(ops::Progress::default());
+        let c = progress.clone();
         thread::spawn(move || {
+            let srcs: Vec<PathBuf> = jobs.iter().map(|(s, _)| s.clone()).collect();
+            ops::scan(&srcs, &c);
             let mut sticky: Option<Policy> = None;
             let mut ask = |src: &Path, target: &Path| {
                 let policy = match sticky {
@@ -1087,7 +1092,8 @@ impl App {
             rename: None,
             rx,
             reply,
-            cancel,
+            progress,
+            eta: Estimator::default(),
             started: Instant::now(),
         });
     }
@@ -1247,6 +1253,8 @@ impl App {
             return f.pump();
         }
         if let Mode::Xfer(x) = &mut self.mode {
+            let done = x.progress.done.load(Ordering::Relaxed);
+            x.eta.push(x.started.elapsed().as_secs_f64(), done as f64);
             match x.rx.try_recv() {
                 Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
                 Ok(XMsg::Done(error)) => {

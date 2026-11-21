@@ -3,10 +3,61 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{Error, Result, io_err};
+
+/// Copy chunk: bounds memory and the delay until a cancel is noticed.
+const CHUNK: usize = 1 << 20;
+
+/// Shared between the worker (writes) and the UI (reads); also carries the cancel flag.
+#[derive(Default)]
+pub struct Progress {
+    pub cancel: AtomicBool,
+    pub done: AtomicU64,
+    pub total: AtomicU64,
+    pub files: AtomicU64,
+    pub files_total: AtomicU64,
+    /// `total` and `files_total` are final.
+    pub scanned: AtomicBool,
+    /// File being copied.
+    pub current: Mutex<PathBuf>,
+}
+
+impl Progress {
+    fn file_done(&self, bytes: u64) {
+        self.done.fetch_add(bytes, Ordering::Relaxed);
+        self.files.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Count bytes and files below `paths` (symlinks not followed, unreadable parts skipped; the
+/// copy reports those errors) so progress has a total. Stops early on cancel.
+pub fn scan(paths: &[PathBuf], p: &Progress) {
+    let (mut bytes, mut files) = (0, 0);
+    let mut stack = paths.to_vec();
+    while let Some(path) = stack.pop() {
+        if p.cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            let items = fs::read_dir(&path).into_iter().flatten().flatten();
+            stack.extend(items.map(|i| i.path()));
+        } else {
+            files += 1;
+            bytes += meta.len();
+        }
+    }
+    p.total.store(bytes, Ordering::Relaxed);
+    p.files_total.store(files, Ordering::Relaxed);
+    p.scanned.store(true, Ordering::Release);
+}
 
 /// Answer to a name conflict on a file or symlink.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,30 +81,30 @@ pub fn is_newer(src: &Path, target: &Path) -> bool {
 /// Copy `src` (file, symlink or directory tree) to `target`. An existing directory is merged
 /// into; an existing file is only replaced when `ask` says so, via temp copy plus rename, so a
 /// failure keeps the old file. Newly created partial targets are removed on failure.
-/// `cancel` is checked between files.
-pub fn copy(src: &Path, target: &Path, ask: Ask, cancel: &AtomicBool) -> Result<()> {
+/// `p.cancel` is checked per file and per 1 MiB chunk; a cancel removes the partial target.
+pub fn copy(src: &Path, target: &Path, ask: Ask, p: &Progress) -> Result<()> {
     prepare(src, target)?;
-    place(src, target, false, &mut Ctx { ask, cancel })
+    place(src, target, false, &mut Ctx { ask, p })
 }
 
 /// Move or rename `src` to `target`, with the conflict rules of [`copy`]. Source files are
 /// deleted only after they are in place; across devices: copy, then delete source.
-pub fn move_(src: &Path, target: &Path, ask: Ask, cancel: &AtomicBool) -> Result<()> {
+pub fn move_(src: &Path, target: &Path, ask: Ask, p: &Progress) -> Result<()> {
     prepare(src, target)?;
-    place(src, target, true, &mut Ctx { ask, cancel })
+    place(src, target, true, &mut Ctx { ask, p })
 }
 
 struct Ctx<'a> {
     ask: Ask<'a>,
-    cancel: &'a AtomicBool,
+    p: &'a Progress,
 }
 
 fn place(src: &Path, target: &Path, mv: bool, ctx: &mut Ctx) -> Result<()> {
-    if ctx.cancel.load(Ordering::Relaxed) {
+    if ctx.p.cancel.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
     let Ok(tmeta) = fs::symlink_metadata(target) else {
-        return create(src, target, mv);
+        return create(src, target, mv, ctx.p);
     };
     let smeta = fs::symlink_metadata(src).map_err(io_err(src))?;
     match (smeta.is_dir(), tmeta.is_dir()) {
@@ -73,13 +124,16 @@ fn place(src: &Path, target: &Path, mv: bool, ctx: &mut Ctx) -> Result<()> {
                 return Err(Error::Exists(target.to_owned()));
             }
             match (ctx.ask)(src, target) {
-                Decision::Skip => Ok(()),
+                Decision::Skip => {
+                    ctx.p.file_done(smeta.len());
+                    Ok(())
+                }
                 Decision::Cancel => Err(Error::Cancelled),
                 Decision::Rename(name) => {
                     let parent = target.parent().unwrap_or(Path::new(""));
                     place(src, &parent.join(single_name(&name)?), mv, ctx)
                 }
-                Decision::Overwrite => replace(src, target, mv),
+                Decision::Overwrite => replace(src, target, mv, ctx.p),
             }
         }
         _ => Err(Error::TypeMismatch(target.to_owned())),
@@ -87,27 +141,28 @@ fn place(src: &Path, target: &Path, mv: bool, ctx: &mut Ctx) -> Result<()> {
 }
 
 /// Target does not exist: plain move or copy.
-fn create(src: &Path, target: &Path, mv: bool) -> Result<()> {
+fn create(src: &Path, target: &Path, mv: bool, p: &Progress) -> Result<()> {
     if mv {
         return match fs::rename(src, target) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-                copy_tree(src, target).inspect_err(|_| remove_partial(target))?;
+                copy_tree(src, target, p).inspect_err(|_| remove_partial(target))?;
                 delete(src)
             }
             Err(e) => Err(io_err(src)(e)),
         };
     }
-    copy_tree(src, target).inspect_err(|_| remove_partial(target))
+    copy_tree(src, target, p).inspect_err(|_| remove_partial(target))
 }
 
 /// Replace file `target` atomically: the old one stays until the new one is complete.
-fn replace(src: &Path, target: &Path, mv: bool) -> Result<()> {
+fn replace(src: &Path, target: &Path, mv: bool, p: &Progress) -> Result<()> {
     if mv && fs::rename(src, target).is_ok() {
         return Ok(());
     }
     let tmp = temp_name(target);
-    let done = copy_tree(src, &tmp).and_then(|()| fs::rename(&tmp, target).map_err(io_err(target)));
+    let done =
+        copy_tree(src, &tmp, p).and_then(|()| fs::rename(&tmp, target).map_err(io_err(target)));
     if let Err(e) = done {
         remove_partial(&tmp);
         return Err(e);
@@ -167,7 +222,7 @@ fn prepare(src: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> Result<()> {
     let meta = fs::symlink_metadata(src).map_err(io_err(src))?;
     if meta.is_symlink() {
         let link = fs::read_link(src).map_err(io_err(src))?;
@@ -176,13 +231,38 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         fs::create_dir(dst).map_err(io_err(dst))?;
         for item in fs::read_dir(src).map_err(io_err(src))? {
             let item = item.map_err(io_err(src))?;
-            copy_tree(&item.path(), &dst.join(item.file_name()))?;
+            copy_tree(&item.path(), &dst.join(item.file_name()), p)?;
         }
         // after the contents, so a read-only source dir does not block them
         fs::set_permissions(dst, meta.permissions()).map_err(io_err(dst))
     } else {
-        fs::copy(src, dst).map(drop).map_err(io_err(src))
+        copy_file(src, dst, &meta, p)
     }
+}
+
+/// Chunked copy so progress and cancel work inside a huge file. Leaves a partial `dst` on
+/// error; callers remove it.
+fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress) -> Result<()> {
+    if let Ok(mut cur) = p.current.lock() {
+        cur.clear();
+        cur.push(src);
+    }
+    let mut from = fs::File::open(src).map_err(io_err(src))?;
+    let mut to = fs::File::create(dst).map_err(io_err(dst))?;
+    let mut buf = vec![0; usize::try_from(meta.len()).map_or(CHUNK, |n| n.clamp(1, CHUNK))];
+    loop {
+        if p.cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let n = from.read(&mut buf).map_err(io_err(src))?;
+        if n == 0 {
+            break;
+        }
+        to.write_all(&buf[..n]).map_err(io_err(dst))?;
+        p.done.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    p.files.fetch_add(1, Ordering::Relaxed);
+    fs::set_permissions(dst, meta.permissions()).map_err(io_err(dst))
 }
 
 /// Only called on targets this operation created.
@@ -222,11 +302,11 @@ mod tests {
         target: &Path,
         mut d: impl FnMut(&Path, &Path) -> Decision,
     ) -> Result<()> {
-        let cancel = AtomicBool::new(false);
+        let p = Progress::default();
         if mv {
-            super::move_(src, target, &mut d, &cancel)
+            super::move_(src, target, &mut d, &p)
         } else {
-            super::copy(src, target, &mut d, &cancel)
+            super::copy(src, target, &mut d, &p)
         }
     }
 
@@ -511,9 +591,53 @@ mod tests {
     #[test]
     fn cancel_flag_stops() {
         let (_t, src, dst) = clash();
-        let cancel = AtomicBool::new(true);
-        let r = super::copy(&src, &dst.join("new"), &mut |_, _| Decision::Skip, &cancel);
+        let p = Progress::default();
+        p.cancel.store(true, Ordering::Relaxed);
+        let r = super::copy(&src, &dst.join("new"), &mut |_, _| Decision::Skip, &p);
         assert!(matches!(r, Err(Error::Cancelled)));
         assert!(!dst.join("new").exists());
+    }
+
+    /// Cancel after the first chunk of a 2 GiB sparse file (never fully read).
+    #[test]
+    fn cancel_mid_file_leaves_no_partial() {
+        let (_t, src, dst) = clash();
+        let big = src.join("big");
+        fs::File::create(&big).unwrap().set_len(2 << 30).unwrap();
+        fs::File::create(dst.join("big"))
+            .unwrap()
+            .set_len(7)
+            .unwrap();
+        for (name, d) in [("new", Decision::Skip), ("big", Decision::Overwrite)] {
+            let p = Progress::default();
+            let r = std::thread::scope(|s| {
+                s.spawn(|| {
+                    while p.done.load(Ordering::Relaxed) == 0 {
+                        std::thread::yield_now();
+                    }
+                    p.cancel.store(true, Ordering::Relaxed);
+                });
+                super::copy(&big, &dst.join(name), &mut |_, _| d.clone(), &p)
+            });
+            assert!(matches!(r, Err(Error::Cancelled)));
+            assert!(p.done.load(Ordering::Relaxed) < 2 << 30);
+        }
+        assert!(!dst.join("new").exists());
+        assert_eq!(fs::metadata(dst.join("big")).unwrap().len(), 7);
+        assert_eq!(fs::read_dir(&dst).unwrap().count(), 2); // a.txt, big: no temp
+        assert_eq!(fs::metadata(&big).unwrap().len(), 2 << 30);
+    }
+
+    #[test]
+    fn scan_counts_and_progress_advances() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tree(tmp.path());
+        let p = Progress::default();
+        scan(std::slice::from_ref(&src), &p);
+        assert_eq!(p.total.load(Ordering::Relaxed), 2);
+        assert_eq!(p.files_total.load(Ordering::Relaxed), 2);
+        super::copy(&src, &tmp.path().join("c"), &mut |_, _| Decision::Skip, &p).unwrap();
+        assert_eq!(p.done.load(Ordering::Relaxed), 2);
+        assert_eq!(p.files.load(Ordering::Relaxed), 2);
     }
 }
