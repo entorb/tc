@@ -7,8 +7,13 @@ use crate::{Error, Result};
 /// Smart case: a pattern without uppercase chars matches case-insensitively.
 // shortcut: escapes like \S count as uppercase, use (?i) there
 pub fn compile(pattern: &str) -> Result<Regex> {
+    compile_case(pattern, false)
+}
+
+/// Like `compile`, with `exact` the case always matters.
+pub fn compile_case(pattern: &str, exact: bool) -> Result<Regex> {
     RegexBuilder::new(pattern)
-        .case_insensitive(!pattern.chars().any(char::is_uppercase))
+        .case_insensitive(!exact && !pattern.chars().any(char::is_uppercase))
         .build()
         // the last line of the regex message is the short reason
         .map_err(|e| Error::Pattern(e.to_string().lines().last().unwrap_or_default().to_owned()))

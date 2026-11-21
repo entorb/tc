@@ -151,11 +151,15 @@ pub struct Input {
     pub ask: Ask,
     pub text: LineEdit,
     pattern: String,
+    /// Replace asks for each match instead of replacing all.
+    each: bool,
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
+    /// The file changed on disk since it was opened.
+    Changed,
     Encoding,
     Eol,
 }
@@ -475,6 +479,12 @@ pub struct App {
     pub note: String,
     /// Editor clipboard, kept across files (Ctrl+V); the system clipboard is fed through `copied`.
     clipboard: String,
+    /// Replacement of a running one-by-one replace.
+    replacing: Option<String>,
+    /// Search with exact case instead of smart case (Alt+C).
+    exact: bool,
+    /// Text area of the editor, set by the UI, used for mouse clicks.
+    pub edit_text: Rect,
     /// Text for the main loop to put on the system clipboard (OSC 52).
     pub copied: Option<String>,
     /// Size calculation in a worker thread: directory and its progress (`scanned` = result ready).
@@ -527,6 +537,9 @@ impl App {
             search: None,
             note: String::new(),
             clipboard: String::new(),
+            replacing: None,
+            exact: false,
+            edit_text: Rect::default(),
             copied: None,
             dir_job: None,
             view_numbers: false,
@@ -550,6 +563,28 @@ impl App {
 
     /// Wheel / touchpad scroll in viewer, editor and active file list (editor: moves the cursor, the window follows).
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        if let MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) =
+            ev.kind
+            && self.input.is_none()
+            && self.replacing.is_none()
+            && let Mode::Edit {
+                editor,
+                error: None,
+            } = &mut self.mode
+        {
+            let a = self.edit_text;
+            if a.contains((ev.column, ev.row).into()) {
+                let extend = ev.kind != MouseEventKind::Down(MouseButton::Left)
+                    || ev.modifiers.contains(KeyModifiers::SHIFT);
+                editor.click(
+                    usize::from(ev.row - a.y),
+                    usize::from(ev.column - a.x),
+                    usize::from(a.width),
+                    extend,
+                );
+            }
+            return;
+        }
         if ev.kind == MouseEventKind::Down(MouseButton::Left) {
             return self.click(ev);
         }
@@ -783,6 +818,15 @@ impl App {
                 KeyCode::Char(c @ ('y' | 'Y' | 'n' | 'N')) => {
                     let yes = c.eq_ignore_ascii_case(&'y');
                     match step {
+                        Step::Changed if yes => {
+                            self.save_prompts(editor, exit, to_utf8, Step::Encoding)
+                        }
+                        Step::Changed => {
+                            self.mode = Mode::Edit {
+                                editor,
+                                error: None,
+                            }
+                        }
                         Step::Encoding => self.next_save_prompt(editor, exit, yes, Step::Eol),
                         Step::Eol => self.spawn_save(editor, to_utf8, yes, exit),
                     }
@@ -1044,6 +1088,24 @@ impl App {
         let page = self.page as isize;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if self.replacing.is_some() {
+            self.mode = Mode::Edit {
+                editor,
+                error: None,
+            };
+            match key.code {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.replace_step(true),
+                KeyCode::Char('n' | 'N' | ' ') => self.replace_step(false),
+                KeyCode::Char('a' | 'A') => {
+                    while self.replacing.is_some() {
+                        self.replace_step(true);
+                    }
+                }
+                _ => self.replacing = None,
+            }
+            return;
+        }
         let prompt = matches!(key.code, KeyCode::F(3 | 4 | 7))
             || (ctrl && matches!(key.code, KeyCode::Char('g' | 'f' | 'r')));
         if matches!(
@@ -1089,6 +1151,28 @@ impl App {
             KeyCode::Down => editor.move_v(1),
             KeyCode::PageUp => editor.move_v(-page),
             KeyCode::PageDown => editor.move_v(page),
+            KeyCode::Char('w') if alt => editor.wrap = !editor.wrap,
+            KeyCode::Char('l') if alt => editor.numbers = !editor.numbers,
+            KeyCode::Char('c') if alt => {
+                self.exact = !self.exact;
+                self.note = if self.exact {
+                    "case sensitive"
+                } else {
+                    "smart case"
+                }
+                .into();
+            }
+            KeyCode::Char('r') if alt => {
+                self.mode = Mode::Edit {
+                    editor,
+                    error: None,
+                };
+                self.ask(Ask::Replace);
+                if let Some(i) = &mut self.input {
+                    i.each = true;
+                }
+                return;
+            }
             KeyCode::Left if ctrl => editor.move_word(false),
             KeyCode::Right if ctrl => editor.move_word(true),
             KeyCode::Home if ctrl => editor.goto_idx(0),
@@ -1097,10 +1181,15 @@ impl App {
             KeyCode::Right => editor.move_h(1),
             KeyCode::Home => editor.home(),
             KeyCode::End => editor.end(),
-            KeyCode::Enter => editor.insert_char('\n'),
+            KeyCode::Enter => editor.newline(),
+            KeyCode::BackTab => editor.unindent(),
+            KeyCode::Tab if shift => editor.unindent(),
             KeyCode::Tab => editor.insert_char('\t'),
+            KeyCode::Backspace if ctrl => editor.delete_word(false),
+            KeyCode::Delete if ctrl => editor.delete_word(true),
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
+            KeyCode::F(8) => editor.delete_line(),
             KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
                 'z' => editor.undo(),
                 'y' => editor.redo(),
@@ -1117,6 +1206,8 @@ impl App {
                 }
                 'v' => editor.insert(&self.clipboard, false),
                 'k' => editor.delete_line(),
+                'a' => editor.select_all(),
+                'd' => editor.duplicate_line(),
                 _ => {}
             },
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => editor.insert_char(c),
@@ -1441,6 +1532,7 @@ impl App {
             ask,
             text: LineEdit::default(),
             pattern: String::new(),
+            each: false,
             error: None,
         });
     }
@@ -1459,7 +1551,7 @@ impl App {
             return;
         };
         let found = match &mut self.mode {
-            Mode::Edit { editor, .. } => Ok(editor.find(re, forward)),
+            Mode::Edit { editor, .. } => Ok(editor.find(re, forward, true)),
             Mode::View { view, .. } => view.search(re, forward),
             _ => return,
         };
@@ -1468,6 +1560,27 @@ impl App {
             Ok(false) => self.note = "not found".into(),
             Err(e) => self.mode = Mode::Message(e.to_string()),
         }
+    }
+
+    /// One-by-one replace: optionally replaces the selected match, then selects the next one
+    /// (to the end of the file, no wrap).
+    fn replace_step(&mut self, replace: bool) {
+        let (Some(re), Some(with), Mode::Edit { editor, .. }) =
+            (&self.search, &self.replacing, &mut self.mode)
+        else {
+            self.replacing = None;
+            return;
+        };
+        if replace {
+            editor.replace_selection(re, with);
+        }
+        let more = editor.find(re, true, false);
+        self.note = if more {
+            "Replace? y yes  n skip  a all  Esc stop".into()
+        } else {
+            self.replacing = None;
+            "replace done".into()
+        };
     }
 
     fn goto(&mut self, text: &str) -> Result<(), String> {
@@ -1509,7 +1622,8 @@ impl App {
     /// `Ok(true)` when done, `Ok(false)` when the prompt goes on with its next step.
     fn submit(&mut self, input: &mut Input) -> Result<bool, String> {
         let text = input.text.text.clone();
-        let compile = |p: &str| search::compile(p).map_err(|e| e.to_string());
+        let exact = self.exact;
+        let compile = |p: &str| search::compile_case(p, exact).map_err(|e| e.to_string());
         match input.ask {
             Ask::Goto => self.goto(&text)?,
             Ask::Select | Ask::Deselect => {
@@ -1548,10 +1662,19 @@ impl App {
             }
             Ask::With => {
                 let re = compile(&input.pattern)?;
-                if let Mode::Edit { editor, .. } = &mut self.mode {
-                    self.note = format!("{} replaced", editor.replace_all(&re, &text));
+                if input.each {
+                    if re.is_match("") {
+                        return Err("pattern matches empty text".into());
+                    }
+                    self.search = Some(re);
+                    self.replacing = Some(text);
+                    self.replace_step(false);
+                } else {
+                    if let Mode::Edit { editor, .. } = &mut self.mode {
+                        self.note = format!("{} replaced", editor.replace_all(&re, &text));
+                    }
+                    self.search = Some(re);
                 }
-                self.search = Some(re);
             }
         }
         Ok(true)
@@ -2280,6 +2403,19 @@ impl App {
 
     /// Ask about encoding, then line ends, only where the file differs from UTF-8/LF.
     fn next_save_prompt(&mut self, editor: Editor, exit: bool, to_utf8: bool, from: Step) {
+        if editor.changed_on_disk() {
+            self.mode = Mode::AskSave {
+                editor,
+                to_utf8,
+                exit,
+                step: Step::Changed,
+            };
+        } else {
+            self.save_prompts(editor, exit, to_utf8, from);
+        }
+    }
+
+    fn save_prompts(&mut self, editor: Editor, exit: bool, to_utf8: bool, from: Step) {
         let step = if from == Step::Encoding && !editor.is_utf8() {
             Step::Encoding
         } else if editor.eol() != Eol::Lf {
@@ -3117,6 +3253,73 @@ mod tests {
     }
 
     #[test]
+    fn editor_shift_up_down_selects() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        with(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
+        with(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
+        assert_eq!(
+            app.mode.editor_mut().unwrap().copy().as_deref(),
+            Some("one\ntwo\n")
+        );
+        with(&mut app, KeyCode::Up, KeyModifiers::SHIFT);
+        assert_eq!(
+            app.mode.editor_mut().unwrap().copy().as_deref(),
+            Some("one\n")
+        );
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.mode.editor_mut().unwrap().copy(), None);
+    }
+
+    #[test]
+    fn editor_replace_each_and_reload_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "ab ab\nab\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::ALT);
+        type_text(&mut app, "ab");
+        type_text(&mut app, "X");
+        key(&mut app, KeyCode::Char('y')); // first ab -> X
+        key(&mut app, KeyCode::Char('n')); // second skipped
+        key(&mut app, KeyCode::Char('a')); // rest
+        assert!(app.replacing.is_none());
+        let ed = app.mode.editor_mut().unwrap();
+        assert_eq!(ed.visible(5, 9), ["X ab", "X", ""]);
+
+        // someone else writes the file: saving asks first
+        std::fs::write(&f, "other\n").unwrap();
+        let t = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        key(&mut app, KeyCode::F(2));
+        assert!(matches!(
+            app.mode,
+            Mode::AskSave {
+                step: Step::Changed,
+                ..
+            }
+        ));
+        key(&mut app, KeyCode::Char('n'));
+        assert!(matches!(app.mode, Mode::Edit { .. }));
+        key(&mut app, KeyCode::F(2));
+        key(&mut app, KeyCode::Char('y'));
+        wait(&mut app);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "X ab\nX\n");
+    }
+
+    #[test]
     fn editor_find_replace_undo_clipboard() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "one\ntwo one\n").unwrap();
@@ -3149,6 +3352,8 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         key(&mut app, KeyCode::F(7));
         type_text(&mut app, "one");
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (0, 0));
+        key(&mut app, KeyCode::F(3));
         assert_eq!(app.mode.editor_mut().unwrap().cursor, (1, 4));
         key(&mut app, KeyCode::F(3));
         assert_eq!(app.mode.editor_mut().unwrap().cursor, (0, 0));

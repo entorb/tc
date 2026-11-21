@@ -6,6 +6,7 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use encoding_rs::{Encoder, EncoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use regex::Regex;
@@ -19,6 +20,9 @@ const CHUNK: usize = 64 * 1024;
 const BINARY_PROBE: usize = 8 * 1024;
 /// Undo steps kept; older ones are dropped.
 const MAX_UNDO: usize = 10_000;
+/// Chars scanned for a matching bracket.
+const BRACKET_SCAN: usize = 20_000;
+const PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Eol {
@@ -95,6 +99,12 @@ pub struct Editor {
     /// Steps of changes, each undone as one unit.
     undo: VecDeque<Vec<Change>>,
     redo: Vec<Vec<Change>>,
+    /// Soft wrap at the window width (cursor keys still move by logical line).
+    pub wrap: bool,
+    /// Line number gutter.
+    pub numbers: bool,
+    /// Modification time at open or last save, to warn about outside changes.
+    mtime: Option<SystemTime>,
 }
 
 impl Editor {
@@ -115,6 +125,7 @@ impl Editor {
                 (det.guess(None, chardetng::Utf8Detection::Allow), 0)
             }
         };
+        let mtime = file.metadata().and_then(|m| m.modified()).ok();
         file.seek(SeekFrom::Start(bom_len as u64))
             .map_err(io_err(path))?;
         let mut decoder = encoding.new_decoder_without_bom_handling();
@@ -154,11 +165,21 @@ impl Editor {
             sel: None,
             undo: VecDeque::new(),
             redo: Vec::new(),
+            wrap: false,
+            numbers: true,
+            mtime,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The file was modified by someone else since it was opened or saved.
+    pub fn changed_on_disk(&self) -> bool {
+        fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| Some(t) != self.mtime)
     }
 
     pub fn dirty(&self) -> bool {
@@ -263,6 +284,18 @@ impl Editor {
         }
     }
 
+    /// Adds several changes as one undo step.
+    fn record_step(&mut self, step: Vec<Change>) {
+        if step.is_empty() {
+            return;
+        }
+        self.redo.clear();
+        self.undo.push_back(step);
+        if self.undo.len() > MAX_UNDO {
+            self.undo.pop_front();
+        }
+    }
+
     pub fn undo(&mut self) {
         let Some(step) = self.undo.pop_back() else {
             return;
@@ -309,6 +342,11 @@ impl Editor {
     pub fn select(&mut self, extend: bool) {
         let idx = self.idx();
         self.sel = extend.then(|| self.sel.unwrap_or(idx));
+    }
+
+    pub fn select_all(&mut self) {
+        self.sel = Some(0);
+        self.goto_idx(usize::MAX);
     }
 
     pub fn copy(&self) -> Option<String> {
@@ -365,7 +403,119 @@ impl Editor {
         self.record(c, true);
     }
 
+    /// Line break that keeps the indentation of the cursor line.
+    pub fn newline(&mut self) {
+        let (line, col) = self.cursor;
+        let indent: String = (self.rope.line(line).chars().take(col))
+            .take_while(|&c| c == ' ' || c == '\t')
+            .collect();
+        self.insert(&format!("\n{indent}"), false);
+    }
+
+    /// Deletes the selection, else up to the next (or previous) word start.
+    pub fn delete_word(&mut self, forward: bool) {
+        if self.delete_selection() {
+            return;
+        }
+        let from = self.idx();
+        self.move_word(forward);
+        let (a, b) = (from.min(self.idx()), from.max(self.idx()));
+        if a < b {
+            let c = self.splice(a, b - a, "");
+            self.record(c, false);
+        }
+        self.goto_idx(a);
+    }
+
+    /// Copies the cursor line below itself.
+    pub fn duplicate_line(&mut self) {
+        let (line, col) = self.cursor;
+        let at = self.rope.line_to_char(line) + self.line_len(line);
+        let text = format!("\n{}", self.line_text(line));
+        let c = self.splice(at, 0, &text);
+        self.record(c, false);
+        self.sel = None;
+        self.cursor = (line + 1, col);
+    }
+
+    /// Removes one tab or up to 4 spaces in front of the cursor line or every selected line.
+    pub fn unindent(&mut self) {
+        let (first, last) = match self.selection() {
+            Some(r) => (
+                self.rope.char_to_line(r.start),
+                self.rope.char_to_line(r.end.saturating_sub(1).max(r.start)),
+            ),
+            None => (self.cursor.0, self.cursor.0),
+        };
+        let (mut step, mut cursor_cut) = (Vec::new(), 0);
+        for l in (first..=last).rev() {
+            let head = self.rope.line(l);
+            let n = match head.chars().next() {
+                Some('\t') => 1,
+                _ => head.chars().take(4).take_while(|&c| c == ' ').count(),
+            };
+            if n > 0 {
+                step.push(self.splice(self.rope.line_to_char(l), n, ""));
+            }
+            if l == self.cursor.0 {
+                cursor_cut = n;
+            }
+        }
+        self.record_step(step);
+        self.sel = None;
+        self.cursor.1 = self.cursor.1.saturating_sub(cursor_cut);
+    }
+
+    /// Replaces the selected match (`$1` groups work); the cursor ends behind the new text.
+    pub fn replace_selection(&mut self, re: &Regex, with: &str) {
+        if let Some(text) = self.copy() {
+            self.insert(&re.replace(&text, with), false);
+        }
+    }
+
+    /// Positions of the bracket at (or before) the cursor and its partner, if any.
+    // shortcut: brackets in strings and comments count, scan stops after BRACKET_SCAN chars
+    pub fn brackets(&self) -> Option<[(usize, usize); 2]> {
+        let at = |i: usize| self.rope.get_char(i);
+        let idx = self.idx();
+        let (i, c) = [Some(idx), idx.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .find_map(|i| {
+                at(i)
+                    .filter(|c| PAIRS.iter().any(|p| p.0 == *c || p.1 == *c))
+                    .map(|c| (i, c))
+            })?;
+        let forward = PAIRS.iter().any(|p| p.0 == c);
+        let (same, other) = PAIRS
+            .iter()
+            .find(|p| p.0 == c || p.1 == c)
+            .map(|&(o, k)| if forward { (o, k) } else { (k, o) })?;
+        let (mut depth, mut j) = (0usize, i);
+        for _ in 0..BRACKET_SCAN {
+            j = if forward { j + 1 } else { j.checked_sub(1)? };
+            let ch = at(j)?;
+            if ch == same {
+                depth += 1;
+            } else if ch == other {
+                if depth == 0 {
+                    let pos = |i: usize| {
+                        let l = self.rope.char_to_line(i);
+                        (l, i - self.rope.line_to_char(l))
+                    };
+                    return Some([pos(i), pos(j)]);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    /// Deletes the selection, else the cursor line.
     pub fn delete_line(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let line = self.cursor.0;
         let start = self.rope.line_to_char(line);
         let end = if line + 1 < self.line_count() {
@@ -392,16 +542,16 @@ impl Editor {
         self.goto_idx(self.rope.line_to_char(line));
     }
 
-    /// Cursor to the next (or previous) word start (end).
+    /// Cursor to the start of the next (or previous) word.
     pub fn move_word(&mut self, forward: bool) {
         let word = |c: char| c.is_alphanumeric() || c == '_';
         let n = self.rope.len_chars();
         let mut i = self.idx();
         if forward {
-            while i < n && !word(self.rope.char(i)) {
+            while i < n && word(self.rope.char(i)) {
                 i += 1;
             }
-            while i < n && word(self.rope.char(i)) {
+            while i < n && !word(self.rope.char(i)) {
                 i += 1;
             }
         } else {
@@ -418,11 +568,16 @@ impl Editor {
     /// Selects the next (or previous) match of `re`, wrapping around; false if none.
     /// Matches are per line. Runs on the caller's thread.
     // shortcut: scans on the UI thread, upgrade to a worker if huge buffers feel slow
-    pub fn find(&mut self, re: &Regex, forward: bool) -> bool {
+    pub fn find(&mut self, re: &Regex, forward: bool, wrap: bool) -> bool {
         let n = self.line_count();
         let (line, col) = self.cursor;
+        // a selected match is skipped, a bare cursor may sit right at one
+        let from_col = col + usize::from(self.sel.is_some());
         // n + 1 passes: the cursor line is searched again whole after wrapping
         for step in 0..=n {
+            if !wrap && step > 0 && (step > line && !forward || line + step >= n && forward) {
+                break;
+            }
             let l = if forward {
                 (line + step) % n
             } else {
@@ -431,7 +586,7 @@ impl Editor {
             let text = self.line_text(l);
             let m = if forward {
                 let from = if step == 0 {
-                    byte_of(&text, col + 1)
+                    byte_of(&text, from_col)
                 } else {
                     Some(0)
                 };
@@ -471,13 +626,7 @@ impl Editor {
             let at = self.rope.line_to_char(l);
             step.push(self.splice(at, text.chars().count(), &re.replace_all(&text, with)));
         }
-        if !step.is_empty() {
-            self.redo.clear();
-            self.undo.push_back(step);
-            if self.undo.len() > MAX_UNDO {
-                self.undo.pop_front();
-            }
-        }
+        self.record_step(step);
         self.sel = None;
         self.move_v(0);
         count
@@ -511,24 +660,82 @@ impl Editor {
         let (height, width) = (height.max(1), width.max(1));
         let (line, col) = self.cursor;
         self.top = self.top.min(line).max((line + 1).saturating_sub(height));
+        if self.wrap {
+            self.left = 0;
+            while self.top < line
+                && self.rows_between(self.top, line, width) + col / width >= height
+            {
+                self.top += 1;
+            }
+            return;
+        }
         self.left = self.left.min(col).max((col + 1).saturating_sub(width));
     }
 
-    /// Visible part of the lines from `top`; control chars (tabs too) show as one blank cell.
+    /// Screen rows `lines` .. `end` take when wrapped to `width` (cursor row included).
+    fn rows_between(&self, lines: usize, end: usize, width: usize) -> usize {
+        (lines..end).map(|l| self.line_len(l) / width + 1).sum()
+    }
+
+    /// Cursor cell (row, column) in the text window of `width`.
+    pub fn cursor_cell(&self, width: usize) -> (usize, usize) {
+        let (line, col) = self.cursor;
+        if self.wrap {
+            let w = width.max(1);
+            (self.rows_between(self.top, line, w) + col / w, col % w)
+        } else {
+            (line.saturating_sub(self.top), col.saturating_sub(self.left))
+        }
+    }
+
+    /// Cursor to the clicked cell of the text window, extending the selection if `extend`.
+    pub fn click(&mut self, row: usize, col: usize, width: usize, extend: bool) {
+        self.select(extend);
+        let last = self.line_count() - 1;
+        let (line, col) = if self.wrap {
+            let (w, mut row, mut line) = (width.max(1), row, self.top);
+            while line < last && row > self.line_len(line) / w {
+                row -= self.line_len(line) / w + 1;
+                line += 1;
+            }
+            (line, row * w + col)
+        } else {
+            ((self.top + row).min(last), self.left + col)
+        };
+        self.cursor = (line, col.min(self.line_len(line)));
+    }
+
+    /// Visible rows from `top` as (line, first column, text); a line is cut at `left`, or wrapped
+    /// over several rows. Control chars (tabs too) show as one blank cell.
     // shortcut: tabs are not expanded, upgrade when tab stops matter
-    pub fn visible(&self, height: usize, width: usize) -> Vec<String> {
-        (self.top..self.line_count().min(self.top + height))
-            .map(|i| {
-                self.rope
-                    .line(i)
-                    .chars()
+    pub fn rows(&self, height: usize, width: usize) -> Vec<(usize, usize, String)> {
+        let w = width.max(1);
+        let mut out = Vec::new();
+        for i in self.top..self.line_count() {
+            let n = if self.wrap {
+                self.line_len(i) / w + 1
+            } else {
+                1
+            };
+            for k in 0..n {
+                if out.len() >= height {
+                    return out;
+                }
+                let start = if self.wrap { k * w } else { self.left };
+                let text = (self.rope.line(i).chars())
                     .filter(|&c| c != '\n')
-                    .skip(self.left)
-                    .take(width)
+                    .skip(start)
+                    .take(w)
                     .map(|c| if c.is_control() { ' ' } else { c })
-                    .collect()
-            })
-            .collect()
+                    .collect();
+                out.push((i, start, text));
+            }
+        }
+        out
+    }
+
+    pub fn visible(&self, height: usize, width: usize) -> Vec<String> {
+        self.rows(height, width).into_iter().map(|r| r.2).collect()
     }
 
     /// Trimmed trailing blanks, atomic replace of the (symlink-resolved) target.
@@ -597,6 +804,7 @@ impl Editor {
             self.eol = Eol::Lf;
         }
         self.dirty = false;
+        self.mtime = fs::metadata(&target).and_then(|m| m.modified()).ok();
         Ok(())
     }
 }
@@ -946,18 +1154,18 @@ mod tests {
         let (_d, mut e) = editor("one two\nthree");
         e.select(true);
         e.move_word(true);
-        assert_eq!(e.copy().as_deref(), Some("one"));
-        assert_eq!(e.selection_cols(0), Some((0, 3)));
+        assert_eq!(e.copy().as_deref(), Some("one "));
+        assert_eq!(e.selection_cols(0), Some((0, 4)));
         assert_eq!(e.selection_cols(1), None);
-        assert_eq!(e.cut().as_deref(), Some("one"));
-        assert_eq!(text(&e), " two|three");
+        assert_eq!(e.cut().as_deref(), Some("one "));
+        assert_eq!(text(&e), "two|three");
         e.select(false);
         e.goto_idx(usize::MAX);
         e.insert("X\nY", false);
-        assert_eq!(text(&e), " two|threeX|Y");
+        assert_eq!(text(&e), "two|threeX|Y");
         e.goto_idx(0);
         e.select(true);
-        e.move_h(4);
+        e.move_h(3);
         e.insert_char('_'); // typing replaces the selection
         assert_eq!(text(&e), "_|threeX|Y");
         e.delete_line();
@@ -972,9 +1180,9 @@ mod tests {
     fn word_moves_and_goto() {
         let (_d, mut e) = editor("foo, bar_1\nbaz");
         e.move_word(true);
-        assert_eq!(e.cursor, (0, 3));
+        assert_eq!(e.cursor, (0, 5));
         e.move_word(true);
-        assert_eq!(e.cursor, (0, 10));
+        assert_eq!(e.cursor, (1, 0));
         e.move_word(false);
         assert_eq!(e.cursor, (0, 5));
         e.goto_line(2);
@@ -987,21 +1195,69 @@ mod tests {
     fn find_wraps_both_ways() {
         let (_d, mut e) = editor("foo bar\nbaz foo\né foo");
         let re = crate::search::compile("foo").unwrap();
-        assert!(e.find(&re, true));
+        assert!(e.find(&re, true, true));
+        assert_eq!(e.cursor, (0, 0)); // a match right at the cursor counts
+        assert!(e.find(&re, true, true));
         assert_eq!(e.cursor, (1, 4));
         assert_eq!(e.copy().as_deref(), Some("foo"));
-        assert!(e.find(&re, true));
+        assert!(e.find(&re, true, true));
         assert_eq!(e.cursor, (2, 2)); // char column, not byte
-        assert!(e.find(&re, true));
+        assert!(e.find(&re, true, true));
         assert_eq!(e.cursor, (0, 0)); // wrapped
-        assert!(e.find(&re, false));
+        assert!(!e.find(&re, false, false)); // nothing before the start
+        assert!(e.find(&re, false, true));
         assert_eq!(e.cursor, (2, 2));
-        assert!(e.find(&re, false));
+        assert!(e.find(&re, false, true));
         assert_eq!(e.cursor, (1, 4));
-        assert!(!e.find(&crate::search::compile("nope").unwrap(), true));
+        assert!(!e.find(&crate::search::compile("nope").unwrap(), true, true));
         let (_d, mut e) = editor("one foo");
-        assert!(e.find(&re, true)); // single match is found again after wrapping
-        assert!(e.find(&re, true));
+        assert!(e.find(&re, true, true)); // single match is found again after wrapping
+        assert!(e.find(&re, true, true));
+    }
+
+    #[test]
+    fn indent_duplicate_word_delete_brackets() {
+        let (_d, mut e) = editor("  a(b[c]) x\n\tq");
+        e.goto_idx(4);
+        e.newline();
+        assert_eq!(text(&e), "  a(|  b[c]) x| q");
+        e.undo();
+        assert_eq!(text(&e), "  a(b[c]) x| q");
+        e.goto_idx(3); // before `(`
+        assert_eq!(e.brackets(), Some([(0, 3), (0, 8)]));
+        e.goto_idx(7); // behind `]`
+        assert_eq!(e.brackets(), Some([(0, 7), (0, 5)]));
+        e.goto_idx(2);
+        assert_eq!(e.brackets(), None);
+        e.select_all();
+        e.unindent();
+        assert_eq!(text(&e), "a(b[c]) x|q");
+        e.undo();
+        assert_eq!(text(&e), "  a(b[c]) x| q");
+        e.goto_idx(0);
+        e.duplicate_line();
+        assert_eq!(e.cursor, (1, 0));
+        assert_eq!(text(&e), "  a(b[c]) x|  a(b[c]) x| q");
+        e.goto_idx(usize::MAX);
+        e.delete_word(false);
+        assert_eq!(text(&e), "  a(b[c]) x|  a(b[c]) x| ");
+        e.goto_idx(0);
+        e.delete_word(true);
+        assert_eq!(text(&e), "a(b[c]) x|  a(b[c]) x| ");
+    }
+
+    #[test]
+    fn wrapped_rows_and_click() {
+        let (_d, mut e) = editor("abcdefg\nxy");
+        e.wrap = true;
+        assert_eq!(e.visible(10, 3), ["abc", "def", "g", "xy"]);
+        e.click(2, 1, 3, false); // row "g", past its end
+        assert_eq!(e.cursor, (0, 7));
+        e.click(3, 1, 3, false);
+        assert_eq!(e.cursor, (1, 1));
+        e.goto_idx(usize::MAX);
+        e.scroll_to_cursor(2, 3);
+        assert_eq!((e.top, e.cursor_cell(3)), (1, (0, 2)));
     }
 
     #[test]

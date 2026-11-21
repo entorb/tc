@@ -107,29 +107,30 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let lang = syntax::lang(Path::new(title.as_str()));
         // shortcut: viewer assumes no code fence open above the screen, upgrade with a fence index in `Viewer`
         let mut fence = false;
-        let visible: Vec<Line> =
-            match view.rows(height, (inner.width as usize).saturating_sub(gutter)) {
-                Ok(rows) => {
-                    let mut n = top.unwrap_or(0);
-                    rows.into_iter()
-                        .map(|(first, text)| {
-                            let mut line =
-                                highlight(text, lang, &mut fence, app.search.as_ref(), None, 0);
-                            if top.is_some() {
-                                let num = if first {
-                                    format!("{:>6} ", n + 1)
-                                } else {
-                                    " ".repeat(7)
-                                };
-                                line.spans.insert(0, Span::raw(num));
-                            }
-                            n += u64::from(first);
-                            line
-                        })
-                        .collect()
-                }
-                Err(e) => vec![Line::raw(e.to_string())],
-            };
+        let visible: Vec<Line> = match view
+            .rows(height, (inner.width as usize).saturating_sub(gutter))
+        {
+            Ok(rows) => {
+                let mut n = top.unwrap_or(0);
+                rows.into_iter()
+                    .map(|(first, text)| {
+                        let mut line =
+                            highlight(text, lang, &mut fence, app.search.as_ref(), None, (0, &[]));
+                        if top.is_some() {
+                            let num = if first {
+                                format!("{:>6} ", n + 1)
+                            } else {
+                                " ".repeat(7)
+                            };
+                            line.spans.insert(0, Span::raw(num));
+                        }
+                        n += u64::from(first);
+                        line
+                    })
+                    .collect()
+            }
+            Err(e) => vec![Line::raw(e.to_string())],
+        };
         frame.render_widget(
             Paragraph::new(visible).style(PANEL).block(block),
             frame.area(),
@@ -139,7 +140,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if let Some(editor) = app.mode.editor_mut() {
-        draw_editor(frame, editor, &mut app.page, &app.note, app.search.as_ref());
+        draw_editor(
+            frame,
+            editor,
+            (&mut app.page, &mut app.edit_text),
+            &app.note,
+            app.search.as_ref(),
+        );
     } else {
         let [main, cmd, status] = Layout::vertical([
             Constraint::Min(0),
@@ -264,6 +271,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::AskViewer { text, .. } => popup(frame, "Edit", text),
         Mode::AskSave { editor, step, .. } => {
             let text = match step {
+                Step::Changed => "File changed on disk. Overwrite it?".to_owned(),
                 Step::Encoding => format!("File is {}. Convert to UTF-8?", editor.encoding_name()),
                 Step::Eol => "Convert line endings to LF?".to_owned(),
             };
@@ -407,11 +415,11 @@ fn draw_input(frame: &mut Frame, app: &mut App) {
         let (title, text) = match app.mode {
             Mode::View { .. } => ("Help: viewer", HELP_VIEW),
             Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
-            Mode::Stats(_) => ("Help: file stats", HELP_STATS),
+            Mode::Stats(_) => ("Help: file stats (ncdu)", HELP_STATS),
             _ => ("Help", HELP_MAIN),
         };
         let lines = text.lines().count();
-        let [h] = Layout::horizontal([Constraint::Length(frame.area().width.min(60))])
+        let [h] = Layout::horizontal([Constraint::Length(frame.area().width.min(64))])
             .flex(Flex::Center)
             .areas(frame.area());
         let [area] = Layout::vertical([Constraint::Length(
@@ -449,7 +457,7 @@ fn draw_input(frame: &mut Frame, app: &mut App) {
 fn draw_editor(
     frame: &mut Frame,
     editor: &mut tc_core::edit::Editor,
-    page: &mut usize,
+    (page, text_area): (&mut usize, &mut Rect),
     note: &str,
     re: Option<&Regex>,
 ) {
@@ -457,34 +465,57 @@ fn draw_editor(
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
     let block = themed_block().title(editor.path().display().to_string());
     let inner = block.inner(main);
-    let (height, width) = (inner.height as usize, inner.width as usize);
+    let gutter = if editor.numbers {
+        editor.line_count().to_string().len() + 1
+    } else {
+        0
+    };
+    let (height, width) = (
+        inner.height as usize,
+        (inner.width as usize).saturating_sub(gutter),
+    );
     *page = height.max(1);
+    *text_area = Rect::new(inner.x + gutter as u16, inner.y, width as u16, inner.height);
     editor.scroll_to_cursor(height, width);
+    let brackets = editor.brackets();
     let lang = syntax::lang(editor.path());
     let mut fence = lang.is_some_and(|l| l.markdown) && editor.in_fence(editor.top);
     let lines: Vec<Line> = editor
-        .visible(height, width)
+        .rows(height, width)
         .into_iter()
-        .enumerate()
-        .map(|(i, row)| {
-            highlight(
+        .map(|(l, start, row)| {
+            let marks: Vec<usize> = brackets
+                .iter()
+                .flatten()
+                .filter(|p| p.0 == l)
+                .filter_map(|p| p.1.checked_sub(start))
+                .collect();
+            let mut line = highlight(
                 row,
                 lang,
                 &mut fence,
                 re,
-                editor.selection_cols(editor.top + i),
-                editor.left,
-            )
+                editor.selection_cols(l),
+                (start, &marks),
+            );
+            if editor.numbers {
+                // continuation rows of a wrapped line get a blank gutter
+                let num = if start == 0 || !editor.wrap {
+                    format!("{:>1$} ", l + 1, gutter - 1)
+                } else {
+                    " ".repeat(gutter)
+                };
+                line.spans
+                    .insert(0, Span::styled(num, Style::new().fg(Color::DarkGray)));
+            }
+            line
         })
         .collect();
     frame.render_widget(Paragraph::new(lines).style(PANEL).block(block), main);
     let (line, col) = editor.cursor;
-    let (dx, dy) = (
-        col.saturating_sub(editor.left),
-        line.saturating_sub(editor.top),
-    );
-    if dx < usize::from(inner.width) && dy < usize::from(inner.height) {
-        frame.set_cursor_position((inner.x + dx as u16, inner.y + dy as u16));
+    let (dy, dx) = editor.cursor_cell(width);
+    if dx < width && dy < height {
+        frame.set_cursor_position((text_area.x + dx as u16, inner.y + dy as u16));
     }
     let eol = match editor.eol() {
         Eol::Lf => "LF",
@@ -510,7 +541,7 @@ fn highlight(
     fence: &mut bool,
     re: Option<&Regex>,
     sel: Option<(usize, usize)>,
-    left: usize,
+    (left, brackets): (usize, &[usize]),
 ) -> Line<'static> {
     let mut styles = vec![Style::new(); row.chars().count()];
     let at = |byte: usize| row[..byte].chars().count();
@@ -527,6 +558,11 @@ fn highlight(
         let end = styles.len();
         for st in &mut styles[a.saturating_sub(left).min(end)..b.saturating_sub(left).min(end)] {
             *st = st.reversed();
+        }
+    }
+    for &c in brackets {
+        if let Some(st) = styles.get_mut(c) {
+            *st = st.bold().underlined();
         }
     }
     let mut spans: Vec<(String, Style)> = Vec::new();
@@ -713,53 +749,51 @@ fn hms(s: u64) -> String {
 }
 
 const HELP_MAIN: &str = "\
+== Highlights ==
+Ctrl+Space      FILE STATS (like ncdu): biggest files and dirs
+                of the current tree, with % and bar
+Ctrl+N          SFTP / FTP / FTPS connections
+Ctrl+B          bookmarks (hotlist), Ctrl+D adds this directory
+
 == Navigation ==
-Up/Down/PgUp/PgDn/Home/End  move cursor
-Tab  switch panel
-Enter  open directory, archive or file (default app)
-Backspace  parent directory
-Alt+Left / Alt+Right  history back / forward
-~  home directory
-Ctrl+\\  root directory
-Ctrl+R  refresh
-Alt+F1 / Alt+F2  drives for left / right panel
-Ctrl+U  swap panels
-Ctrl+T / Ctrl+W  new / close tab
-Ctrl+PgDn / Ctrl+PgUp  next / previous tab (also Ctrl+Tab / Ctrl+Shift+Tab)
-Alt+=  other panel to this directory
-Alt+.  show / hide hidden files
-Ctrl+F3/F4/F5/F6  sort name/ext/date/size (again: reverse)
-Ctrl+B  hotlist
-Ctrl+N  connections (SFTP, FTP, FTPS)
-Ctrl+Space  file stats (Tab size/count, Enter/Bksp, Esc/F10)
-Ctrl+D  add directory to hotlist
-Esc  clear filter, leave found list
+Up/Down/PgUp/PgDn/Home/End   move cursor
+Tab             switch panel
+Enter           open directory, archive or file
+Backspace       parent directory
+Alt+Left/Right  history back / forward
+~               home directory
+Ctrl+\\         root directory
+Ctrl+R          refresh
+Alt+F1 / F2     drives for left / right panel
+Ctrl+U          swap panels
+Ctrl+T / Ctrl+W new / close tab
+Ctrl+PgDn/PgUp  next / previous tab
+Alt+=           other panel to this directory
+Alt+.           show / hide hidden files
+Ctrl+F3..F6     sort name/ext/date/size (again: reverse)
+Esc             clear filter, leave found list
 
 == Selection ==
 Insert / Space  select entry
-Shift+Up/Down  select range
-+  select by mask
--  deselect by mask
-*  invert selection
-Ctrl+Y  select differences to other panel
+Shift+Up/Down   select range
++ / -           select / deselect by mask
+*               invert selection
+Ctrl+Y          select differences to other panel
 
 == Search ==
-Ctrl+S  quick search (again: next match)
-Ctrl+F  quick filter
-Alt+F7  find files
-:  command line
+Ctrl+S          quick search (again: next match)
+Ctrl+F          quick filter
+Alt+F7          find files
+:               command line
 
 == Files ==
-F3  view
-F4  edit
-Shift+F4  create file, edit in external editor
-Ctrl+Insert / Alt+Shift+C  copy paths to clipboard
-F5  copy
-F6  move
-Shift+F6  rename
-F7  make directory
-F8  delete
-F10 / q  quit";
+F3 / F4         view / edit
+Shift+F4        create file, edit in external editor
+Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
+F5 / F6         copy / move
+Shift+F6        rename
+F7 / F8         make directory / delete
+F10 / q         quit";
 
 const HELP_STATS: &str = "\
 Up/Down/PgUp/PgDn/Home/End  move cursor
@@ -807,6 +841,8 @@ F7 / Ctrl+F  find
 F3  next match
 Shift+F3  previous match
 F4 / Ctrl+R  replace all
+Alt+R  replace one by one (y n a Esc)
+Alt+C  case sensitive / smart case
 
 == Edit ==
 Ctrl+Z  undo
@@ -815,7 +851,14 @@ Shift+arrows  select
 Ctrl+C  copy (also system clipboard)
 Ctrl+X  cut
 Ctrl+V  paste (terminal paste works too)
-Ctrl+K  delete line";
+Ctrl+K / F8  delete selection or line
+Ctrl+A  select all
+Ctrl+D  duplicate line
+Ctrl+Backspace/Delete  delete word
+Shift+Tab  unindent line / selection
+Alt+W  wrap on / off
+Alt+L  line numbers on / off
+Mouse  click, drag, Shift+click select";
 
 fn popup(frame: &mut Frame, title: &str, text: &str) {
     popup_area(frame, title, text);
@@ -998,7 +1041,14 @@ mod tests {
     #[test]
     fn highlights_all_matches() {
         let re = tc_core::search::compile("o").unwrap();
-        let line = highlight("foo bar o".into(), None, &mut false, Some(&re), None, 0);
+        let line = highlight(
+            "foo bar o".into(),
+            None,
+            &mut false,
+            Some(&re),
+            None,
+            (0, &[]),
+        );
         let marked: String = line
             .spans
             .iter()
@@ -1008,7 +1058,14 @@ mod tests {
         assert_eq!(marked, "ooo");
         assert_eq!(line.to_string(), "foo bar o");
         // selection overlay and multibyte text do not panic or shift columns
-        let line = highlight("é o".into(), None, &mut false, Some(&re), Some((0, 2)), 0);
+        let line = highlight(
+            "é o".into(),
+            None,
+            &mut false,
+            Some(&re),
+            Some((0, 2)),
+            (0, &[]),
+        );
         assert_eq!(line.to_string(), "é o");
     }
 
