@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use regex::Regex;
 
-use crate::panel::{Entry, entry_for};
+use crate::panel::{Entry, entry_with};
 use crate::search::mask_match;
 
 /// Results kept at most; the search stops there.
@@ -45,9 +45,11 @@ pub fn find(
                     None => true,
                     Some(re) => !is_dir && file_matches(&path, re, cancel),
                 };
+            // Err: vanished since read_dir; metadata comes with the listing on Windows
             if let Some(e) = hit
-                .then(|| entry_for(path.into_os_string(), &item.path()))
+                .then(|| item.metadata().ok())
                 .flatten()
+                .map(|m| entry_with(path.clone().into_os_string(), &path, m))
             {
                 found += 1;
                 out(e);

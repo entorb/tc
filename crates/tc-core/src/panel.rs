@@ -6,7 +6,10 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{io, thread};
 
 use crate::archive::Archive;
 use crate::{Result, io_err};
@@ -14,6 +17,8 @@ use crate::{Result, io_err};
 const PARENT: &str = "..";
 /// Directory history entries kept per panel.
 const HISTORY_MAX: usize = 100;
+/// How long a directory change waits for its listing before showing it later (slow mounts, huge dirs).
+const LOAD_WAIT: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -70,6 +75,29 @@ pub fn compare(a: &[Entry], b: &[Entry]) -> (HashSet<OsString>, HashSet<OsString
     (pick(a, b), pick(b, a))
 }
 
+/// What to do once a listing read in the background arrives.
+#[derive(Debug)]
+enum Then {
+    /// Show the new directory: set history position `pos` or record a `visit`, then focus a name.
+    Show {
+        pos: Option<usize>,
+        visit: bool,
+        focus: Option<OsString>,
+    },
+    /// Re-read of the shown directory: keep cursor and selection.
+    Reload,
+}
+
+/// A directory listing read in a worker; the panel shows the old list until it arrives.
+#[derive(Debug)]
+struct Pending {
+    path: PathBuf,
+    sort: (SortKey, bool),
+    then: Then,
+    rx: Receiver<Result<Vec<Entry>>>,
+    cancel: Arc<AtomicBool>,
+}
+
 #[derive(Debug)]
 pub struct Panel {
     path: PathBuf,
@@ -94,12 +122,13 @@ pub struct Panel {
     sel_sum: Cell<Option<(usize, u64)>>,
     /// Directory sizes calculated on request (by entry name); dropped when the list is re-read.
     dir_sizes: HashMap<OsString, u64>,
+    pending: Option<Pending>,
 }
 
 impl Panel {
     pub fn open(path: &Path) -> Result<Self> {
         let path = std::path::absolute(path).map_err(io_err(path))?;
-        let entries = read_entries(&path, (SortKey::Name, false), true)?;
+        let entries = read_entries(&path, (SortKey::Name, false), true, &AtomicBool::new(false))?;
         Ok(Self {
             history: vec![path.clone()],
             pos: 0,
@@ -115,6 +144,7 @@ impl Panel {
             show_hidden: true,
             sel_sum: Cell::new(None),
             dir_sizes: HashMap::new(),
+            pending: None,
         })
     }
 
@@ -207,6 +237,7 @@ impl Panel {
     }
 
     fn show_archive(&mut self) {
+        self.cancel_load();
         let Some(entries) = self.archive_entries() else {
             return;
         };
@@ -233,6 +264,7 @@ impl Panel {
 
     /// Show `entries` (names are absolute paths) as a flat list; `leave_virtual` goes back.
     pub fn panelize(&mut self, entries: Vec<Entry>) {
+        self.cancel_load();
         self.entries = entries;
         self.all = None;
         self.filter.clear();
@@ -247,7 +279,14 @@ impl Panel {
         if !self.virt {
             return Ok(false);
         }
-        self.load(self.path.clone())?;
+        self.load(
+            self.path.clone(),
+            Then::Show {
+                pos: None,
+                visit: false,
+                focus: None,
+            },
+        )?;
         Ok(true)
     }
 
@@ -272,10 +311,13 @@ impl Panel {
     }
 
     /// Re-read the directory, keeping cursor name and still existing selections.
+    /// A pending directory change is restarted instead (current sort and hidden flag).
     pub fn reload(&mut self) -> Result<()> {
-        self.dir_sizes.clear();
-        let keep = self.current().map(|e| e.name.clone());
-        self.entries = if let Some(e) = self.archive_entries() {
+        if let Some(p) = self.pending.take() {
+            p.cancel.store(true, Ordering::Relaxed);
+            return self.load(p.path, p.then);
+        }
+        let entries = if let Some(e) = self.archive_entries() {
             e
         } else if self.virt {
             // entries that vanished (e.g. deleted from the list) drop out
@@ -284,8 +326,16 @@ impl Panel {
                 .filter_map(|e| entry_for(e.name.clone(), Path::new(&e.name)))
                 .collect()
         } else {
-            read_entries(&self.path, self.sort, self.show_hidden)?
+            return self.load(self.path.clone(), Then::Reload);
         };
+        self.reloaded(entries);
+        Ok(())
+    }
+
+    fn reloaded(&mut self, entries: Vec<Entry>) {
+        self.dir_sizes.clear();
+        let keep = self.current().map(|e| e.name.clone());
+        self.entries = entries;
         self.all = None;
         if !self.filter.is_empty() {
             let f = std::mem::take(&mut self.filter);
@@ -300,7 +350,6 @@ impl Panel {
             Some(name) if self.focus(&name) => {}
             _ => self.move_cursor(old as isize),
         }
-        Ok(())
     }
 
     /// Move cursor by `delta`, clamped to the list.
@@ -356,10 +405,12 @@ impl Panel {
         let (Some(parent), Some(came_from)) = (self.path.parent(), self.path.file_name()) else {
             return Ok(());
         };
-        let came_from = came_from.to_owned();
-        self.change_dir(parent.to_owned())?;
-        self.focus(&came_from);
-        Ok(())
+        let then = Then::Show {
+            pos: None,
+            visit: true,
+            focus: Some(came_from.to_owned()),
+        };
+        self.load(parent.to_owned(), then)
     }
 
     /// Select entries `a..=b` (any order), not "..", and put the cursor on `b`.
@@ -509,28 +560,111 @@ impl Panel {
         else {
             return Ok(());
         };
-        self.load(self.history[i].clone())?;
-        self.pos = i;
-        Ok(())
+        self.load(
+            self.history[i].clone(),
+            Then::Show {
+                pos: Some(i),
+                visit: false,
+                focus: None,
+            },
+        )
     }
 
     /// New directory: visiting it drops the forward history; repeats are not recorded.
     fn change_dir(&mut self, path: PathBuf) -> Result<()> {
-        self.load(path.clone())?;
-        if self.history.get(self.pos) != Some(&path) {
+        self.load(
+            path,
+            Then::Show {
+                pos: None,
+                visit: true,
+                focus: None,
+            },
+        )
+    }
+
+    fn visit(&mut self, path: &Path) {
+        if self.history.get(self.pos).map(PathBuf::as_path) != Some(path) {
             self.history.truncate(self.pos + 1);
-            self.history.push(path);
+            self.history.push(path.to_owned());
             if self.history.len() > HISTORY_MAX {
                 self.history.remove(0);
             }
             self.pos = self.history.len() - 1;
         }
-        Ok(())
     }
 
-    /// Read the new directory first so a failure leaves the panel unchanged.
-    fn load(&mut self, path: PathBuf) -> Result<()> {
-        self.entries = read_entries(&path, self.sort, self.show_hidden)?;
+    /// Read `path` in a worker; fast directories are applied before returning, slow ones by [`Panel::poll`].
+    /// A failure leaves the panel unchanged.
+    fn load(&mut self, path: PathBuf, then: Then) -> Result<()> {
+        self.cancel_load();
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (dir, c, sort, hidden) = (path.clone(), cancel.clone(), self.sort, self.show_hidden);
+        // a hung network mount blocks this thread, not the UI; cancel only drops its result
+        thread::spawn(move || drop(tx.send(read_entries(&dir, sort, hidden, &c))));
+        self.pending = Some(Pending {
+            path,
+            sort,
+            then,
+            rx,
+            cancel,
+        });
+        self.wait(LOAD_WAIT).unwrap_or(Ok(()))
+    }
+
+    /// Apply a finished background listing; `None` while it is still read or nothing is pending.
+    pub fn poll(&mut self) -> Option<Result<()>> {
+        self.wait(Duration::ZERO)
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Option<Result<()>> {
+        let pending = self.pending.as_ref()?;
+        let res = match pending.rx.recv_timeout(timeout) {
+            Err(RecvTimeoutError::Timeout) => return None,
+            Ok(res) => res,
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(io_err(&pending.path)(io::Error::other("listing failed")))
+            }
+        };
+        let p = self.pending.take()?;
+        Some(res.map(|mut entries| {
+            if p.sort != self.sort {
+                let start = usize::from(entries.first().is_some_and(Entry::is_parent));
+                sort_entries(&mut entries[start..], self.sort);
+            }
+            match p.then {
+                Then::Reload => self.reloaded(entries),
+                Then::Show { pos, visit, focus } => {
+                    self.show(p.path, entries);
+                    if let Some(i) = pos {
+                        self.pos = i;
+                    }
+                    if visit {
+                        self.visit(&self.path.clone());
+                    }
+                    if let Some(name) = focus {
+                        self.focus(&name);
+                    }
+                }
+            }
+        }))
+    }
+
+    /// Directory whose listing is still being read.
+    pub fn loading(&self) -> Option<&Path> {
+        self.pending.as_ref().map(|p| p.path.as_path())
+    }
+
+    /// Stop waiting for a pending listing; true if there was one.
+    pub fn cancel_load(&mut self) -> bool {
+        self.pending
+            .take()
+            .inspect(|p| p.cancel.store(true, Ordering::Relaxed))
+            .is_some()
+    }
+
+    fn show(&mut self, path: PathBuf, entries: Vec<Entry>) {
+        self.entries = entries;
         self.dir_sizes.clear();
         self.sel_sum.set(None);
         self.all = None;
@@ -540,7 +674,6 @@ impl Panel {
         self.path = path;
         self.cursor = 0;
         self.selected.clear();
-        Ok(())
     }
 
     pub fn focus(&mut self, name: &OsStr) -> bool {
@@ -556,7 +689,11 @@ impl Panel {
 
 /// Entry named `name` for `path`; None if it cannot be stat'ed.
 pub(crate) fn entry_for(name: OsString, path: &Path) -> Option<Entry> {
-    let link_meta = fs::symlink_metadata(path).ok()?;
+    Some(entry_with(name, path, fs::symlink_metadata(path).ok()?))
+}
+
+/// Entry from the not-followed metadata `link_meta`; only symlinks cost extra syscalls.
+pub(crate) fn entry_with(name: OsString, path: &Path, link_meta: fs::Metadata) -> Entry {
     let is_symlink = link_meta.file_type().is_symlink();
     // dangling symlink: fall back to link metadata
     let meta = if is_symlink {
@@ -564,7 +701,7 @@ pub(crate) fn entry_for(name: OsString, path: &Path) -> Option<Entry> {
     } else {
         link_meta
     };
-    Some(Entry {
+    Entry {
         name,
         is_dir: meta.is_dir(),
         is_symlink,
@@ -575,7 +712,7 @@ pub(crate) fn entry_for(name: OsString, path: &Path) -> Option<Entry> {
         } else {
             None
         },
-    })
+    }
 }
 
 /// Lowercase text after the last dot; none for `.name` and names without a dot.
@@ -607,15 +744,27 @@ fn sort_entries(entries: &mut [Entry], (key, reverse): (SortKey, bool)) {
     }
 }
 
-fn read_entries(dir: &Path, sort: (SortKey, bool), hidden: bool) -> Result<Vec<Entry>> {
+/// Stops early (partial list) once `cancel` is set.
+fn read_entries(
+    dir: &Path,
+    sort: (SortKey, bool),
+    hidden: bool,
+    cancel: &AtomicBool,
+) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for item in fs::read_dir(dir).map_err(io_err(dir))? {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(entries);
+        }
         let item = item.map_err(io_err(dir))?;
         if !hidden && item.file_name().as_encoded_bytes().starts_with(b".") {
             continue;
         }
-        // None: vanished between read_dir and stat
-        entries.extend(entry_for(item.file_name(), &item.path()));
+        // DirEntry::metadata does not follow symlinks and is free on Windows (part of the listing)
+        // Err: vanished between read_dir and stat
+        if let Ok(meta) = item.metadata() {
+            entries.push(entry_with(item.file_name(), &item.path(), meta));
+        }
     }
     sort_entries(&mut entries, sort);
     if dir.parent().is_some() {
@@ -923,5 +1072,64 @@ mod tests {
         assert_eq!(p.selection_info(), (2, 13));
         p.reload().unwrap(); // stale after a re-read
         assert_eq!(p.selection_info(), (2, 3));
+    }
+
+    #[test]
+    fn slow_listing_keeps_old_list_until_it_arrives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("f"), "x").unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        // stand-in for a worker on a slow mount
+        let (tx, rx) = mpsc::channel();
+        let then = Then::Show {
+            pos: None,
+            visit: true,
+            focus: Some("f".into()),
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        p.pending = Some(Pending {
+            path: sub.clone(),
+            sort: p.sort,
+            then,
+            rx,
+            cancel,
+        });
+        assert!(p.poll().is_none());
+        assert_eq!(p.path(), tmp.path()); // still the old directory
+        assert_eq!(p.loading(), Some(sub.as_path()));
+        let never = AtomicBool::new(false);
+        tx.send(read_entries(&sub, p.sort, true, &never)).unwrap();
+        assert!(p.poll().unwrap().is_ok());
+        assert_eq!((p.path(), p.loading()), (sub.as_path(), None));
+        assert_eq!(p.current().unwrap().name, "f");
+        p.history_step(-1).unwrap();
+        assert_eq!(p.path(), tmp.path()); // visit was recorded
+    }
+
+    #[test]
+    fn cancel_drops_pending_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        let (_tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let then = Then::Reload;
+        let path = tmp.path().join("x");
+        p.pending = Some(Pending {
+            path,
+            sort: p.sort,
+            then,
+            rx,
+            cancel: cancel.clone(),
+        });
+        assert!(p.cancel_load());
+        assert!(cancel.load(Ordering::Relaxed) && p.loading().is_none() && !p.cancel_load());
+        fs::write(tmp.path().join("a"), "").unwrap();
+        assert!(
+            read_entries(tmp.path(), p.sort, true, &cancel)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

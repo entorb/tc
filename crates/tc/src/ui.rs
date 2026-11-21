@@ -579,6 +579,9 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
     if panel.is_virtual() {
         title += " [found]";
     }
+    if let Some(dir) = panel.loading() {
+        title += &format!(" [loading {}, Esc cancels]", dir.display());
+    }
     match panel.sort() {
         (SortKey::Name, false) => {}
         (key, rev) => {

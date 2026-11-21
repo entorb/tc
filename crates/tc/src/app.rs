@@ -805,6 +805,9 @@ impl App {
             }
             KeyCode::Esc => {
                 let panel = &mut self.panels[self.active];
+                if panel.cancel_load() {
+                    return;
+                }
                 panel.apply_filter("");
                 if let Err(e) = panel.leave_virtual() {
                     self.mode = Mode::Message(e.to_string());
@@ -1971,6 +1974,14 @@ impl App {
 
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
+        // dialogs keep a pending listing waiting so its error cannot replace them
+        if matches!(self.mode, Mode::Normal) {
+            for p in &mut self.panels {
+                if let Some(Err(e)) = p.poll() {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
+        }
         if matches!(self.mode, Mode::Normal)
             && let Some(st) = self.stats.take()
         {
