@@ -12,4 +12,17 @@ strip = true
 lto = true
 codegen-units = 1
 panic = "abort"
-opt-level = "z"
+opt-level = "s"
+
+[profile.release.package.tc-core]
+opt-level = 3
+[profile.release.package.regex-automata]
+opt-level = 3
+[profile.release.package.regex-syntax]
+opt-level = 3
+[profile.release.package.memchr]
+opt-level = 3
+[profile.release.package.aho-corasick]
+opt-level = 3
+[profile.release.package.encoding_rs]
+opt-level = 3
