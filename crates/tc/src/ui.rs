@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
 use regex::Regex;
 
 use crate::app::{App, FOOTER, Found, Mode, Step, Xfer};
@@ -12,6 +12,10 @@ use ratatui::widgets::ListState;
 use std::sync::atomic::Ordering;
 use tc_core::edit::{Eol, human};
 use tc_core::find::MAX_RESULTS;
+
+// Norton Commander look: blue panels, light-cyan files, white dirs, cyan cursor bar.
+const PANEL: Style = Style::new().fg(Color::LightCyan).bg(Color::Blue);
+const BAR: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
 
 /// Length of "YY-MM-DD HH:MM".
 const DATE_WIDTH: usize = 14;
@@ -58,7 +62,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         app.footer = status;
         let help = FOOTER.map(|(l, ..)| l).join("  ");
-        frame.render_widget(Line::raw(help).reversed(), status);
+        frame.render_widget(Line::raw(help).style(BAR), status);
     }
 
     match &app.mode {
@@ -168,7 +172,10 @@ fn draw_cmdline(frame: &mut Frame, app: &App, area: Rect) {
     let skip =
         (prompt.chars().count() + text.chars().count() + 1).saturating_sub(usize::from(area.width));
     let shown: String = line.chars().skip(skip).collect();
-    frame.render_widget(Line::raw(shown), area);
+    frame.render_widget(
+        Line::raw(shown).style(Style::new().fg(Color::Gray).bg(Color::Black)),
+        area,
+    );
     if let Some(c) = cur {
         let col = (prompt.chars().count() + c).saturating_sub(skip);
         frame.set_cursor_position((area.x + col as u16, area.y));
@@ -315,16 +322,16 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
             let style = if panel.is_selected(e) {
                 Style::new().fg(Color::Yellow).bold()
             } else if e.is_symlink {
-                Style::new().fg(Color::Cyan)
+                Style::new().fg(Color::Magenta)
             } else if e.is_dir {
-                Style::new().fg(Color::Blue).bold()
+                Style::new().fg(Color::White).bold()
             } else {
-                Style::new()
+                PANEL
             };
             ListItem::new(row).style(style)
         })
         .collect();
-    let mut title = panel.path().display().to_string();
+    let mut title = panel.title();
     if panel.is_virtual() {
         title += " [found]";
     }
@@ -334,17 +341,11 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
         _ if !panel.filter().is_empty() => title += &format!(" [filter: {}]", panel.filter()),
         _ => {}
     }
-    let border = if active {
-        Style::new().fg(Color::Cyan)
-    } else {
-        Style::new()
-    };
-    let block = Block::bordered().title(title).border_style(border);
-    let highlight = if active {
-        Style::new().reversed()
-    } else {
-        Style::new()
-    };
+    let block = Block::bordered()
+        .border_type(BorderType::Double)
+        .title(title)
+        .style(PANEL);
+    let highlight = if active { BAR } else { PANEL };
     let list = List::new(items).block(block).highlight_style(highlight);
     let state = &mut app.lists[i];
     state.select(Some(panel.cursor()));
@@ -414,7 +415,12 @@ fn popup(frame: &mut Frame, title: &str, text: &str) {
     frame.render_widget(Clear, area);
     let para = Paragraph::new(text)
         .wrap(Wrap { trim: false })
-        .block(Block::bordered().title(title));
+        .style(BAR)
+        .block(
+            Block::bordered()
+                .border_type(BorderType::Double)
+                .title(title),
+        );
     frame.render_widget(para, area);
 }
 

@@ -4,8 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::archive::Archive;
 use crate::{Result, io_err};
 
 const PARENT: &str = "..";
@@ -68,6 +70,8 @@ pub struct Panel {
     pos: usize,
     /// Panelized result list: entry names are absolute paths, `path` is where Backspace/Esc returns to.
     virt: bool,
+    /// Open archive and the directory inside it (`""` = root); `path` is then the archive file joined with it.
+    archive: Option<(Arc<Archive>, String)>,
 }
 
 impl Panel {
@@ -84,7 +88,55 @@ impl Panel {
             filter: String::new(),
             all: None,
             virt: false,
+            archive: None,
         })
+    }
+
+    pub fn archive(&self) -> Option<&Arc<Archive>> {
+        self.archive.as_ref().map(|(a, _)| a)
+    }
+
+    /// Panel header: the path, inside an archive `file.zip:/sub`.
+    pub fn title(&self) -> String {
+        match &self.archive {
+            Some((a, sub)) => format!("{}:/{sub}", a.file.display()),
+            None => self.path.display().to_string(),
+        }
+    }
+
+    /// Show the root of `archive` (read-only); leaving it with ".." returns to the containing directory.
+    pub fn open_archive(&mut self, archive: Archive) {
+        self.archive = Some((Arc::new(archive), String::new()));
+        self.show_archive();
+    }
+
+    /// Archive directory listing, sorted like a real one; always has "..".
+    fn archive_entries(&self) -> Option<Vec<Entry>> {
+        let (a, sub) = self.archive.as_ref()?;
+        let mut e = a.list(sub);
+        sort_entries(&mut e);
+        e.insert(0, Entry::parent());
+        Some(e)
+    }
+
+    fn show_archive(&mut self) {
+        let Some(entries) = self.archive_entries() else {
+            return;
+        };
+        let Some((a, sub)) = &self.archive else {
+            return;
+        };
+        self.path = if sub.is_empty() {
+            a.file.clone()
+        } else {
+            a.file.join(sub)
+        };
+        self.entries = entries;
+        self.all = None;
+        self.filter.clear();
+        self.virt = false;
+        self.cursor = 0;
+        self.selected.clear();
     }
 
     pub fn is_virtual(&self) -> bool {
@@ -133,7 +185,9 @@ impl Panel {
     /// Re-read the directory, keeping cursor name and still existing selections.
     pub fn reload(&mut self) -> Result<()> {
         let keep = self.current().map(|e| e.name.clone());
-        self.entries = if self.virt {
+        self.entries = if let Some(e) = self.archive_entries() {
+            e
+        } else if self.virt {
             // entries that vanished (e.g. deleted from the list) drop out
             let all = self.all.take().unwrap_or(std::mem::take(&mut self.entries));
             all.into_iter()
@@ -172,10 +226,17 @@ impl Panel {
         if !entry.is_dir {
             return Ok(false);
         }
-        if entry.is_parent() {
+        let (is_parent, name) = (entry.is_parent(), entry.name.clone());
+        if is_parent {
             self.parent()?;
+        } else if let Some((_, sub)) = &mut self.archive {
+            if !sub.is_empty() {
+                sub.push('/');
+            }
+            sub.push_str(&name.to_string_lossy());
+            self.show_archive();
         } else {
-            let path = self.path.join(&entry.name);
+            let path = self.path.join(&name);
             self.change_dir(path)?;
         }
         Ok(true)
@@ -184,6 +245,21 @@ impl Panel {
     /// Go to the parent directory, cursor on the directory we came from.
     pub fn parent(&mut self) -> Result<()> {
         if self.leave_virtual()? {
+            return Ok(());
+        }
+        if let Some((_, sub)) = &mut self.archive
+            && !sub.is_empty()
+        {
+            let came = match sub.rsplit_once('/') {
+                Some((up, last)) => {
+                    let last = last.to_owned();
+                    sub.truncate(up.len());
+                    last
+                }
+                None => std::mem::take(sub),
+            };
+            self.show_archive();
+            self.focus(OsStr::new(&came));
             return Ok(());
         }
         let (Some(parent), Some(came_from)) = (self.path.parent(), self.path.file_name()) else {
@@ -357,6 +433,7 @@ impl Panel {
         self.all = None;
         self.filter.clear();
         self.virt = false;
+        self.archive = None;
         self.path = path;
         self.cursor = 0;
         self.selected.clear();
@@ -393,13 +470,8 @@ pub(crate) fn entry_for(name: OsString, path: &Path) -> Option<Entry> {
     })
 }
 
-fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
-    let mut entries = Vec::new();
-    for item in fs::read_dir(dir).map_err(io_err(dir))? {
-        let item = item.map_err(io_err(dir))?;
-        // None: vanished between read_dir and stat
-        entries.extend(entry_for(item.file_name(), &item.path()));
-    }
+/// Directories first, then by case-insensitive name.
+fn sort_entries(entries: &mut [Entry]) {
     entries.sort_by_cached_key(|e| {
         (
             !e.is_dir,
@@ -407,6 +479,16 @@ fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
             e.name.clone(),
         )
     });
+}
+
+fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
+    let mut entries = Vec::new();
+    for item in fs::read_dir(dir).map_err(io_err(dir))? {
+        let item = item.map_err(io_err(dir))?;
+        // None: vanished between read_dir and stat
+        entries.extend(entry_for(item.file_name(), &item.path()));
+    }
+    sort_entries(&mut entries);
     if dir.parent().is_some() {
         entries.insert(0, Entry::parent());
     }
@@ -595,6 +677,38 @@ mod tests {
         assert_eq!(p.entries().len(), 1);
         p.parent().unwrap();
         assert!(!p.is_virtual() && p.entries().len() == 2); // "..", a
+    }
+
+    #[test]
+    fn archive_navigation() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("a.zip");
+        let mut z = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("d/e/f.txt", o).unwrap();
+        z.write_all(b"x").unwrap();
+        z.finish().unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        let a = Archive::open(&zip, &AtomicU64::new(0), &AtomicBool::new(false)).unwrap();
+        p.open_archive(a);
+        assert_eq!(p.title(), format!("{}:/", zip.display()));
+        assert_eq!(names(&p), ["..", "d"]);
+        p.move_cursor(1);
+        assert!(p.enter().unwrap()); // d
+        p.move_cursor(1);
+        assert!(p.enter().unwrap()); // d/e
+        assert_eq!(p.title(), format!("{}:/d/e", zip.display()));
+        assert_eq!(names(&p), ["..", "f.txt"]);
+        assert_eq!(p.targets().len(), 0);
+        p.parent().unwrap();
+        assert_eq!(p.current().unwrap().name, "e");
+        p.parent().unwrap();
+        p.parent().unwrap(); // root of archive: back to the directory
+        assert!(p.archive().is_none());
+        assert_eq!(p.current().unwrap().name, "a.zip");
+        assert_eq!(p.path(), std::path::absolute(tmp.path()).unwrap());
     }
 
     #[cfg(unix)]

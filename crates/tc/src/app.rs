@@ -15,6 +15,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use regex::Regex;
+use tc_core::archive::{Archive, Format, TempDir};
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::eta::Estimator;
@@ -129,6 +130,8 @@ pub enum Step {
 }
 
 enum Done {
+    Listed(tc_core::Result<Archive>),
+    Extracted(tc_core::Result<(TempDir, PathBuf)>),
     Loaded(tc_core::Result<Editor>),
     Saved(Editor, tc_core::Result<()>),
 }
@@ -315,7 +318,13 @@ pub struct App {
     pub history_file: Option<PathBuf>,
     /// Command and directory for the main loop to run on the real terminal.
     pub run: Option<(String, PathBuf)>,
+    /// Entry extracted from an archive for the viewer; removed once the viewer is closed.
+    view_tmp: Option<TempDir>,
 }
+
+/// Largest archive entry F3/F4 extracts to a temp file.
+const VIEW_CAP: u64 = 1 << 30;
+const READ_ONLY: &str = "Archives are read-only: only F5 copy out and F3/F4 view work here.";
 
 impl App {
     pub fn new(left: Panel, right: Panel) -> Self {
@@ -338,6 +347,7 @@ impl App {
             history: Vec::new(),
             history_file: None,
             run: None,
+            view_tmp: None,
         }
     }
 
@@ -415,7 +425,9 @@ impl App {
         });
         self.last_click = (!double).then_some((now, ev.column, ev.row));
         if double {
-            let is_dir = self.panels[i].current().is_some_and(|e| e.is_dir);
+            let is_dir = self.panels[i]
+                .current()
+                .is_some_and(|e| e.is_dir || Format::detect(Path::new(&e.name)).is_some());
             let code = if is_dir {
                 KeyCode::Enter
             } else {
@@ -799,6 +811,10 @@ impl App {
         if cmd.is_empty() {
             return;
         }
+        if self.panels[self.active].archive().is_some() {
+            self.mode = Mode::Message("No commands inside an archive.".into());
+            return;
+        }
         cmdline::push_history(&mut self.history, cmd);
         if let Some(file) = &self.history_file
             && let Err(e) = cmdline::save_history(file, &self.history)
@@ -1045,6 +1061,14 @@ impl App {
             KeyCode::Char('*') => panel.invert_selection(),
             KeyCode::Char(':') => self.mode = Mode::Cmd(LineEdit::default()),
             KeyCode::Enter | KeyCode::Backspace => {
+                let archive = panel
+                    .current()
+                    .filter(|e| code == KeyCode::Enter && !e.is_dir && panel.archive().is_none())
+                    .filter(|e| Format::detect(Path::new(&e.name)).is_some())
+                    .map(|e| panel.path().join(&e.name));
+                if let Some(file) = archive {
+                    return self.spawn_archive(file);
+                }
                 let result = if code == KeyCode::Enter {
                     panel.enter().map(drop)
                 } else {
@@ -1053,6 +1077,10 @@ impl App {
                 if let Err(e) = result {
                     self.mode = Mode::Message(e.to_string());
                 }
+            }
+            KeyCode::F(3 | 4) if panel.archive().is_some() => self.view_archive_entry(),
+            KeyCode::F(7) if panel.archive().is_some() => {
+                self.mode = Mode::Message(READ_ONLY.into())
             }
             KeyCode::F(3) => {
                 if let Some(path) = self.current_file() {
@@ -1076,7 +1104,15 @@ impl App {
         }
     }
 
+    /// Archives are only a source: nothing is written into them, nothing is removed from them.
     fn confirm(&mut self, op: Op) {
+        let in_archive = |i: usize| self.panels[i].archive().is_some();
+        if (in_archive(self.active) && op != Op::Copy)
+            || (in_archive(1 - self.active) && op != Op::Delete)
+        {
+            self.mode = Mode::Message(READ_ONLY.into());
+            return;
+        }
         let targets = self.panels[self.active].targets();
         match targets.as_slice() {
             [] => {}
@@ -1111,11 +1147,31 @@ impl App {
                 _ => (src.clone(), dest.clone()),
             })
             .collect();
+        let arch = self.panels[self.active].archive().cloned();
         let (tx, rx) = mpsc::channel();
         let (reply, answers) = mpsc::channel();
         let progress = Arc::new(ops::Progress::default());
         let c = progress.clone();
         thread::spawn(move || {
+            // Archive sources are streamed to a temp dir first, then copied like normal files.
+            // shortcut: needs temp space for the whole selection, upgrade to copy straight from the stream
+            let (jobs, _tmp) = match arch {
+                None => (jobs, None),
+                Some(a) => {
+                    let srcs: Vec<PathBuf> = jobs.iter().map(|(s, _)| s.clone()).collect();
+                    match a.extract_all(&srcs, &c.cancel) {
+                        Ok((tmp, out)) => {
+                            let targets = jobs.into_iter().map(|(_, t)| t);
+                            (out.into_iter().zip(targets).collect(), Some(tmp))
+                        }
+                        Err(e) => {
+                            let error = (!matches!(e, Error::Cancelled)).then_some(e.to_string());
+                            let _ = tx.send(XMsg::Done(error));
+                            return;
+                        }
+                    }
+                }
+            };
             let srcs: Vec<PathBuf> = jobs.iter().map(|(s, _)| s.clone()).collect();
             ops::scan(&srcs, &c);
             let mut sticky: Option<Policy> = None;
@@ -1180,7 +1236,9 @@ impl App {
 
     fn current_file(&self) -> Option<PathBuf> {
         let panel = &self.panels[self.active];
-        let entry = panel.current().filter(|e| !e.is_dir)?;
+        let entry = panel
+            .current()
+            .filter(|e| !e.is_dir && panel.archive().is_none())?;
         Some(panel.path().join(&entry.name))
     }
 
@@ -1202,6 +1260,38 @@ impl App {
             }
             Err(e) => self.mode = Mode::Message(format!("{cmd}: {e}")),
         }
+    }
+
+    /// List an archive in a worker thread; `tick` opens it in the active panel.
+    fn spawn_archive(&mut self, file: PathBuf) {
+        let total = std::fs::metadata(&file).map_or(1, |m| m.len());
+        let f = file.clone();
+        self.spawn("Listing", file, total, false, move |progress, cancel| {
+            Done::Listed(Archive::open(&f, progress, cancel))
+        });
+    }
+
+    /// F3/F4 inside an archive: extract the entry to a temp file (worker thread), then view it.
+    fn view_archive_entry(&mut self) {
+        let panel = &self.panels[self.active];
+        let (Some(arch), Some(entry)) = (panel.archive().cloned(), panel.current()) else {
+            return;
+        };
+        let fake = panel.path().join(&entry.name);
+        let Some(inner) = arch
+            .inner_of(&fake)
+            .filter(|_| !entry.is_dir && !entry.is_parent())
+        else {
+            return;
+        };
+        if entry.size > VIEW_CAP {
+            self.mode = Mode::Message("Entry over 1 GiB: copy it out with F5 instead.".into());
+            return;
+        }
+        let total = entry.size;
+        self.spawn("Extracting", fake, total, false, move |progress, cancel| {
+            Done::Extracted(arch.extract_temp(&inner, VIEW_CAP, progress, cancel))
+        });
     }
 
     fn open_viewer(&mut self, path: PathBuf) {
@@ -1311,6 +1401,9 @@ impl App {
 
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
+        if self.view_tmp.is_some() && !matches!(self.mode, Mode::View { .. }) {
+            self.view_tmp = None;
+        }
         if let Mode::Found(f) = &mut self.mode {
             return f.pump();
         }
@@ -1344,6 +1437,21 @@ impl App {
         let (exit, path) = (job.exit, job.path.clone());
         self.mode = Mode::Normal;
         match done {
+            Done::Listed(Ok(archive)) => self.panels[self.active].open_archive(archive),
+            Done::Extracted(Ok((tmp, file))) => match Viewer::open(&file) {
+                Ok(view) => {
+                    self.view_tmp = Some(tmp);
+                    self.mode = Mode::View {
+                        title: path.display().to_string(),
+                        view,
+                    };
+                }
+                Err(e) => self.mode = Mode::Message(format!("{}: {e}", path.display())),
+            },
+            Done::Listed(Err(Error::Cancelled)) | Done::Extracted(Err(Error::Cancelled)) => {}
+            Done::Listed(Err(e)) | Done::Extracted(Err(e)) => {
+                self.mode = Mode::Message(format!("{}: {e}", path.display()))
+            }
             Done::Loaded(Ok(editor)) => {
                 self.mode = Mode::Edit {
                     editor,
@@ -1529,6 +1637,50 @@ mod tests {
         let before = app.panels[1].path().to_path_buf();
         click(&mut app, 45, 1, KeyModifiers::NONE);
         assert_ne!(app.panels[1].path(), before);
+    }
+
+    #[test]
+    fn archive_enter_view_copy_out_and_read_only() {
+        use std::io::Write;
+        let (left, right) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let file = std::fs::File::create(left.path().join("a.zip")).unwrap();
+        let mut z = tc_core_zip(file);
+        z.0.start_file("d/f.txt", z.1).unwrap();
+        z.0.write_all(b"hello").unwrap();
+        z.0.finish().unwrap();
+        let mut app = App::new(
+            Panel::open(left.path()).unwrap(),
+            Panel::open(right.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter); // opens a.zip
+        wait(&mut app);
+        assert!(app.panels[0].archive().is_some());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter); // d
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        wait(&mut app);
+        assert!(matches!(app.mode, Mode::View { .. }) && app.view_tmp.is_some());
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        assert!(app.view_tmp.is_none());
+        key(&mut app, KeyCode::F(6));
+        assert!(matches!(app.mode, Mode::Message(_)));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert_eq!(std::fs::read(right.path().join("f.txt")).unwrap(), b"hello");
+    }
+
+    fn tc_core_zip(
+        f: std::fs::File,
+    ) -> (zip::ZipWriter<std::fs::File>, zip::write::SimpleFileOptions) {
+        (
+            zip::ZipWriter::new(f),
+            zip::write::SimpleFileOptions::default(),
+        )
     }
 
     fn wait(app: &mut App) {
