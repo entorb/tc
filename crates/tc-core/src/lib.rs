@@ -13,6 +13,7 @@ pub mod ops;
 pub mod panel;
 pub mod search;
 pub mod stats;
+pub mod syntax;
 pub mod view;
 
 #[derive(Debug, thiserror::Error)]

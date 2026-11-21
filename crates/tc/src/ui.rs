@@ -9,12 +9,13 @@ use regex::Regex;
 
 use crate::app::{App, FOOTER, Found, Mode, Stats, Step, Xfer};
 use ratatui::widgets::ListState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::{Eol, human};
 use tc_core::find::MAX_RESULTS;
 use tc_core::panel::SortKey;
+use tc_core::syntax::{self, Kind, Lang};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // Norton Commander look: blue panels, light-cyan files, white dirs, cyan cursor bar.
@@ -24,6 +25,17 @@ const BAR: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
 const BAR_INACTIVE: Style = Style::new().bg(Color::DarkGray);
 /// Marked files and search hits.
 const MARK: Style = Style::new().fg(Color::Rgb(255, 255, 0)).bold();
+
+fn syntax_style(kind: Kind) -> Style {
+    match kind {
+        Kind::Keyword => Style::new().fg(Color::White).bold(),
+        Kind::Str => Style::new().fg(Color::LightGreen),
+        Kind::Number => Style::new().fg(Color::LightMagenta),
+        Kind::Comment => Style::new().fg(Color::Gray),
+        Kind::Bold => Style::new().bold(),
+        Kind::Italic => Style::new().italic(),
+    }
+}
 
 /// Border and fill of viewer, editor and find list, same look as the panels.
 fn themed_block() -> Block<'static> {
@@ -91,13 +103,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // numbers only while the top line is known, see `Viewer::top_line`
         let top = view.top_line().filter(|_| app.view_numbers);
         let gutter = if top.is_some() { 7 } else { 0 };
+        let lang = syntax::lang(Path::new(title.as_str()));
+        // shortcut: viewer assumes no code fence open above the screen, upgrade with a fence index in `Viewer`
+        let mut fence = false;
         let visible: Vec<Line> =
             match view.rows(height, (inner.width as usize).saturating_sub(gutter)) {
                 Ok(rows) => {
                     let mut n = top.unwrap_or(0);
                     rows.into_iter()
                         .map(|(first, text)| {
-                            let mut line = highlight(text, app.search.as_ref(), None, 0);
+                            let mut line =
+                                highlight(text, lang, &mut fence, app.search.as_ref(), None, 0);
                             if top.is_some() {
                                 let num = if first {
                                     format!("{:>6} ", n + 1)
@@ -402,11 +418,22 @@ fn draw_editor(
     let (height, width) = (inner.height as usize, inner.width as usize);
     *page = height.max(1);
     editor.scroll_to_cursor(height, width);
+    let lang = syntax::lang(editor.path());
+    let mut fence = lang.is_some_and(|l| l.markdown) && editor.in_fence(editor.top);
     let lines: Vec<Line> = editor
         .visible(height, width)
         .into_iter()
         .enumerate()
-        .map(|(i, row)| highlight(row, re, editor.selection_cols(editor.top + i), editor.left))
+        .map(|(i, row)| {
+            highlight(
+                row,
+                lang,
+                &mut fence,
+                re,
+                editor.selection_cols(editor.top + i),
+                editor.left,
+            )
+        })
         .collect();
     frame.render_widget(Paragraph::new(lines).style(PANEL).block(block), main);
     let (line, col) = editor.cursor;
@@ -432,17 +459,25 @@ fn draw_editor(
     frame.render_widget(Line::raw(info).style(BAR), status);
 }
 
-/// `row` with all matches of `re` marked yellow and the selected columns
+/// `row` in `lang` syntax colors, with all matches of `re` marked yellow and the selected columns
 /// (counted from the first column of the line, minus `left`) reversed.
 // shortcut: matches the shown text, so a pattern with \t or one cut at the left edge can differ from the real match
 fn highlight(
     row: String,
+    lang: Option<&Lang>,
+    fence: &mut bool,
     re: Option<&Regex>,
     sel: Option<(usize, usize)>,
     left: usize,
 ) -> Line<'static> {
     let mut styles = vec![Style::new(); row.chars().count()];
     let at = |byte: usize| row[..byte].chars().count();
+    for (r, kind) in lang
+        .map(|l| syntax::tokens(l, &row, fence))
+        .unwrap_or_default()
+    {
+        styles[at(r.start)..at(r.end)].fill(syntax_style(kind));
+    }
     for m in re.into_iter().flat_map(|re| re.find_iter(&row)) {
         styles[at(m.start())..at(m.end())].fill(MARK);
     }
@@ -827,7 +862,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(screen.contains("file.txt"));
         assert!(screen.contains("Make directory"));
@@ -870,7 +905,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(screen.contains("world"));
         assert!(screen.contains("1:1  UTF-8  LF"));
@@ -898,7 +933,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(screen.contains("Find (regex)"));
     }
@@ -906,7 +941,7 @@ mod tests {
     #[test]
     fn highlights_all_matches() {
         let re = tc_core::search::compile("o").unwrap();
-        let line = highlight("foo bar o".into(), Some(&re), None, 0);
+        let line = highlight("foo bar o".into(), None, &mut false, Some(&re), None, 0);
         let marked: String = line
             .spans
             .iter()
@@ -916,7 +951,7 @@ mod tests {
         assert_eq!(marked, "ooo");
         assert_eq!(line.to_string(), "foo bar o");
         // selection overlay and multibyte text do not panic or shift columns
-        let line = highlight("é o".into(), Some(&re), Some((0, 2)), 0);
+        let line = highlight("é o".into(), None, &mut false, Some(&re), Some((0, 2)), 0);
         assert_eq!(line.to_string(), "é o");
     }
 
@@ -939,7 +974,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect()
     }
 
