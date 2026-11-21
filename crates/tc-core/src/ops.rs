@@ -3,7 +3,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
-use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -163,20 +162,22 @@ fn replace(src: &Path, target: &Path, mv: bool, p: &Progress) -> Result<()> {
     if mv && fs::rename(src, target).is_ok() {
         return Ok(());
     }
-    let tmp = temp_name(target);
-    let done =
-        copy_tree(src, &tmp, p).and_then(|()| fs::rename(&tmp, target).map_err(io_err(target)));
-    if let Err(e) = done {
-        remove_partial(&tmp);
-        return Err(e);
+    // a fresh dir next to the target: same file system for the rename, never a user's file,
+    // removed with whatever is left in it
+    let parent = target.parent().unwrap_or(Path::new("."));
+    let dir = tempfile::Builder::new()
+        .prefix(".tc-tmp-")
+        .tempdir_in(parent)
+        .map_err(io_err(parent))?;
+    let tmp = dir.path().join(target.file_name().unwrap_or_default());
+    let meta = fs::symlink_metadata(src).map_err(io_err(src))?;
+    if meta.is_symlink() {
+        copy_tree(src, &tmp, p)?;
+    } else {
+        copy_file(src, &tmp, &meta, p, true)?;
     }
+    fs::rename(&tmp, target).map_err(io_err(target))?;
     if mv { delete(src) } else { Ok(()) }
-}
-
-pub(crate) fn temp_name(target: &Path) -> PathBuf {
-    let mut name = OsString::from(".tc-tmp-");
-    name.push(target.file_name().unwrap_or_default());
-    target.with_file_name(name)
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -251,33 +252,50 @@ fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> Result<()> {
         // after the contents, so a read-only source dir does not block them
         fs::set_permissions(dst, meta.permissions()).map_err(io_err(dst))
     } else {
-        copy_file(src, dst, &meta, p)
+        copy_file(src, dst, &meta, p, false)
     }
 }
 
-/// Chunked copy so progress and cancel work inside a huge file. Leaves a partial `dst` on
-/// error; callers remove it.
-fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress) -> Result<()> {
+/// Chunked copy so progress and cancel work inside a huge file; keeps the modification time.
+/// `sync`: flush to disk before it replaces a file. Leaves a partial `dst` on error; callers
+/// remove it.
+fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress, sync: bool) -> Result<()> {
     if let Ok(mut cur) = p.current.lock() {
         cur.clear();
         cur.push(src);
     }
-    let mut from = fs::File::open(src).map_err(io_err(src))?;
-    let mut to = fs::File::create(dst).map_err(io_err(dst))?;
-    let mut buf = vec![0; usize::try_from(meta.len()).map_or(CHUNK, |n| n.clamp(1, CHUNK))];
+    let from = fs::File::open(src).map_err(io_err(src))?;
+    // create_new: a file that appeared since the existence check is never truncated
+    let mut to = fs::File::create_new(dst).map_err(io_err(dst))?;
+    let mut buf = Vec::new();
     loop {
         if p.cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        let n = from.read(&mut buf).map_err(io_err(src))?;
+        let n = platform::copy_chunk(&from, &mut to, &mut buf).map_err(io_err(dst))?;
         if n == 0 {
             break;
         }
-        to.write_all(&buf[..n]).map_err(io_err(dst))?;
-        p.done.fetch_add(n as u64, Ordering::Relaxed);
+        p.done.fetch_add(n, Ordering::Relaxed);
+    }
+    if let Ok(t) = meta.modified() {
+        let _ = to.set_modified(t);
+    }
+    if sync {
+        to.sync_all().map_err(io_err(dst))?;
     }
     p.files.fetch_add(1, Ordering::Relaxed);
     fs::set_permissions(dst, meta.permissions()).map_err(io_err(dst))
+}
+
+/// Read and write up to [`CHUNK`] bytes through `buf`; 0 at end of file.
+#[cfg(not(target_os = "linux"))]
+fn copy_chunk_buffered(from: &fs::File, to: &mut fs::File, buf: &mut Vec<u8>) -> io::Result<u64> {
+    use std::io::{Read, Write};
+    buf.resize(CHUNK, 0);
+    let n = (&*from).read(buf)?;
+    to.write_all(&buf[..n])?;
+    Ok(n as u64)
 }
 
 /// Only called on targets this operation created.
@@ -292,11 +310,28 @@ mod platform {
     pub fn symlink(link: &Path, dst: &Path, _src: &Path) -> io::Result<()> {
         std::os::unix::fs::symlink(link, dst)
     }
+
+    /// `io::copy` of a `Take<&File>` into a `File` runs in the kernel (`copy_file_range`:
+    /// reflinks, server-side NFS/SMB copies), still one chunk at a time for progress and cancel.
+    #[cfg(target_os = "linux")]
+    pub fn copy_chunk(
+        from: &std::fs::File,
+        to: &mut std::fs::File,
+        _buf: &mut Vec<u8>,
+    ) -> io::Result<u64> {
+        use std::io::Read;
+        io::copy(&mut from.take(super::CHUNK as u64), to)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(super) use super::copy_chunk_buffered as copy_chunk;
 }
 
 #[cfg(windows)]
 mod platform {
     use std::{fs, io, path::Path};
+
+    pub(super) use super::copy_chunk_buffered as copy_chunk;
 
     pub fn symlink(link: &Path, dst: &Path, src: &Path) -> io::Result<()> {
         if fs::metadata(src).is_ok_and(|m| m.is_dir()) {
@@ -380,6 +415,56 @@ mod tests {
         ));
         assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "keep");
         assert!(src.join("a.txt").exists());
+    }
+
+    #[test]
+    fn overwrite_keeps_mtime_and_spares_foreign_temp_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tree(tmp.path());
+        let dst = tmp.path().join("dst");
+        fs::create_dir(&dst).unwrap();
+        fs::write(dst.join("a.txt"), "old").unwrap();
+        fs::write(dst.join(".tc-tmp-a.txt"), "mine").unwrap();
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(src.join("a.txt"))
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        run(false, &src.join("a.txt"), &dst.join("a.txt"), |_, _| {
+            Decision::Overwrite
+        })
+        .unwrap();
+        assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "a");
+        assert_eq!(
+            fs::read_to_string(dst.join(".tc-tmp-a.txt")).unwrap(),
+            "mine"
+        );
+        assert_eq!(fs::read_dir(&dst).unwrap().count(), 2); // no temp dir left
+        let mtime = |p: &Path| fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(mtime(&dst.join("a.txt")), t);
+        copy(&src.join("a.txt"), &dst.join("b.txt")).unwrap();
+        assert_eq!(mtime(&dst.join("b.txt")), t);
+    }
+
+    #[test]
+    fn copies_big_file_in_chunks_with_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("big");
+        let data: Vec<u8> = (0..3 * CHUNK + 7).map(|i| (i % 251) as u8).collect();
+        fs::write(&src, &data).unwrap();
+        let p = Progress::default();
+        super::copy(
+            &src,
+            &tmp.path().join("out"),
+            &mut |_, _| Decision::Cancel,
+            &p,
+        )
+        .unwrap();
+        assert!(fs::read(tmp.path().join("out")).unwrap() == data);
+        assert_eq!(p.done.load(Ordering::Relaxed), data.len() as u64);
+        assert_eq!(p.files.load(Ordering::Relaxed), 1);
     }
 
     #[test]
