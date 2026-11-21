@@ -12,16 +12,14 @@ const HELP: &str =
     "F3 View  F5 Copy  F6 Move  F7 Mkdir  F8 Delete  Ins Select  Tab Switch  F10 Quit";
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    if let Mode::View { title, lines, top } = &app.mode {
+    if let Mode::View { title, view } = &mut app.mode {
         let block = Block::bordered().title(title.as_str());
         let height = block.inner(frame.area()).height as usize;
         app.page = height.max(1);
-        let visible: Vec<Line> = lines
-            .iter()
-            .skip(*top)
-            .take(height)
-            .map(|l| Line::raw(l.as_str()))
-            .collect();
+        let visible: Vec<Line> = match view.lines(height) {
+            Ok(lines) => lines.into_iter().map(Line::raw).collect(),
+            Err(e) => vec![Line::raw(e.to_string())],
+        };
         frame.render_widget(Paragraph::new(visible).block(block), frame.area());
         return;
     }

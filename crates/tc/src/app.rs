@@ -1,12 +1,11 @@
 //! App state and key handling, independent of the terminal.
 
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::ListState;
-use tc_core::{ops, panel::Panel};
+use tc_core::{ops, panel::Panel, view::Viewer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -30,11 +29,7 @@ pub enum Mode {
     Confirm(Op, Vec<PathBuf>),
     Mkdir(String),
     Message(String),
-    View {
-        title: String,
-        lines: Vec<String>,
-        top: usize,
-    },
+    View { title: String, view: Viewer },
 }
 
 pub struct App {
@@ -86,22 +81,24 @@ impl App {
                 _ => self.mode = Mode::Mkdir(name),
             },
             Mode::Message(_) => {}
-            Mode::View { title, lines, top } => {
-                let last = lines.len().saturating_sub(1);
-                let top = match key.code {
+            Mode::View { title, mut view } => {
+                let page = self.page as isize;
+                let result = match key.code {
                     KeyCode::Esc | KeyCode::F(3 | 10) | KeyCode::Char('q') => return,
-                    KeyCode::Up => top.saturating_sub(1),
-                    KeyCode::Down => top + 1,
-                    KeyCode::PageUp => top.saturating_sub(self.page),
-                    KeyCode::PageDown => top + self.page,
-                    KeyCode::Home => 0,
-                    KeyCode::End => last,
-                    _ => top,
+                    KeyCode::Up => view.scroll(-1),
+                    KeyCode::Down => view.scroll(1),
+                    KeyCode::PageUp => view.scroll(-page),
+                    KeyCode::PageDown => view.scroll(page),
+                    KeyCode::Home => {
+                        view.home();
+                        Ok(())
+                    }
+                    KeyCode::End => view.end(self.page),
+                    _ => Ok(()),
                 };
-                self.mode = Mode::View {
-                    title,
-                    lines,
-                    top: top.min(last),
+                self.mode = match result {
+                    Ok(()) => Mode::View { title, view },
+                    Err(e) => Mode::Message(format!("{title}: {e}")),
                 };
             }
         }
@@ -181,15 +178,10 @@ impl App {
             return;
         };
         let path = panel.path().join(&entry.name);
-        // shortcut: reads whole file into memory, upgrade to chunked reading for big files
-        self.mode = match fs::read(&path) {
-            Ok(bytes) => Mode::View {
+        self.mode = match Viewer::open(&path) {
+            Ok(view) => Mode::View {
                 title: path.display().to_string(),
-                lines: String::from_utf8_lossy(&bytes)
-                    .lines()
-                    .map(|l| l.replace('\t', "    "))
-                    .collect(),
-                top: 0,
+                view,
             },
             Err(e) => Mode::Message(format!("{}: {e}", path.display())),
         };

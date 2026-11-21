@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 pub mod ops;
 pub mod panel;
+pub mod view;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
