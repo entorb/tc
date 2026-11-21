@@ -3,6 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 
+pub mod edit;
 pub mod ops;
 pub mod panel;
 pub mod view;
@@ -17,6 +18,14 @@ pub enum Error {
     IntoItself(PathBuf),
     #[error("invalid name: {0}")]
     InvalidName(String),
+    #[error("not enough free memory to edit (need {}, free {})", edit::human(*need), edit::human(*free))]
+    OutOfMemory { need: u64, free: u64 },
+    #[error("not a text file")]
+    Binary,
+    #[error("cancelled")]
+    Cancelled,
+    #[error("text not representable in {0}, convert to UTF-8")]
+    Unrepresentable(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
