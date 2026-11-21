@@ -7,8 +7,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 use regex::Regex;
 
-use crate::app::{App, FOOTER, Mode, Step};
+use crate::app::{App, FOOTER, Found, Mode, Step};
+use ratatui::widgets::ListState;
 use tc_core::edit::Eol;
+use tc_core::find::MAX_RESULTS;
 
 /// Length of "YY-MM-DD HH:MM".
 const DATE_WIDTH: usize = 14;
@@ -97,6 +99,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             text.push_str("\nEnter go  Del remove  Esc close");
             popup(frame, "Hotlist", &text);
         }
+        Mode::Found(f) => draw_found(frame, f),
         Mode::Message(msg) => popup(frame, "Error", &format!("{msg}\n\nany key")),
         Mode::Edit { error, .. } => {
             if let Some(msg) = error {
@@ -130,6 +133,34 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     draw_input(frame, app);
+}
+
+fn draw_found(frame: &mut Frame, f: &Found) {
+    let area = frame.area();
+    let h = usize::from(area.height.saturating_sub(2)).max(1);
+    let start = f.sel / h * h; // page-wise, so only visible rows are built
+    let items = f
+        .list
+        .iter()
+        .skip(start)
+        .take(h)
+        .map(|e| e.name.to_string_lossy());
+    let state = if f.running { "searching" } else { "done" };
+    let cap = if f.list.len() >= MAX_RESULTS {
+        ", capped"
+    } else {
+        ""
+    };
+    let title = format!(
+        " Find: {} found, {state}{cap}  Enter panelize  Esc stop/close ",
+        f.list.len()
+    );
+    let list = List::new(items)
+        .block(Block::bordered().title(title))
+        .highlight_style(Style::new().reversed());
+    let mut st = ListState::default().with_selected(Some(f.sel - start));
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(list, area, &mut st);
 }
 
 fn draw_input(frame: &mut Frame, app: &App) {
@@ -254,6 +285,9 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
         })
         .collect();
     let mut title = panel.path().display().to_string();
+    if panel.is_virtual() {
+        title += " [found]";
+    }
     match &app.mode {
         Mode::Search(t) if active => title += &format!(" [search: {t}]"),
         Mode::Filter(t) if active => title += &format!(" [filter: {t}]"),

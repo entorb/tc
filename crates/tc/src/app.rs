@@ -16,7 +16,8 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use regex::Regex;
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
-use tc_core::{Error, hotlist, ops, panel::Panel, search, view::Viewer};
+use tc_core::panel::{Entry, Panel};
+use tc_core::{Error, find, hotlist, ops, search, view::Viewer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -50,6 +51,8 @@ pub enum Mode {
     /// Bookmark list with the selected row.
     Hotlist(usize),
     Message(String),
+    /// Find results, filled live by a worker thread.
+    Found(Found),
     View {
         title: String,
         view: Viewer,
@@ -86,6 +89,9 @@ pub enum Ask {
     /// File panel: select (`+`) or deselect (`-`) files by mask.
     Select,
     Deselect,
+    /// Find files: name mask, then content regex (`pattern` holds the mask).
+    FindMask,
+    FindText,
 }
 
 impl Ask {
@@ -97,6 +103,8 @@ impl Ask {
             Ask::With => "Replace with ($1 = group)",
             Ask::Select => "Select files (mask, default *)",
             Ask::Deselect => "Deselect files (mask, default *)",
+            Ask::FindMask => "Find files: name mask (default *)",
+            Ask::FindText => "Find files: content regex (empty = any)",
         }
     }
 }
@@ -117,6 +125,30 @@ pub enum Step {
 enum Done {
     Loaded(tc_core::Result<Editor>),
     Saved(Editor, tc_core::Result<()>),
+}
+
+/// Results of a running or finished file search.
+pub struct Found {
+    pub list: Vec<Entry>,
+    pub sel: usize,
+    pub running: bool,
+    rx: Receiver<Entry>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Found {
+    fn pump(&mut self) {
+        for _ in 0..5000 {
+            match self.rx.try_recv() {
+                Ok(e) => self.list.push(e),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.running = false;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 pub struct Job {
@@ -305,6 +337,11 @@ impl App {
                 panel.select_range(c, c);
                 panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
             }
+            Mode::Normal
+                if key.code == KeyCode::F(7) && key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.ask(Ask::FindMask);
+            }
             Mode::Normal if key.modifiers.contains(KeyModifiers::CONTROL) => match key.code {
                 KeyCode::Char('s') => self.mode = Mode::Search(String::new()),
                 KeyCode::Char('f') => {
@@ -323,7 +360,13 @@ impl App {
                     self.mode = Mode::Message(e.to_string());
                 }
             }
-            Mode::Normal if key.code == KeyCode::Esc => self.panels[self.active].apply_filter(""),
+            Mode::Normal if key.code == KeyCode::Esc => {
+                let panel = &mut self.panels[self.active];
+                panel.apply_filter("");
+                if let Err(e) = panel.leave_virtual() {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
             Mode::Normal => self.normal_key(key.code),
             Mode::Search(mut text) => {
                 let panel = &mut self.panels[self.active];
@@ -408,6 +451,7 @@ impl App {
                 _ => self.mode = Mode::Mkdir(name),
             },
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
+            Mode::Found(f) => self.found_key(key.code, f),
             Mode::Message(_) => {}
             Mode::Work(job) => {
                 if key.code == KeyCode::Esc {
@@ -646,6 +690,49 @@ impl App {
         self.mode = Mode::Hotlist(sel);
     }
 
+    /// Search the active panel's directory in a worker thread, results arrive via `tick`.
+    fn spawn_find(&mut self, mask: String, re: Option<Regex>) {
+        let root = self.panels[self.active].path().to_owned();
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        thread::spawn(move || {
+            find::find(&root, &mask, re.as_ref(), &c, |e| drop(tx.send(e)));
+        });
+        self.mode = Mode::Found(Found {
+            list: Vec::new(),
+            sel: 0,
+            running: true,
+            rx,
+            cancel,
+        });
+    }
+
+    /// Keys in the results: Esc stops a running search, then closes; Enter panelizes.
+    fn found_key(&mut self, code: KeyCode, mut f: Found) {
+        let page = self.page;
+        let last = f.list.len().saturating_sub(1);
+        match code {
+            KeyCode::Esc if f.running => f.cancel.store(true, Ordering::Relaxed),
+            KeyCode::Esc => return,
+            KeyCode::Enter => {
+                f.cancel.store(true, Ordering::Relaxed);
+                if !f.list.is_empty() {
+                    self.panels[self.active].panelize(f.list);
+                }
+                return;
+            }
+            KeyCode::Up => f.sel = f.sel.saturating_sub(1),
+            KeyCode::Down => f.sel = (f.sel + 1).min(last),
+            KeyCode::PageUp => f.sel = f.sel.saturating_sub(page),
+            KeyCode::PageDown => f.sel = (f.sel + page).min(last),
+            KeyCode::Home => f.sel = 0,
+            KeyCode::End => f.sel = last,
+            _ => {}
+        }
+        self.mode = Mode::Found(f);
+    }
+
     fn ask(&mut self, ask: Ask) {
         self.input = Some(Input {
             ask,
@@ -729,6 +816,20 @@ impl App {
             Ask::Select | Ask::Deselect => {
                 let on = input.ask == Ask::Select;
                 self.panels[self.active].select_mask(&text, on);
+            }
+            Ask::FindMask => {
+                input.pattern = text;
+                input.text.clear();
+                input.ask = Ask::FindText;
+                return Ok(false);
+            }
+            Ask::FindText => {
+                let re = if text.is_empty() {
+                    None
+                } else {
+                    Some(compile(&text)?)
+                };
+                self.spawn_find(mem::take(&mut input.pattern), re);
             }
             Ask::Find => {
                 // empty answer repeats the last search
@@ -997,6 +1098,9 @@ impl App {
 
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
+        if let Mode::Found(f) = &mut self.mode {
+            return f.pump();
+        }
         let Mode::Work(job) = &self.mode else {
             return;
         };
@@ -1293,5 +1397,42 @@ mod tests {
         key(&mut app, KeyCode::Char('g'));
         type_text(&mut app, "x%");
         assert!(app.input.as_ref().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn find_then_panelize_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        std::fs::write(dir.path().join("sub/b.txt"), "world\n").unwrap();
+        std::fs::write(dir.path().join("c.rs"), "hello\n").unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        app.on_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::ALT));
+        type_text(&mut app, "*.txt");
+        type_text(&mut app, "hello");
+        while matches!(&app.mode, Mode::Found(f) if f.running) {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(matches!(&app.mode, Mode::Found(f) if f.list.len() == 1));
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Normal) && app.panels[0].is_virtual());
+        assert_eq!(app.panels[0].targets(), [dir.path().join("a.txt")]);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Esc); // back to the directory
+        assert!(!app.panels[0].is_virtual());
+        // Esc cancels a running search, a second Esc closes
+        app.on_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::ALT));
+        type_text(&mut app, "");
+        type_text(&mut app, "");
+        key(&mut app, KeyCode::Esc);
+        while matches!(&app.mode, Mode::Found(f) if f.running) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
     }
 }
