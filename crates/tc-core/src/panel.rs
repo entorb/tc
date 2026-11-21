@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{io, thread};
 
 use crate::archive::Archive;
+use crate::vfs::{Remote, Side, rpath};
 use crate::{Result, io_err};
 
 const PARENT: &str = "..";
@@ -96,6 +97,7 @@ struct Pending {
     then: Then,
     rx: Receiver<Result<Vec<Entry>>>,
     cancel: Arc<AtomicBool>,
+    remote: Option<Arc<dyn Remote>>,
 }
 
 #[derive(Debug)]
@@ -114,6 +116,9 @@ pub struct Panel {
     virt: bool,
     /// Open archive and the directory inside it (`""` = root); `path` is then the archive file joined with it.
     archive: Option<(Arc<Archive>, String)>,
+    /// Connected remote; `path` is then the remote path and `local` the directory ".." at its root returns to.
+    remote: Option<Arc<dyn Remote>>,
+    local: PathBuf,
     /// Sort key and reverse flag; survives directory changes.
     sort: (SortKey, bool),
     /// Dot-names listed (default); only real directories are filtered.
@@ -132,6 +137,7 @@ impl Panel {
         Ok(Self {
             history: vec![path.clone()],
             pos: 0,
+            local: path.clone(),
             path,
             entries,
             cursor: 0,
@@ -140,6 +146,7 @@ impl Panel {
             all: None,
             virt: false,
             archive: None,
+            remote: None,
             sort: (SortKey::Name, false),
             show_hidden: true,
             sel_sum: Cell::new(None),
@@ -213,12 +220,44 @@ impl Panel {
         self.archive.as_ref().map(|(a, _)| a)
     }
 
-    /// Panel header: the path, inside an archive `file.zip:/sub`.
+    /// Panel header: the path, inside an archive `file.zip:/sub`, remote `sftp://host/dir`.
     pub fn title(&self) -> String {
-        match &self.archive {
-            Some((a, sub)) => format!("{}:/{sub}", a.file.display()),
-            None => self.path.display().to_string(),
+        match (&self.archive, &self.remote) {
+            (Some((a, sub)), _) => format!("{}:/{sub}", a.file.display()),
+            (None, Some(r)) => format!("{}{}", r.url(), rpath(&self.path)),
+            (None, None) => self.path.display().to_string(),
         }
+    }
+
+    pub fn remote(&self) -> Option<&Arc<dyn Remote>> {
+        self.remote.as_ref()
+    }
+
+    /// Where the panel's paths live.
+    pub fn side(&self) -> Side {
+        self.remote.clone().map_or(Side::Local, Side::Remote)
+    }
+
+    /// Show directory `dir` of `remote` (read in a worker like a local one); a failure leaves the panel unchanged.
+    pub fn open_remote(&mut self, remote: Arc<dyn Remote>, dir: PathBuf) -> Result<()> {
+        if self.remote.is_none() && self.archive.is_none() {
+            self.local = self.path.clone();
+        }
+        let then = Then::Show {
+            pos: None,
+            visit: false,
+            focus: None,
+        };
+        self.load_on(Some(remote), dir, then)
+    }
+
+    /// New panel on the same directory and side (Ctrl+T).
+    pub fn duplicate(&self) -> Result<Self> {
+        let mut p = Self::open(&self.local)?;
+        if let Some(r) = &self.remote {
+            p.open_remote(r.clone(), self.path.clone())?;
+        }
+        Ok(p)
     }
 
     /// Show the root of `archive` (read-only); leaving it with ".." returns to the containing directory.
@@ -315,7 +354,7 @@ impl Panel {
     pub fn reload(&mut self) -> Result<()> {
         if let Some(p) = self.pending.take() {
             p.cancel.store(true, Ordering::Relaxed);
-            return self.load(p.path, p.then);
+            return self.load_on(p.remote, p.path, p.then);
         }
         let entries = if let Some(e) = self.archive_entries() {
             e
@@ -382,10 +421,18 @@ impl Panel {
         Ok(true)
     }
 
-    /// Go to the parent directory, cursor on the directory we came from.
+    /// Go to the parent directory, cursor on the directory we came from; at a remote root back to the local directory.
     pub fn parent(&mut self) -> Result<()> {
         if self.leave_virtual()? {
             return Ok(());
+        }
+        if self.remote.is_some() && self.archive.is_none() && self.path.parent().is_none() {
+            let then = Then::Show {
+                pos: None,
+                visit: false,
+                focus: None,
+            };
+            return self.load_on(None, self.local.clone(), then);
         }
         if let Some((_, sub)) = &mut self.archive
             && !sub.is_empty()
@@ -546,8 +593,18 @@ impl Panel {
         list.into_iter().map(|e| self.path.join(&e.name)).collect()
     }
 
-    /// Jump to `path` (e.g. a bookmark); a failure leaves the panel unchanged.
+    /// Jump to local `path` (e.g. a bookmark), leaving a remote; a failure leaves the panel unchanged.
     pub fn go(&mut self, path: PathBuf) -> Result<()> {
+        let then = Then::Show {
+            pos: None,
+            visit: true,
+            focus: None,
+        };
+        self.load_on(None, path, then)
+    }
+
+    /// Change to `path` on the panel's current side (local or remote).
+    pub fn cd(&mut self, path: PathBuf) -> Result<()> {
         self.change_dir(path)
     }
 
@@ -560,14 +617,12 @@ impl Panel {
         else {
             return Ok(());
         };
-        self.load(
-            self.history[i].clone(),
-            Then::Show {
-                pos: Some(i),
-                visit: false,
-                focus: None,
-            },
-        )
+        let then = Then::Show {
+            pos: Some(i),
+            visit: false,
+            focus: None,
+        };
+        self.load_on(None, self.history[i].clone(), then)
     }
 
     /// New directory: visiting it drops the forward history; repeats are not recorded.
@@ -596,18 +651,36 @@ impl Panel {
     /// Read `path` in a worker; fast directories are applied before returning, slow ones by [`Panel::poll`].
     /// A failure leaves the panel unchanged.
     fn load(&mut self, path: PathBuf, then: Then) -> Result<()> {
+        self.load_on(self.remote.clone(), path, then)
+    }
+
+    /// Like [`Panel::load`] on `remote` (`None` = local disk).
+    fn load_on(
+        &mut self,
+        remote: Option<Arc<dyn Remote>>,
+        path: PathBuf,
+        then: Then,
+    ) -> Result<()> {
         self.cancel_load();
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let (dir, c, sort, hidden) = (path.clone(), cancel.clone(), self.sort, self.show_hidden);
-        // a hung network mount blocks this thread, not the UI; cancel only drops its result
-        thread::spawn(move || drop(tx.send(read_entries(&dir, sort, hidden, &c))));
+        let r = remote.clone();
+        // a hung network mount or server blocks this thread, not the UI; cancel only drops its result
+        thread::spawn(move || {
+            let list = match r {
+                Some(r) => remote_entries(&*r, &dir, sort, hidden),
+                None => read_entries(&dir, sort, hidden, &c),
+            };
+            drop(tx.send(list));
+        });
         self.pending = Some(Pending {
             path,
             sort,
             then,
             rx,
             cancel,
+            remote,
         });
         self.wait(LOAD_WAIT).unwrap_or(Ok(()))
     }
@@ -636,10 +709,12 @@ impl Panel {
                 Then::Reload => self.reloaded(entries),
                 Then::Show { pos, visit, focus } => {
                     self.show(p.path, entries);
+                    self.remote = p.remote;
                     if let Some(i) = pos {
                         self.pos = i;
                     }
-                    if visit {
+                    // remote directories are not in the (local) history
+                    if visit && self.remote.is_none() {
                         self.visit(&self.path.clone());
                     }
                     if let Some(name) = focus {
@@ -744,6 +819,22 @@ fn sort_entries(entries: &mut [Entry], (key, reverse): (SortKey, bool)) {
     }
 }
 
+/// Remote listing; always has "..", at the root it leaves the remote.
+fn remote_entries(
+    r: &dyn Remote,
+    dir: &Path,
+    sort: (SortKey, bool),
+    hidden: bool,
+) -> Result<Vec<Entry>> {
+    let mut entries = r.list(&rpath(dir))?;
+    if !hidden {
+        entries.retain(|e| !e.name.as_encoded_bytes().starts_with(b"."));
+    }
+    sort_entries(&mut entries, sort);
+    entries.insert(0, Entry::parent());
+    Ok(entries)
+}
+
 /// Stops early (partial list) once `cancel` is set.
 fn read_entries(
     dir: &Path,
@@ -808,6 +899,43 @@ mod tests {
         let n = |v: &[&str]| v.iter().map(OsString::from).collect::<HashSet<_>>();
         assert_eq!(sa, n(&["only_a", "newer", "size"]));
         assert_eq!(sb, n(&["only_b", "older", "size"]));
+    }
+
+    fn settle(p: &mut Panel) {
+        while p.loading().is_some() {
+            if let Some(r) = p.wait(Duration::from_secs(5)) {
+                r.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn remote_browse_and_leave_at_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = crate::vfs::mem::Mem::new();
+        m.dir("/d");
+        m.put("/d/f", b"x");
+        m.put("/.h", b"");
+        let mut p = Panel::open(tmp.path()).unwrap();
+        p.open_remote(m.clone(), "/".into()).unwrap();
+        settle(&mut p);
+        assert_eq!(p.title(), "mem:///");
+        let names: Vec<_> = p.entries().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, ["..", "d", ".h"]);
+        p.set_cursor(1);
+        p.enter().unwrap();
+        settle(&mut p);
+        assert_eq!(p.title(), "mem:///d");
+        p.set_cursor(1);
+        assert_eq!(p.targets(), [PathBuf::from("/d/f")]);
+        let dup = p.duplicate().unwrap();
+        assert!(dup.remote().is_some());
+        p.parent().unwrap();
+        settle(&mut p);
+        p.parent().unwrap();
+        settle(&mut p);
+        assert!(p.remote().is_none());
+        assert_eq!(p.path(), tmp.path());
     }
 
     #[test]
@@ -1095,6 +1223,7 @@ mod tests {
             then,
             rx,
             cancel,
+            remote: None,
         });
         assert!(p.poll().is_none());
         assert_eq!(p.path(), tmp.path()); // still the old directory
@@ -1122,6 +1251,7 @@ mod tests {
             then,
             rx,
             cancel: cancel.clone(),
+            remote: None,
         });
         assert!(p.cancel_load());
         assert!(cancel.load(Ordering::Relaxed) && p.loading().is_none() && !p.cancel_load());

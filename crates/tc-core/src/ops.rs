@@ -173,7 +173,7 @@ fn replace(src: &Path, target: &Path, mv: bool, p: &Progress) -> Result<()> {
     if mv { delete(src) } else { Ok(()) }
 }
 
-fn temp_name(target: &Path) -> PathBuf {
+pub(crate) fn temp_name(target: &Path) -> PathBuf {
     let mut name = OsString::from(".tc-tmp-");
     name.push(target.file_name().unwrap_or_default());
     target.with_file_name(name)
@@ -184,7 +184,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// `name` must be a single path component.
-fn single_name(name: &OsStr) -> Result<&OsStr> {
+pub(crate) fn single_name(name: &OsStr) -> Result<&OsStr> {
     let mut parts = Path::new(name).components();
     match (parts.next(), parts.next()) {
         (Some(Component::Normal(n)), None) => Ok(n),

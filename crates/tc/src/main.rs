@@ -27,6 +27,13 @@ fn main() -> anyhow::Result<()> {
     if let Some(file) = &app.hotlist_file {
         app.hotlist = tc_core::hotlist::load(file).context("cannot read hotlist")?;
     }
+    app.connections_file = app
+        .hotlist_file
+        .as_ref()
+        .map(|f| f.with_file_name("connections"));
+    if let Some(file) = &app.connections_file {
+        app.connections = tc_core::hotlist::load(file).context("cannot read connections")?;
+    }
     app.history_file = tc_core::cmdline::history_path();
     if let Some(file) = &app.history_file {
         app.history = tc_core::cmdline::load_history(file).context("cannot read history")?;

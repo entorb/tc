@@ -23,7 +23,9 @@ use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::eta::Estimator;
 use tc_core::panel::{Entry, Panel, SortKey};
 use tc_core::stats::{self, Node};
+use tc_core::vfs::{self, Remote, Side};
 use tc_core::{Error, find, hotlist, ops, search, view::Viewer};
+use tc_remote::Prompt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -93,6 +95,25 @@ pub enum Mode {
         step: Step,
     },
     AskExit(Editor),
+    /// Saved connections (Ctrl+N) with the selected row.
+    Connections(usize),
+    /// Connection URL being added (`None`) or edited (row).
+    ConnEdit(Option<usize>, LineEdit),
+    /// Connect running in a worker; may ask for a host key or password.
+    Connecting(Connecting),
+}
+
+enum CMsg {
+    Ask(Prompt),
+    Done(tc_core::Result<(Arc<dyn Remote>, String)>),
+}
+
+pub struct Connecting {
+    pub url: String,
+    /// Open question and the answer typed so far (a password, shown masked).
+    pub ask: Option<(Prompt, LineEdit)>,
+    rx: Receiver<CMsg>,
+    reply: mpsc::Sender<Option<String>>,
 }
 
 /// What a text prompt in the viewer or editor asks for.
@@ -142,6 +163,12 @@ pub enum Step {
 enum Done {
     Listed(tc_core::Result<Archive>),
     Extracted(tc_core::Result<(TempDir, PathBuf)>),
+    /// Remote file downloaded for the editor: connection, remote path, temp copy.
+    Fetched(
+        Arc<dyn Remote>,
+        PathBuf,
+        tc_core::Result<(TempDir, PathBuf)>,
+    ),
     Loaded(tc_core::Result<Editor>),
     Saved(Editor, tc_core::Result<()>),
 }
@@ -464,11 +491,17 @@ pub struct App {
     view_tmp: Option<TempDir>,
     /// File Stats left for a viewer or editor; back once the mode is `Normal` again.
     pub stats: Option<Stats>,
+    /// Saved connection URLs (Ctrl+N) and the file they are saved to.
+    pub connections: Vec<PathBuf>,
+    pub connections_file: Option<PathBuf>,
+    /// Remote file open in the editor: saves are uploaded to it; the temp copy lives until the editor closes.
+    edit_remote: Option<(Arc<dyn Remote>, PathBuf, TempDir)>,
 }
 
 /// Largest archive entry F3/F4 extracts to a temp file.
 const VIEW_CAP: u64 = 1 << 30;
 const READ_ONLY: &str = "Archives are read-only: only F5 copy out and F3/F4 view work here.";
+const REMOTE: &str = "Not available on remote panels.";
 
 impl App {
     pub fn new(left: Panel, right: Panel) -> Self {
@@ -500,6 +533,9 @@ impl App {
             run: None,
             view_tmp: None,
             stats: None,
+            connections: Vec::new(),
+            connections_file: None,
+            edit_remote: None,
         }
     }
 
@@ -632,8 +668,23 @@ impl App {
                     self.mode = Mode::Editor(path, cmd);
                 }
             },
+            Mode::Connections(sel) => self.connections_key(key.code, sel),
+            Mode::ConnEdit(row, mut l) => match key.code {
+                KeyCode::Enter => self.conn_save(row, &l.text),
+                KeyCode::Esc => self.mode = Mode::Connections(row.unwrap_or(0)),
+                _ => {
+                    edit_key(&mut l, key);
+                    self.mode = Mode::ConnEdit(row, l);
+                }
+            },
+            Mode::Connecting(c) => self.connecting_key(c, key),
+            // no trash on remote panels: only `p`
             Mode::Confirm(op, targets, text) => match key.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.delete(&targets, true),
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter
+                    if self.panels[self.active].remote().is_none() =>
+                {
+                    self.delete(&targets, true)
+                }
                 KeyCode::Char('p' | 'P') => self.delete(&targets, false),
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
                 _ => self.mode = Mode::Confirm(op, targets, text),
@@ -784,8 +835,16 @@ impl App {
                 }
             }
             KeyCode::Char('=') if alt => {
-                let path = self.panels[self.active].path().to_owned();
-                self.go(1 - self.active, path);
+                let panel = &self.panels[self.active];
+                let path = panel.path().to_owned();
+                match panel.remote().cloned() {
+                    Some(r) => {
+                        if let Err(e) = self.panels[1 - self.active].open_remote(r, path) {
+                            self.mode = Mode::Message(e.to_string());
+                        }
+                    }
+                    None => self.go(1 - self.active, path),
+                }
             }
             KeyCode::Char('c' | 'C') if alt && shift => self.copy_paths(),
             KeyCode::Up | KeyCode::Down if shift => {
@@ -794,6 +853,9 @@ impl App {
                 // select the entry left behind
                 panel.select_range(c, c);
                 panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
+            }
+            KeyCode::F(7) if alt && self.panels[self.active].remote().is_some() => {
+                self.mode = Mode::Message(REMOTE.into())
             }
             KeyCode::F(7) if alt => self.ask(Ask::FindMask),
             code if key.modifiers.contains(KeyModifiers::CONTROL) => self.ctrl_key(code),
@@ -823,7 +885,11 @@ impl App {
             KeyCode::Char('f') => {
                 self.mode = Mode::Filter(self.panels[self.active].filter().to_owned());
             }
+            KeyCode::Char('d') if self.panels[self.active].remote().is_some() => {
+                self.mode = Mode::Message(REMOTE.into())
+            }
             KeyCode::Char('d') => self.hotlist_add(),
+            KeyCode::Char('n') => self.mode = Mode::Connections(0),
             KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
             KeyCode::Char(' ') => self.spawn_stats(),
             KeyCode::Char('y') => {
@@ -846,9 +912,15 @@ impl App {
             }
             // terminals send Ctrl+\ as 0x1c, which crossterm reports as '4'
             KeyCode::Char('\\' | '4') => {
-                let root = self.panels[self.active].path().ancestors().last();
-                if let Some(root) = root.map(Path::to_owned) {
-                    self.go(self.active, root);
+                let panel = &mut self.panels[self.active];
+                let root = panel.path().ancestors().last().map(Path::to_owned);
+                let result = match root {
+                    Some(root) if panel.remote().is_some() => panel.cd(root),
+                    Some(root) => panel.go(root),
+                    None => Ok(()),
+                };
+                if let Err(e) = result {
+                    self.mode = Mode::Message(e.to_string());
                 }
             }
             KeyCode::Insert => self.copy_paths(),
@@ -871,7 +943,7 @@ impl App {
         let bg = &mut self.tabs[side];
         let n = bg.len() + 1;
         let next = match code {
-            KeyCode::Char('t') => match Panel::open(self.panels[side].path()) {
+            KeyCode::Char('t') => match self.panels[side].duplicate() {
                 Ok(p) => {
                     bg.push_back(mem::replace(&mut self.panels[side], p));
                     self.tab[side] += 1;
@@ -1104,6 +1176,10 @@ impl App {
             self.mode = Mode::Message("No commands inside an archive.".into());
             return;
         }
+        if self.stats.is_none() && self.panels[self.active].remote().is_some() {
+            self.mode = Mode::Message(REMOTE.into());
+            return;
+        }
         cmdline::push_history(&mut self.history, cmd);
         if let Some(file) = &self.history_file
             && let Err(e) = cmdline::save_history(file, &self.history)
@@ -1194,6 +1270,10 @@ impl App {
         let panel = &self.panels[self.active];
         if panel.archive().is_some() {
             self.mode = Mode::Message("File Stats does not work in archives.".into());
+            return;
+        }
+        if panel.remote().is_some() {
+            self.mode = Mode::Message(REMOTE.into());
             return;
         }
         let dir = panel.path().to_owned();
@@ -1462,6 +1542,7 @@ impl App {
                 let dir = panel
                     .current()
                     .filter(|e| e.is_dir && !e.is_parent() && panel.archive().is_none())
+                    .filter(|_| panel.remote().is_none())
                     .map(|e| panel.path().join(&e.name));
                 panel.toggle_select();
                 if let Some(dir) = dir {
@@ -1481,6 +1562,7 @@ impl App {
                 let archive = panel
                     .current()
                     .filter(|e| code == KeyCode::Enter && !e.is_dir && panel.archive().is_none())
+                    .filter(|_| panel.remote().is_none())
                     .filter(|e| Format::detect(Path::new(&e.name)).is_some())
                     .map(|e| panel.path().join(&e.name));
                 if let Some(file) = archive {
@@ -1496,6 +1578,9 @@ impl App {
                 }
             }
             KeyCode::F(3 | 4) if panel.archive().is_some() => self.view_archive_entry(),
+            KeyCode::F(3 | 4) if panel.remote().is_some() => {
+                self.fetch_remote(code == KeyCode::F(4))
+            }
             KeyCode::F(7) if panel.archive().is_some() => {
                 self.mode = Mode::Message(READ_ONLY.into())
             }
@@ -1566,10 +1651,21 @@ impl App {
         if entries.iter().any(|e| e.is_dir && !e.is_symlink) {
             text.push_str("\nDirectories are deleted recursively.");
         }
+        if self.panels[self.active].remote().is_some() {
+            return text + "\n\nNo trash on remote panels.\n[p] delete permanently   [n] no";
+        }
         text + "\n\n[y] trash   [p] delete permanently   [n] no"
     }
 
     fn delete(&mut self, targets: &[PathBuf], to_trash: bool) {
+        let side = self.panels[self.active].side();
+        if side.remote().is_some() {
+            let targets = targets.to_vec();
+            let sides = (side.clone(), side.clone());
+            return self.spawn_xfer(sides, move |_, _| {
+                targets.iter().try_for_each(|t| side.delete(t))
+            });
+        }
         let result = targets.iter().try_for_each(|src| {
             if to_trash {
                 ops::trash(src)
@@ -1627,9 +1723,14 @@ impl App {
 
     /// Ctrl+Insert: paths of the selection or cursor entry to the system clipboard.
     fn copy_paths(&mut self) {
-        let paths = self.panels[self.active].targets();
+        let panel = &self.panels[self.active];
+        let paths = panel.targets();
         if !paths.is_empty() {
-            let lines: Vec<_> = paths.iter().map(|p| p.to_string_lossy()).collect();
+            let url = panel.remote().map_or("", |r| r.url());
+            let lines: Vec<_> = paths
+                .iter()
+                .map(|p| format!("{url}{}", p.to_string_lossy()))
+                .collect();
             self.copied = Some(lines.join("\n"));
         }
     }
@@ -1656,6 +1757,10 @@ impl App {
     fn new_file_prompt(&mut self) {
         if self.panels[self.active].archive().is_some() {
             self.mode = Mode::Message(READ_ONLY.into());
+            return;
+        }
+        if self.panels[self.active].remote().is_some() {
+            self.mode = Mode::Message(REMOTE.into());
             return;
         }
         let name = self
@@ -1693,9 +1798,15 @@ impl App {
                 editor,
                 error: None,
             } => editor.insert(&text.replace("\r\n", "\n"), false),
-            Mode::Cmd(l) | Mode::Transfer(_, _, l) | Mode::Mkdir(l) | Mode::NewFile(l) => {
-                paste_line(l, &text)
-            }
+            Mode::Cmd(l)
+            | Mode::Transfer(_, _, l)
+            | Mode::Mkdir(l)
+            | Mode::NewFile(l)
+            | Mode::ConnEdit(_, l) => paste_line(l, &text),
+            Mode::Connecting(Connecting {
+                ask: Some((Prompt::Password(_), l)),
+                ..
+            }) => paste_line(l, &text),
             Mode::Editor(_, l) => paste_line(l, &text),
             Mode::Xfer(Xfer {
                 rename: Some(l), ..
@@ -1704,11 +1815,18 @@ impl App {
         }
     }
 
-    /// Copy or move to `text`, relative to the active panel. A single item goes to
-    /// exactly that path (rename); several items, or a trailing separator, mean a directory.
+    /// Copy or move to `text`. A relative `text` is in the active panel (rename), an absolute
+    /// one on the other panel's side (local disk or its remote). A single item goes to exactly
+    /// that path; several items, or a trailing separator, mean a directory.
     /// Runs in a worker; conflicts are put to the user through `Mode::Xfer`.
     fn run(&mut self, op: Op, targets: &[PathBuf], text: &str) {
-        let dest = self.panels[self.active].path().join(text);
+        let active = &self.panels[self.active];
+        let to = if Path::new(text).has_root() {
+            &self.panels[1 - self.active]
+        } else {
+            active
+        };
+        let (dst_side, dest) = (to.side(), to.path().join(text));
         let into_dir = targets.len() > 1 || text.ends_with(['/', std::path::MAIN_SEPARATOR]);
         let jobs: Vec<(PathBuf, PathBuf)> = targets
             .iter()
@@ -1717,34 +1835,55 @@ impl App {
                 _ => (src.clone(), dest.clone()),
             })
             .collect();
-        let arch = self.panels[self.active].archive().cloned();
-        let (tx, rx) = mpsc::channel();
-        let (reply, answers) = mpsc::channel();
-        let progress = Arc::new(ops::Progress::default());
-        let c = progress.clone();
-        thread::spawn(move || {
-            // Archive sources are streamed to a temp dir first, then copied like normal files.
+        let arch = active.archive().cloned();
+        // archive entries are extracted to local temp files first
+        let src_side = if arch.is_some() {
+            Side::Local
+        } else {
+            active.side()
+        };
+        let sides = (src_side.clone(), dst_side.clone());
+        self.spawn_xfer(sides, move |c, ask| {
             // shortcut: needs temp space for the whole selection, upgrade to copy straight from the stream
             let (jobs, _tmp) = match arch {
                 None => (jobs, None),
                 Some(a) => {
                     let srcs: Vec<PathBuf> = jobs.iter().map(|(s, _)| s.clone()).collect();
-                    match a.extract_all(&srcs, &c.cancel) {
-                        Ok((tmp, out)) => {
-                            let targets = jobs.into_iter().map(|(_, t)| t);
-                            (out.into_iter().zip(targets).collect(), Some(tmp))
-                        }
-                        Err(e) => {
-                            let error = (!matches!(e, Error::Cancelled)).then_some(e.to_string());
-                            let _ = tx.send(XMsg::Done(error));
-                            return;
-                        }
-                    }
+                    let (tmp, out) = a.extract_all(&srcs, &c.cancel)?;
+                    let targets = jobs.into_iter().map(|(_, t)| t);
+                    (out.into_iter().zip(targets).collect(), Some(tmp))
                 }
             };
             let srcs: Vec<PathBuf> = jobs.iter().map(|(s, _)| s.clone()).collect();
-            ops::scan(&srcs, &c);
+            vfs::scan(&src_side, &srcs, c);
+            let local = matches!((&src_side, &dst_side), (Side::Local, Side::Local));
+            let mv = op == Op::Move;
+            // Stops at the first error so the user sees it before anything else happens.
+            jobs.iter().try_for_each(|(src, target)| {
+                if !local {
+                    vfs::transfer(&src_side, src, &dst_side, target, mv, ask, c)
+                } else if mv {
+                    ops::move_(src, target, ask, c)
+                } else {
+                    ops::copy(src, target, ask, c)
+                }
+            })
+        });
+    }
+
+    /// Run `work` in a worker with progress and the conflict dialog (`sides` decide "newer").
+    fn spawn_xfer(
+        &mut self,
+        sides: (Side, Side),
+        work: impl FnOnce(&ops::Progress, ops::Ask) -> tc_core::Result<()> + Send + 'static,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        let (reply, answers) = mpsc::channel();
+        let progress = Arc::new(ops::Progress::default());
+        let c = progress.clone();
+        thread::spawn(move || {
             let mut sticky: Option<Policy> = None;
+            let (from, to) = sides;
             let mut ask = |src: &Path, target: &Path| {
                 let policy = match sticky {
                     Some(p) => p,
@@ -1763,15 +1902,13 @@ impl App {
                 };
                 match policy {
                     Policy::Overwrite => ops::Decision::Overwrite,
-                    Policy::Newer if ops::is_newer(src, target) => ops::Decision::Overwrite,
+                    Policy::Newer if vfs::is_newer(&from, src, &to, target) => {
+                        ops::Decision::Overwrite
+                    }
                     Policy::Newer | Policy::Skip => ops::Decision::Skip,
                 }
             };
-            // Stops at the first error so the user sees it before anything else happens.
-            let result = jobs.iter().try_for_each(|(src, target)| match op {
-                Op::Copy => ops::copy(src, target, &mut ask, &c),
-                _ => ops::move_(src, target, &mut ask, &c),
-            });
+            let result = work(&c, &mut ask);
             let error = result.err().filter(|e| !matches!(e, Error::Cancelled));
             let _ = tx.send(XMsg::Done(error.map(|e| e.to_string())));
         });
@@ -1788,6 +1925,12 @@ impl App {
 
     fn mkdir(&mut self, name: &str) {
         let panel = &self.panels[self.active];
+        let side = panel.side();
+        if side.remote().is_some() {
+            let (dir, name) = (panel.path().to_owned(), OsString::from(name));
+            let sides = (side.clone(), side.clone());
+            return self.spawn_xfer(sides, move |_, _| side.mkdir_in(&dir, &name).map(drop));
+        }
         let result = ops::mkdir(panel.path(), &OsString::from(name));
         self.finish(result.err().map(|e| e.to_string()));
     }
@@ -1808,7 +1951,7 @@ impl App {
         let panel = &self.panels[self.active];
         let entry = panel
             .current()
-            .filter(|e| !e.is_dir && panel.archive().is_none())?;
+            .filter(|e| !e.is_dir && panel.archive().is_none() && panel.remote().is_none())?;
         Some(panel.path().join(&entry.name))
     }
 
@@ -1862,6 +2005,144 @@ impl App {
         self.spawn("Extracting", fake, total, false, move |progress, cancel| {
             Done::Extracted(arch.extract_temp(&inner, VIEW_CAP, progress, cancel))
         });
+    }
+
+    /// F3/F4 on a remote panel: download the file to a temp copy (worker), then view or edit it.
+    fn fetch_remote(&mut self, edit: bool) {
+        let panel = &self.panels[self.active];
+        let (Some(r), Some(e)) = (panel.remote().cloned(), panel.current()) else {
+            return;
+        };
+        if e.is_dir {
+            return;
+        }
+        if e.size > VIEW_CAP {
+            self.mode = Mode::Message("File over 1 GiB: copy it with F5 instead.".into());
+            return;
+        }
+        let path = panel.path().join(&e.name);
+        let title = PathBuf::from(format!("{}{}", r.url(), vfs::rpath(&path)));
+        let total = e.size;
+        self.spawn(
+            "Downloading",
+            title,
+            total,
+            false,
+            move |progress, cancel| {
+                let res = vfs::download_temp(&r, &path, VIEW_CAP, progress, cancel);
+                if edit {
+                    Done::Fetched(r, path, res)
+                } else {
+                    Done::Extracted(res)
+                }
+            },
+        );
+    }
+
+    fn connections_save(&mut self) {
+        if let Some(file) = &self.connections_file
+            && let Err(e) = hotlist::save(file, &self.connections)
+        {
+            self.mode = Mode::Message(e.to_string());
+        }
+    }
+
+    fn connections_key(&mut self, code: KeyCode, sel: usize) {
+        let last = self.connections.len().saturating_sub(1);
+        let mut sel = sel.min(last);
+        let url = self
+            .connections
+            .get(sel)
+            .map(|u| u.to_string_lossy().into_owned());
+        match (code, url) {
+            (KeyCode::Esc | KeyCode::Char('q'), _) => return,
+            (KeyCode::Up, _) => sel = sel.saturating_sub(1),
+            (KeyCode::Down, _) => sel = (sel + 1).min(last),
+            (KeyCode::Enter, Some(url)) => return self.connect(url),
+            (KeyCode::Insert | KeyCode::Char('a'), _) => {
+                self.mode = Mode::ConnEdit(None, LineEdit::from("sftp://".to_owned()));
+                return;
+            }
+            (KeyCode::F(4) | KeyCode::Char('e'), Some(url)) => {
+                self.mode = Mode::ConnEdit(Some(sel), LineEdit::from(url));
+                return;
+            }
+            (KeyCode::Delete, Some(_)) => {
+                self.connections.remove(sel);
+                self.connections_save();
+                if matches!(self.mode, Mode::Message(_)) {
+                    return;
+                }
+            }
+            _ => {}
+        }
+        self.mode = Mode::Connections(sel);
+    }
+
+    /// Store an added or edited URL (no passwords: they are asked on connect).
+    fn conn_save(&mut self, row: Option<usize>, text: &str) {
+        let text = text.trim();
+        if let Err(e) = tc_remote::Url::parse(text) {
+            self.mode = Mode::Message(e.to_string());
+            return;
+        }
+        let url = PathBuf::from(text);
+        let sel = match row.filter(|&i| i < self.connections.len()) {
+            Some(i) => {
+                self.connections[i] = url;
+                i
+            }
+            None => {
+                self.connections.push(url);
+                self.connections.len() - 1
+            }
+        };
+        self.mode = Mode::Connections(sel);
+        self.connections_save();
+    }
+
+    /// Connect in a worker; questions (host key, password) come back through `tick`.
+    fn connect(&mut self, url: String) {
+        let (tx, rx) = mpsc::channel();
+        let (reply, answers) = mpsc::channel::<Option<String>>();
+        let u = url.clone();
+        thread::spawn(move || {
+            let mut ask = |p: Prompt| {
+                tx.send(CMsg::Ask(p)).ok()?;
+                answers.recv().ok().flatten()
+            };
+            let result = tc_remote::connect(&u, &mut ask);
+            let _ = tx.send(CMsg::Done(result));
+        });
+        self.mode = Mode::Connecting(Connecting {
+            url,
+            ask: None,
+            rx,
+            reply,
+        });
+    }
+
+    /// Host key: `y` trusts, `n`/Esc cancels; password: typed, Enter sends. Esc while waiting
+    /// abandons the attempt (the worker finishes on its own).
+    fn connecting_key(&mut self, mut c: Connecting, key: KeyEvent) {
+        let answer = match (&mut c.ask, key.code) {
+            (None, KeyCode::Esc) => return,
+            (Some(_), KeyCode::Esc) | (Some((Prompt::HostKey(_), _)), KeyCode::Char('n')) => {
+                Some(None)
+            }
+            (Some((Prompt::HostKey(_), _)), KeyCode::Char('y')) => Some(Some("y".to_owned())),
+            (Some((Prompt::Password(_), l)), KeyCode::Enter) => Some(Some(mem::take(&mut l.text))),
+            (Some((Prompt::Password(_), l)), _) => {
+                edit_key(l, key);
+                None
+            }
+            _ => None,
+        };
+        if let Some(a) = answer {
+            c.ask = None;
+            let _ = c.reply.send(a);
+        }
+        self.mode = Mode::Connecting(c);
     }
 
     fn open_viewer(&mut self, path: PathBuf) {
@@ -1944,8 +2225,19 @@ impl App {
 
     fn spawn_save(&mut self, mut editor: Editor, to_utf8: bool, to_lf: bool, exit: bool) {
         let (path, total) = (editor.path().to_owned(), editor.line_count() as u64);
+        let upload = self
+            .edit_remote
+            .as_ref()
+            .map(|(r, p, _)| (r.clone(), p.clone()));
         self.spawn("Saving", path, total, exit, move |progress, cancel| {
-            let result = editor.save(to_utf8, to_lf, progress, cancel);
+            let mut result = editor.save(to_utf8, to_lf, progress, cancel);
+            if let (Ok(()), Some((r, target))) = (&result, upload) {
+                // replaces the remote file via temp name + rename, like an overwrite in F5
+                let p = ops::Progress::default();
+                let mut over = |_: &Path, _: &Path| ops::Decision::Overwrite;
+                let (src, dst) = (Side::Local, Side::Remote(r));
+                result = vfs::transfer(&src, editor.path(), &dst, &target, false, &mut over, &p);
+            }
             Done::Saved(editor, result)
         });
     }
@@ -1970,6 +2262,27 @@ impl App {
     fn leave_editor(&mut self) {
         self.mode = Mode::Normal;
         self.finish(None);
+    }
+
+    fn connect_tick(&mut self) {
+        let Mode::Connecting(c) = &mut self.mode else {
+            return;
+        };
+        match c.rx.try_recv() {
+            Ok(CMsg::Ask(p)) => c.ask = Some((p, LineEdit::default())),
+            Err(TryRecvError::Empty) => {}
+            Ok(CMsg::Done(Ok((remote, dir)))) => {
+                self.mode = Mode::Normal;
+                if let Err(e) = self.panels[self.active].open_remote(remote, dir.into()) {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
+            Ok(CMsg::Done(Err(Error::Cancelled))) => self.mode = Mode::Normal,
+            Ok(CMsg::Done(Err(e))) => self.mode = Mode::Message(format!("{}: {e}", c.url)),
+            Err(TryRecvError::Disconnected) => {
+                self.mode = Mode::Message("connect worker failed".into())
+            }
+        }
     }
 
     /// Collect a finished worker result.
@@ -2002,6 +2315,12 @@ impl App {
         }
         if self.view_tmp.is_some() && !matches!(self.mode, Mode::View { .. }) {
             self.view_tmp = None;
+        }
+        if self.edit_remote.is_some() && matches!(self.mode, Mode::Normal) {
+            self.edit_remote = None;
+        }
+        if matches!(self.mode, Mode::Connecting(_)) {
+            return self.connect_tick();
         }
         if let Mode::Found(f) = &mut self.mode {
             return f.pump();
@@ -2050,6 +2369,14 @@ impl App {
         self.mode = Mode::Normal;
         match done {
             Done::Listed(Ok(archive)) => self.panels[self.active].open_archive(archive),
+            Done::Fetched(r, remote, Ok((tmp, file))) => {
+                self.edit_remote = Some((r, remote, tmp));
+                self.edit_path(file);
+            }
+            Done::Fetched(_, _, Err(Error::Cancelled)) => {}
+            Done::Fetched(_, remote, Err(e)) => {
+                self.mode = Mode::Message(format!("{}: {e}", remote.display()))
+            }
             Done::Extracted(Ok((tmp, file))) => match Viewer::open(&file) {
                 Ok(view) => {
                     self.view_tmp = Some(tmp);
@@ -2186,6 +2513,7 @@ mod tests {
         with(&mut app, KeyCode::Char('='), KeyModifiers::ALT); // right gets left's dir
         assert_eq!(app.panels[1].path(), r.path());
         with(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL);
+        settle(&mut app); // listing may take over the 50 ms wait on a loaded machine
         assert!(app.panels[0].path().parent().is_none());
         with(&mut app, KeyCode::Char('.'), KeyModifiers::ALT);
         assert!(!app.panels[0].shows_hidden());
@@ -2441,6 +2769,101 @@ mod tests {
         key(&mut app, KeyCode::Enter);
         wait(&mut app);
         assert!(left.path().join("copy").is_dir());
+    }
+
+    fn settle(app: &mut App) {
+        wait(app);
+        while app.panels.iter().any(|p| p.loading().is_some()) {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn type_keys(app: &mut App, text: &str) {
+        text.chars().for_each(|c| key(app, KeyCode::Char(c)));
+    }
+
+    #[test]
+    fn remote_panel_copy_delete_mkdir_and_blocked_keys() {
+        let left = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("a"), "data").unwrap();
+        let mem = tc_core::vfs::mem::Mem::new();
+        let mut app = two_panels(left.path(), left.path());
+        app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
+        settle(&mut app);
+        assert_eq!(app.panels[1].title(), "mem:///");
+        // upload: the prefilled absolute path is on the other panel's side
+        app.panels[0].focus(OsStr::new("a"));
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(mem.get("/a").unwrap(), b"data");
+        // download it back under a new name
+        key(&mut app, KeyCode::Tab);
+        app.panels[1].focus(OsStr::new("a"));
+        key(&mut app, KeyCode::F(5));
+        let Mode::Transfer(_, _, l) = &mut app.mode else {
+            panic!("no transfer prompt")
+        };
+        l.text.push_str(".back");
+        key(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(std::fs::read(left.path().join("a.back")).unwrap(), b"data");
+        // delete: no trash on remote, only `p`
+        key(&mut app, KeyCode::F(8));
+        assert!(matches!(&app.mode, Mode::Confirm(_, _, t) if t.contains("No trash")));
+        key(&mut app, KeyCode::Char('y'));
+        assert!(matches!(app.mode, Mode::Confirm(..)));
+        key(&mut app, KeyCode::Char('p'));
+        settle(&mut app);
+        assert!(mem.get("/a").is_none());
+        key(&mut app, KeyCode::F(7));
+        type_keys(&mut app, "d");
+        key(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(mem.paths(), ["/", "/d"]);
+        with(&mut app, KeyCode::F(7), KeyModifiers::ALT);
+        assert!(matches!(&app.mode, Mode::Message(m) if m == REMOTE));
+        key(&mut app, KeyCode::Esc);
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert!(matches!(&app.mode, Mode::Message(m) if m == REMOTE));
+        key(&mut app, KeyCode::Esc);
+        // ".." at the remote root goes back to the local directory
+        app.panels[1].set_cursor(0);
+        key(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert!(app.panels[1].remote().is_none());
+        assert_eq!(app.panels[1].path(), left.path());
+    }
+
+    #[test]
+    fn connection_list_add_edit_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        with(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert!(matches!(app.mode, Mode::Connections(0)));
+        key(&mut app, KeyCode::Insert);
+        type_keys(&mut app, "me@h");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.connections, [PathBuf::from("sftp://me@h")]);
+        key(&mut app, KeyCode::F(4));
+        type_keys(&mut app, "ost");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.connections, [PathBuf::from("sftp://me@host")]);
+        key(&mut app, KeyCode::Insert);
+        for _ in 0..7 {
+            key(&mut app, KeyCode::Backspace);
+        }
+        type_keys(&mut app, "nonsense");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Message(_)));
+        assert_eq!(app.connections.len(), 1);
+        key(&mut app, KeyCode::Esc);
+        with(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Delete);
+        assert!(app.connections.is_empty());
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
     }
 
     #[test]

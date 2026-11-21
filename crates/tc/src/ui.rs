@@ -16,6 +16,7 @@ use tc_core::edit::{Eol, human};
 use tc_core::find::MAX_RESULTS;
 use tc_core::panel::SortKey;
 use tc_core::syntax::{self, Kind, Lang};
+use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // Norton Commander look: blue panels, light-cyan files, white dirs, cyan cursor bar.
@@ -202,6 +203,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "(no drives found)",
             "Enter go  Esc close",
         ),
+        Mode::Connections(sel) => list_popup(
+            frame,
+            "Connections",
+            &app.connections,
+            *sel,
+            "(empty, Insert adds one)",
+            "Enter connect  Ins add  F4 edit  Del remove  Esc close",
+        ),
+        Mode::ConnEdit(_, l) => popup_edit(
+            frame,
+            "Connection",
+            "sftp://user@host[:port]/dir, ftp://..., ftps://...\n(no passwords, they are asked on connect)",
+            l,
+            "Enter save   Esc cancel",
+        ),
+        Mode::Connecting(c) => match &c.ask {
+            Some((Prompt::HostKey(text), _)) => popup(
+                frame,
+                "Host key",
+                &format!("{text}\n\n[y] trust and save to known_hosts   [n] cancel"),
+            ),
+            Some((Prompt::Password(label), l)) => {
+                let masked = LineEdit::from("*".repeat(l.text.chars().count()));
+                popup_edit(frame, label, "", &masked, "Enter ok   Esc cancel");
+            }
+            None => popup(frame, "Connecting", &format!("{}\n\nEsc abandon", c.url)),
+        },
         Mode::Found(f) => draw_found(frame, f),
         Mode::Stats(st) => draw_stats(frame, st, None),
         Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l)),
@@ -702,6 +730,7 @@ Alt+=  other panel to this directory
 Alt+.  show / hide hidden files
 Ctrl+F3/F4/F5/F6  sort name/ext/date/size (again: reverse)
 Ctrl+B  hotlist
+Ctrl+N  connections (SFTP, FTP, FTPS)
 Ctrl+Space  file stats (Tab size/count, Enter/Bksp, Esc/F10)
 Ctrl+D  add directory to hotlist
 Esc  clear filter, leave found list

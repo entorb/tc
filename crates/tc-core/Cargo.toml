@@ -17,6 +17,10 @@ thiserror = "2.0.21"
 trash = "5.4.0"
 zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2"] }
 
+[features]
+# in-memory Remote for tests of dependent crates
+mem = []
+
 [dev-dependencies]
 lzma-rust2 = { version = "0.25.0", features = ["xz", "encoder"] }
 

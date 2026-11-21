@@ -14,6 +14,7 @@ pub mod panel;
 pub mod search;
 pub mod stats;
 pub mod syntax;
+pub mod vfs;
 pub mod view;
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +37,8 @@ pub enum Error {
     Pattern(String),
     #[error("archive: {0}")]
     Archive(String),
+    #[error("{0}")]
+    Remote(String),
     #[error("cancelled")]
     Cancelled,
     #[error("text not representable in {0}, convert to UTF-8")]
