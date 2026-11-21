@@ -109,7 +109,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "Edit",
             "Save changes?\n\n[y] yes   [n] no   Esc cancel",
         ),
-        Mode::Normal | Mode::View { .. } => {}
+        Mode::Normal | Mode::View { .. } | Mode::Search(_) | Mode::Filter(_) => {}
     }
 
     draw_input(frame, app);
@@ -236,7 +236,13 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
             ListItem::new(row).style(style)
         })
         .collect();
-    let title = panel.path().display().to_string();
+    let mut title = panel.path().display().to_string();
+    match &app.mode {
+        Mode::Search(t) if active => title += &format!(" [search: {t}]"),
+        Mode::Filter(t) if active => title += &format!(" [filter: {t}]"),
+        _ if !panel.filter().is_empty() => title += &format!(" [filter: {}]", panel.filter()),
+        _ => {}
+    }
     let border = if active {
         Style::new().fg(Color::Cyan)
     } else {

@@ -42,6 +42,9 @@ pub struct Panel {
     entries: Vec<Entry>,
     cursor: usize,
     selected: HashSet<OsString>,
+    /// Lowercased name filter; `all` keeps the unfiltered list while it is set.
+    filter: String,
+    all: Option<Vec<Entry>>,
 }
 
 impl Panel {
@@ -53,6 +56,8 @@ impl Panel {
             entries,
             cursor: 0,
             selected: HashSet::new(),
+            filter: String::new(),
+            all: None,
         })
     }
 
@@ -80,6 +85,11 @@ impl Panel {
     pub fn reload(&mut self) -> Result<()> {
         let keep = self.current().map(|e| e.name.clone());
         self.entries = read_entries(&self.path)?;
+        self.all = None;
+        if !self.filter.is_empty() {
+            let f = std::mem::take(&mut self.filter);
+            self.apply_filter(&f);
+        }
         let names: HashSet<&OsStr> = self.entries.iter().map(|e| e.name.as_os_str()).collect();
         self.selected.retain(|n| names.contains(n.as_os_str()));
         let old = self.cursor;
@@ -139,6 +149,50 @@ impl Panel {
         self.cursor = b.min(last);
     }
 
+    /// Active name filter (lowercased), empty if none.
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Show only ".." and entries whose name contains `text` (case-insensitive); in memory, no re-read.
+    pub fn apply_filter(&mut self, text: &str) {
+        let keep = self.current().map(|e| e.name.clone());
+        let all = self
+            .all
+            .take()
+            .unwrap_or_else(|| std::mem::take(&mut self.entries));
+        self.filter = text.to_lowercase();
+        self.entries = if self.filter.is_empty() {
+            all.clone()
+        } else {
+            let f = &self.filter;
+            let hit =
+                |e: &&Entry| e.is_parent() || e.name.to_string_lossy().to_lowercase().contains(f);
+            all.iter().filter(hit).cloned().collect()
+        };
+        if !self.filter.is_empty() {
+            self.all = Some(all);
+        }
+        self.cursor = 0;
+        if let Some(name) = keep {
+            self.focus(&name);
+        }
+    }
+
+    /// Quick search: move the cursor to the next entry (from `cursor + skip`, wrapping) whose name contains `text`.
+    pub fn search(&mut self, text: &str, skip: usize) -> bool {
+        let text = text.to_lowercase();
+        let n = self.entries.len();
+        let hit = (0..n).map(|k| (self.cursor + skip + k) % n).find(|&i| {
+            self.entries[i]
+                .name
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(&text)
+        });
+        hit.inspect(|&i| self.cursor = i).is_some()
+    }
+
     /// Put the cursor on entry `i`, clamped to the list.
     pub fn set_cursor(&mut self, i: usize) {
         self.cursor = i.min(self.entries.len().saturating_sub(1));
@@ -176,6 +230,8 @@ impl Panel {
     /// Read the new directory first so a failure leaves the panel unchanged.
     fn change_dir(&mut self, path: PathBuf) -> Result<()> {
         self.entries = read_entries(&path)?;
+        self.all = None;
+        self.filter.clear();
         self.path = path;
         self.cursor = 0;
         self.selected.clear();
@@ -289,6 +345,27 @@ mod tests {
         fs::remove_file(tmp.path().join("a")).unwrap();
         p.reload().unwrap();
         assert_eq!(p.targets(), [p.path().join("b")]);
+    }
+
+    #[test]
+    fn filter_and_search() {
+        let tmp = tempfile::tempdir().unwrap();
+        for n in ["apple", "Banana", "grape"] {
+            fs::write(tmp.path().join(n), "").unwrap();
+        }
+        let mut p = Panel::open(tmp.path()).unwrap();
+        assert!(p.search("AN", 0));
+        assert_eq!(p.current().unwrap().name, "Banana");
+        assert!(!p.search("zzz", 0));
+        assert!(p.search("ap", 1)); // wraps past the end
+        p.apply_filter("AP");
+        assert_eq!(names(&p), ["..", "apple", "grape"]);
+        assert_eq!(p.current().unwrap().name, "grape");
+        fs::write(tmp.path().join("cap"), "").unwrap();
+        p.reload().unwrap(); // filter survives reload
+        assert_eq!(names(&p), ["..", "apple", "cap", "grape"]);
+        p.apply_filter("");
+        assert_eq!(p.entries().len(), 5);
     }
 
     #[cfg(unix)]

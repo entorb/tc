@@ -41,6 +41,10 @@ pub enum Mode {
     /// Copy/move: editable destination (a new name for a single item, or a directory).
     Transfer(Op, Vec<PathBuf>, String),
     Mkdir(String),
+    /// Quick search text (cursor jumps to the next match).
+    Search(String),
+    /// Quick filter text (non-matching entries hidden).
+    Filter(String),
     /// Command prompt for the external editor (shown when the default is missing).
     Editor(PathBuf, String),
     Message(String),
@@ -263,7 +267,54 @@ impl App {
                 panel.select_range(c, c);
                 panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
             }
+            Mode::Normal if key.modifiers.contains(KeyModifiers::CONTROL) => match key.code {
+                KeyCode::Char('s') => self.mode = Mode::Search(String::new()),
+                KeyCode::Char('f') => {
+                    self.mode = Mode::Filter(self.panels[self.active].filter().to_owned());
+                }
+                _ => {}
+            },
+            Mode::Normal if key.code == KeyCode::Esc => self.panels[self.active].apply_filter(""),
             Mode::Normal => self.normal_key(key.code),
+            Mode::Search(mut text) => {
+                let panel = &mut self.panels[self.active];
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => return,
+                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        panel.search(&text, 1);
+                    }
+                    KeyCode::Backspace => {
+                        text.pop();
+                        panel.search(&text, 0);
+                    }
+                    KeyCode::Char(c) => {
+                        text.push(c);
+                        panel.search(&text, 0);
+                    }
+                    _ => {}
+                }
+                self.mode = Mode::Search(text);
+            }
+            Mode::Filter(mut text) => {
+                let panel = &mut self.panels[self.active];
+                match key.code {
+                    KeyCode::Enter => return,
+                    KeyCode::Esc => {
+                        panel.apply_filter("");
+                        return;
+                    }
+                    KeyCode::Backspace => {
+                        text.pop();
+                        panel.apply_filter(&text);
+                    }
+                    KeyCode::Char(c) => {
+                        text.push(c);
+                        panel.apply_filter(&text);
+                    }
+                    _ => {}
+                }
+                self.mode = Mode::Filter(text);
+            }
             Mode::Editor(path, mut cmd) => match key.code {
                 KeyCode::Enter => self.external_edit(path, cmd),
                 KeyCode::Esc => {}
