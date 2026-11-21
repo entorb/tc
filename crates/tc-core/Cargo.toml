@@ -19,3 +19,6 @@ zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2
 
 [dev-dependencies]
 lzma-rust2 = { version = "0.25.0", features = ["xz", "encoder"] }
+
+[lints]
+workspace = true
