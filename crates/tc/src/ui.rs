@@ -7,9 +7,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 use regex::Regex;
 
-use crate::app::{App, FOOTER, Found, Mode, Step};
+use crate::app::{App, FOOTER, Found, Mode, Step, Xfer};
 use ratatui::widgets::ListState;
-use tc_core::edit::Eol;
+use std::sync::atomic::Ordering;
+use tc_core::edit::{Eol, human};
 use tc_core::find::MAX_RESULTS;
 
 /// Length of "YY-MM-DD HH:MM".
@@ -125,7 +126,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     ),
                 );
             } else if x.visible() {
-                popup(frame, "Working", "Esc cancel");
+                popup(frame, "Working", &progress_text(x));
             }
         }
         Mode::AskViewer { text, .. } => popup(frame, "Edit", text),
@@ -335,6 +336,48 @@ fn fmt_date(z: &jiff::ZonedDateTime, today: jiff::civil::Date) -> String {
         "%y-%m-%d %H:%M"
     };
     z.strftime(fmt).to_string()
+}
+
+fn progress_text(x: &Xfer) -> String {
+    let p = &x.progress;
+    let (done, files) = (
+        p.done.load(Ordering::Relaxed),
+        p.files.load(Ordering::Relaxed),
+    );
+    let current = p
+        .current
+        .lock()
+        .map(|c| c.display().to_string())
+        .unwrap_or_default();
+    let (total, of) = if p.scanned.load(Ordering::Acquire) {
+        let (t, f) = (
+            p.total.load(Ordering::Relaxed),
+            p.files_total.load(Ordering::Relaxed),
+        );
+        (human(t), format!("{} / {f}", files.min(f)))
+    } else {
+        ("scanning...".to_owned(), files.to_string())
+    };
+    let remaining = p.total.load(Ordering::Relaxed).saturating_sub(done) as f64;
+    let speed = x
+        .eta
+        .rate()
+        .map_or("--".to_owned(), |r| format!("{}/s", human(r as u64)));
+    let eta = match x.eta.eta(remaining) {
+        Some(s) if p.scanned.load(Ordering::Acquire) => hms(s as u64),
+        _ => "--".to_owned(),
+    };
+    format!(
+        "{current}\n{} / {total}   files {of}\n{speed}   ETA {eta}\n\nEsc cancel",
+        human(done)
+    )
+}
+
+fn hms(s: u64) -> String {
+    match (s / 3600, s / 60 % 60, s % 60) {
+        (0, m, s) => format!("{m}:{s:02}"),
+        (h, m, s) => format!("{h}:{m:02}:{s:02}"),
+    }
 }
 
 fn popup(frame: &mut Frame, title: &str, text: &str) {
