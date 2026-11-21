@@ -1112,10 +1112,9 @@ impl App {
 
     /// Where the command line runs: the browsed File Stats directory, else the active panel.
     pub fn cmd_dir(&self) -> PathBuf {
-        self.stats.as_ref().map_or_else(
-            || self.panels[self.active].path().to_owned(),
-            Stats::path,
-        )
+        self.stats
+            .as_ref()
+            .map_or_else(|| self.panels[self.active].path().to_owned(), Stats::path)
     }
 
     /// After a command ran: files may have changed in both panels.

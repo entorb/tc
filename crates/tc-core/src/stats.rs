@@ -164,11 +164,18 @@ mod tests {
         assert_eq!((root.size, root.files), (60, 20));
         let dirs = p.dirs.load(Ordering::Relaxed);
         assert_eq!((dirs, p.dirs_done.load(Ordering::Relaxed)), (41, 41));
-        assert!(root.children.iter().all(|c| c.name.to_string_lossy().starts_with('d')));
+        assert!(
+            root.children
+                .iter()
+                .all(|c| c.name.to_string_lossy().starts_with('d'))
+        );
         // remove d?/in: root and d? lose 3 bytes and 1 file
         remove(&mut root, &[0], 0);
         assert_eq!((root.size, root.files), (57, 19));
-        assert_eq!((root.children[0].size, root.children[0].children.len()), (0, 0));
+        assert_eq!(
+            (root.children[0].size, root.children[0].children.len()),
+            (0, 0)
+        );
         remove(&mut root, &[], 0);
         assert_eq!((root.size, root.children.len()), (57, 19));
     }
