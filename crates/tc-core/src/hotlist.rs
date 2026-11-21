@@ -2,6 +2,7 @@
 
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::{Result, io_err};
@@ -43,10 +44,13 @@ pub fn load(file: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+/// Atomic replace (a crash keeps the old file); new files are private (0600 on Unix): the
+/// command history can hold secrets. A symlinked file is replaced at its target.
 pub fn save(file: &Path, list: &[PathBuf]) -> Result<()> {
-    if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir).map_err(io_err(dir))?;
-    }
+    let dir = file.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir).map_err(io_err(dir))?;
+    let file = fs::canonicalize(file).unwrap_or_else(|_| file.to_owned());
+    let dir = file.parent().unwrap_or(Path::new("."));
     let mut out = Vec::new();
     for p in list.iter().filter(|p| !p.as_os_str().is_empty()) {
         let b = to_bytes(p);
@@ -55,7 +59,11 @@ pub fn save(file: &Path, list: &[PathBuf]) -> Result<()> {
             out.push(b'\n');
         }
     }
-    fs::write(file, out).map_err(io_err(file))
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io_err(dir))?;
+    tmp.write_all(&out).map_err(io_err(tmp.path()))?;
+    tmp.as_file().sync_all().map_err(io_err(tmp.path()))?;
+    tmp.persist(&file).map_err(|e| io_err(&file)(e.error))?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -91,6 +99,24 @@ mod tests {
         let list = vec![PathBuf::from("/a b"), PathBuf::from("/c")];
         save(&file, &list).unwrap();
         assert_eq!(load(&file).unwrap(), list);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_is_private_and_follows_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (real, link) = (tmp.path().join("real"), tmp.path().join("link"));
+        save(&real, &[PathBuf::from("/a")]).unwrap();
+        assert_eq!(
+            fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        save(&link, &[PathBuf::from("/b")]).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(load(&real).unwrap(), [PathBuf::from("/b")]);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2); // no temp left
     }
 
     #[cfg(unix)]
