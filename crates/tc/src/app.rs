@@ -2148,7 +2148,8 @@ impl App {
             .stderr(Stdio::null())
             .spawn();
         match spawned {
-            Ok(_) => {}
+            // reap it when it exits, else it stays a zombie until tc quits
+            Ok(mut child) => drop(thread::spawn(move || child.wait())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 self.mode = Mode::Editor(path, LineEdit::default())
             }
