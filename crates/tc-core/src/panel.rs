@@ -209,6 +209,30 @@ impl Panel {
         self.move_cursor(1);
     }
 
+    /// Select (`on`) or deselect visible files matching `masks`; directories are left alone.
+    pub fn select_mask(&mut self, masks: &str, on: bool) {
+        for e in self
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir && crate::search::mask_match(masks, &e.name.to_string_lossy()))
+        {
+            if on {
+                self.selected.insert(e.name.clone());
+            } else {
+                self.selected.remove(&e.name);
+            }
+        }
+    }
+
+    /// Invert the selection of visible files; directories are left alone.
+    pub fn invert_selection(&mut self) {
+        for e in self.entries.iter().filter(|e| !e.is_dir) {
+            if !self.selected.remove(&e.name) {
+                self.selected.insert(e.name.clone());
+            }
+        }
+    }
+
     /// Paths an operation acts on: the selection, else the cursor entry.
     pub fn targets(&self) -> Vec<PathBuf> {
         let names: Vec<&OsString> = if self.selected.is_empty() {
@@ -345,6 +369,23 @@ mod tests {
         fs::remove_file(tmp.path().join("a")).unwrap();
         p.reload().unwrap();
         assert_eq!(p.targets(), [p.path().join("b")]);
+    }
+
+    #[test]
+    fn mask_and_invert() {
+        let tmp = tempfile::tempdir().unwrap();
+        for n in ["a.rs", "b.RS", "c.txt"] {
+            fs::write(tmp.path().join(n), "").unwrap();
+        }
+        fs::create_dir(tmp.path().join("d.rs")).unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        p.select_mask("*.rs", true);
+        assert_eq!(p.targets(), [p.path().join("a.rs"), p.path().join("b.RS")]);
+        p.invert_selection();
+        assert_eq!(p.targets(), [p.path().join("c.txt")]);
+        p.select_mask("", true);
+        p.select_mask("c.*", false);
+        assert_eq!(p.targets().len(), 2);
     }
 
     #[test]

@@ -14,9 +14,36 @@ pub fn compile(pattern: &str) -> Result<Regex> {
         .map_err(|e| Error::Pattern(e.to_string().lines().last().unwrap_or_default().to_owned()))
 }
 
+/// Case-insensitive glob (`*`, `?`) against any of the comma or space separated masks; empty means `*`.
+pub fn mask_match(masks: &str, name: &str) -> bool {
+    fn glob(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('*', rest)) => (0..=n.len()).any(|i| glob(rest, &n[i..])),
+            Some((c, rest)) => n
+                .first()
+                .is_some_and(|x| (*c == '?' || c == x) && glob(rest, &n[1..])),
+        }
+    }
+    let name: Vec<char> = name.to_lowercase().chars().collect();
+    let masks = masks.to_lowercase();
+    let mut all = masks.split([',', ' ']).filter(|m| !m.is_empty()).peekable();
+    all.peek().is_none() || all.any(|m| glob(&m.chars().collect::<Vec<_>>(), &name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn masks() {
+        assert!(mask_match("", "a"));
+        assert!(mask_match("*.RS, *.toml", "main.rs"));
+        assert!(mask_match("*.rs *.toml", "Cargo.TOML"));
+        assert!(mask_match("a?c*", "abc"));
+        assert!(!mask_match("*.rs", "main.rs.bak"));
+        assert!(!mask_match("a?c", "ac"));
+    }
 
     #[test]
     fn smart_case_and_errors() {
