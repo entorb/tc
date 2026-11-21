@@ -275,7 +275,8 @@ impl Mode {
 }
 
 /// Footer bar items: label, key sent when clicked.
-pub const FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
+pub const FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
+    ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
     ("S-F4 Ext", KeyCode::F(4), KeyModifiers::SHIFT),
@@ -301,6 +302,9 @@ pub struct App {
     pub page: usize,
     /// Open text prompt of the viewer or editor.
     pub input: Option<Input>,
+    /// Shortcut popup over the current mode, any key closes it.
+    pub help: bool,
+    pub help_scroll: usize,
     /// Last search, used by next/previous.
     pub search: Option<Regex>,
     /// Short result of the last key, shown in the viewer or editor, e.g. "not found".
@@ -338,6 +342,8 @@ impl App {
             quit: false,
             page: 10,
             input: None,
+            help: false,
+            help_scroll: 0,
             search: None,
             note: String::new(),
             clipboard: String::new(),
@@ -439,6 +445,26 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         self.note.clear();
+        if self.help {
+            let page = self.page;
+            match key.code {
+                KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+                KeyCode::Down => self.help_scroll += 1,
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(page),
+                KeyCode::PageDown => self.help_scroll += page,
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::End => self.help_scroll = usize::MAX,
+                _ => self.help = false,
+            }
+            return;
+        }
+        let idle = matches!(self.mode, Mode::Normal | Mode::View { .. })
+            || matches!(self.mode, Mode::Edit { error: None, .. });
+        if key.code == KeyCode::F(1) && idle && self.input.is_none() {
+            self.help = true;
+            self.help_scroll = 0;
+            return;
+        }
         if self.input.is_some() {
             return self.input_key(key);
         }
@@ -1480,6 +1506,17 @@ mod tests {
 
     fn key(app: &mut App, code: KeyCode) {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn f1_opens_help_any_key_closes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        key(&mut app, KeyCode::F(1));
+        assert!(app.help);
+        key(&mut app, KeyCode::Char('x'));
+        assert!(!app.help && matches!(app.mode, Mode::Normal));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
 use regex::Regex;
@@ -17,6 +17,13 @@ use tc_core::find::MAX_RESULTS;
 const PANEL: Style = Style::new().fg(Color::LightCyan).bg(Color::Blue);
 const BAR: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
 
+/// Border and fill of viewer, editor and find list, same look as the panels.
+fn themed_block() -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Double)
+        .style(PANEL)
+}
+
 /// Length of "YY-MM-DD HH:MM".
 const DATE_WIDTH: usize = 14;
 
@@ -28,7 +35,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             view.encoding_name(),
             app.note
         );
-        let block = Block::bordered().title(title.as_str()).title_bottom(bottom);
+        let block = themed_block().title(title.as_str()).title_bottom(bottom);
         let inner = block.inner(frame.area());
         let height = inner.height as usize;
         app.page = height.max(1);
@@ -39,7 +46,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .collect(),
             Err(e) => vec![Line::raw(e.to_string())],
         };
-        frame.render_widget(Paragraph::new(visible).block(block), frame.area());
+        frame.render_widget(
+            Paragraph::new(visible).style(PANEL).block(block),
+            frame.area(),
+        );
         draw_input(frame, app);
         return;
     }
@@ -203,14 +213,45 @@ fn draw_found(frame: &mut Frame, f: &Found) {
         f.list.len()
     );
     let list = List::new(items)
-        .block(Block::bordered().title(title))
-        .highlight_style(Style::new().reversed());
+        .style(PANEL)
+        .block(themed_block().title(title))
+        .highlight_style(BAR);
     let mut st = ListState::default().with_selected(Some(f.sel - start));
     frame.render_widget(Clear, area);
     frame.render_stateful_widget(list, area, &mut st);
 }
 
-fn draw_input(frame: &mut Frame, app: &App) {
+fn draw_input(frame: &mut Frame, app: &mut App) {
+    if app.help {
+        let (title, text) = match app.mode {
+            Mode::View { .. } => ("Help: viewer", HELP_VIEW),
+            Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
+            _ => ("Help", HELP_MAIN),
+        };
+        let lines = text.lines().count();
+        let [h] = Layout::horizontal([Constraint::Length(frame.area().width.min(60))])
+            .flex(Flex::Center)
+            .areas(frame.area());
+        let [area] = Layout::vertical([Constraint::Length(
+            (lines as u16 + 2).min(frame.area().height),
+        )])
+        .flex(Flex::Center)
+        .areas(h);
+        let rows = usize::from(area.height.saturating_sub(2));
+        app.help_scroll = app.help_scroll.min(lines.saturating_sub(rows));
+        frame.render_widget(Clear, area);
+        let block = Block::bordered()
+            .border_type(BorderType::Double)
+            .title(title)
+            .title_bottom(" Up/Down scroll  other key closes ");
+        frame.render_widget(
+            Paragraph::new(text)
+                .scroll((app.help_scroll as u16, 0))
+                .style(BAR)
+                .block(block),
+            area,
+        );
+    }
     if let Some(input) = &app.input {
         let error = input.error.as_deref().unwrap_or_default();
         popup(
@@ -230,7 +271,7 @@ fn draw_editor(
 ) {
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    let block = Block::bordered().title(editor.path().display().to_string());
+    let block = themed_block().title(editor.path().display().to_string());
     let inner = block.inner(main);
     let (height, width) = (inner.height as usize, inner.width as usize);
     *page = height.max(1);
@@ -241,7 +282,7 @@ fn draw_editor(
         .enumerate()
         .map(|(i, row)| highlight(row, re, editor.selection_cols(editor.top + i), editor.left))
         .collect();
-    frame.render_widget(Paragraph::new(lines).block(block), main);
+    frame.render_widget(Paragraph::new(lines).style(PANEL).block(block), main);
     let (line, col) = editor.cursor;
     frame.set_cursor_position((
         inner.x + (col - editor.left) as u16,
@@ -259,7 +300,7 @@ fn draw_editor(
         col + 1,
         editor.encoding_name()
     );
-    frame.render_widget(Line::raw(info).reversed(), status);
+    frame.render_widget(Line::raw(info).style(BAR), status);
 }
 
 /// `row` with all matches of `re` marked yellow and the selected columns
@@ -404,12 +445,88 @@ fn hms(s: u64) -> String {
     }
 }
 
+const HELP_MAIN: &str = "\
+== Navigation ==
+Up/Down/PgUp/PgDn/Home/End  move cursor
+Tab  switch panel
+Enter  open directory, file or archive
+Backspace  parent directory
+Alt+Left / Alt+Right  history back / forward
+Ctrl+B  hotlist
+Ctrl+D  add directory to hotlist
+Esc  clear filter, leave found list
+
+== Selection ==
+Insert / Space  select entry
+Shift+Up/Down  select range
++  select by mask
+-  deselect by mask
+*  invert selection
+Ctrl+Y  select differences to other panel
+
+== Search ==
+Ctrl+S  quick search (again: next match)
+Ctrl+F  quick filter
+Alt+F7  find files
+:  command line
+
+== Files ==
+F3  view
+F4  edit
+Shift+F4  edit in external editor
+F5  copy
+F6  move
+F7  make directory
+F8  delete
+F10 / q  quit";
+
+const HELP_VIEW: &str = "\
+== Move ==
+Up/Down/PgUp/PgDn/Home/End  scroll
+Left/Right  scroll sideways
+g  go to line or N%
+
+== Search ==
+/ or f or F7  find
+n  next match
+N  previous match
+
+== View ==
+e  next encoding
+Esc / q / F3 / F10  close";
+
+const HELP_EDIT: &str = "\
+== File ==
+F2  save
+Esc / F10  exit
+
+== Move ==
+Ctrl+Left/Right  by word
+Ctrl+Home/End  start / end of file
+Ctrl+G  go to line
+
+== Search ==
+F7 / Ctrl+F  find
+F3  next match
+Shift+F3  previous match
+F4 / Ctrl+R  replace all
+
+== Edit ==
+Ctrl+Z  undo
+Ctrl+Y  redo
+Shift+arrows  select
+Ctrl+C  copy
+Ctrl+X  cut
+Ctrl+V  paste
+Ctrl+K  delete line";
+
 fn popup(frame: &mut Frame, title: &str, text: &str) {
     let width = frame.area().width.min(60);
     let [h] = Layout::horizontal([Constraint::Length(width)])
         .flex(Flex::Center)
         .areas(frame.area());
-    let [area] = Layout::vertical([Constraint::Length(7)])
+    let rows = (text.lines().count() as u16 + 2).max(7);
+    let [area] = Layout::vertical([Constraint::Length(rows)])
         .flex(Flex::Center)
         .areas(h);
     frame.render_widget(Clear, area);
