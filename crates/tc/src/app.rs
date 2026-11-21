@@ -405,7 +405,7 @@ pub const FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
-    ("S-F4 New", KeyCode::F(4), KeyModifiers::SHIFT),
+    ("S-F4 Ext", KeyCode::F(4), KeyModifiers::SHIFT),
     ("F5 Copy", KeyCode::F(5), KeyModifiers::NONE),
     ("F6 Move", KeyCode::F(6), KeyModifiers::NONE),
     ("F7 Mkdir", KeyCode::F(7), KeyModifiers::NONE),
