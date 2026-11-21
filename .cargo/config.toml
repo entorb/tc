@@ -1,0 +1,6 @@
+# Supply chain: ignore crate versions published less than 7 days ago
+[registry]
+global-min-publish-age = "7 days"
+
+[resolver]
+incompatible-publish-age = "deny"
