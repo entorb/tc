@@ -882,4 +882,21 @@ mod tests {
         r.delete(Path::new("/d")).unwrap();
         assert_eq!(m.paths(), ["/"]);
     }
+
+    #[test]
+    fn stats_scan_remote_tree_skips_links() {
+        let m = Mem::new();
+        m.dir("/d");
+        m.dir("/d/sub");
+        m.put("/d/sub/a", b"abc");
+        m.put("/d/b", b"de");
+        m.link("/d/loop", "/d");
+        let root = crate::stats::scan_remote(m.as_ref(), "/d", &Progress::default());
+        assert_eq!(
+            (root.name.to_str(), root.size, root.files),
+            (Some("d"), 5, 3)
+        );
+        assert_eq!(root.children[0].name, "sub");
+        assert_eq!((root.children[0].size, root.children[0].files), (3, 1));
+    }
 }

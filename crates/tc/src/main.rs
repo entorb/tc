@@ -1,7 +1,6 @@
 mod app;
 mod ui;
 
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -60,8 +59,12 @@ fn main() -> anyhow::Result<()> {
             if let Some(text) = app.copied.take() {
                 execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(text))?;
             }
-            if let Some((cmd, dir)) = app.run.take() {
-                run_shell(terminal, &cmd, &dir)?;
+            if let Some((cmd, dir, url)) = app.run.take() {
+                let command = match url {
+                    Some(url) => tc_remote::ssh_command(&url, &cmd, &tc_core::vfs::rpath(&dir)),
+                    None => Ok(tc_core::cmdline::shell_command(&cmd, &dir)),
+                };
+                run_shell(terminal, &cmd, command)?;
                 app.reload_all();
             }
             app.tick();
@@ -77,7 +80,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Give the terminal to the shell command, wait for it and a key, then take it back.
-fn run_shell(terminal: &mut DefaultTerminal, cmd: &str, dir: &Path) -> std::io::Result<()> {
+fn run_shell(
+    terminal: &mut DefaultTerminal,
+    cmd: &str,
+    command: tc_core::Result<std::process::Command>,
+) -> std::io::Result<()> {
     let mut out = std::io::stdout();
     execute!(
         out,
@@ -86,10 +93,10 @@ fn run_shell(terminal: &mut DefaultTerminal, cmd: &str, dir: &Path) -> std::io::
         LeaveAlternateScreen
     )?;
     disable_raw_mode()?;
-    let status = tc_core::cmdline::shell_command(cmd, dir).status();
-    match status {
-        Ok(s) if s.success() => println!("\n[tc] Press any key"),
-        Ok(s) => println!("\n[tc] {s}. Press any key"),
+    match command.map(|mut c| c.status()) {
+        Ok(Ok(s)) if s.success() => println!("\n[tc] Press any key"),
+        Ok(Ok(s)) => println!("\n[tc] {s}. Press any key"),
+        Ok(Err(e)) => println!("\n[tc] {cmd}: {e}. Press any key"),
         Err(e) => println!("\n[tc] {cmd}: {e}. Press any key"),
     }
     enable_raw_mode()?;

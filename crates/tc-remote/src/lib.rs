@@ -1,5 +1,6 @@
 //! Remote file system backends for tc: SFTP and FTP/FTPS, behind [`tc_core::vfs::Remote`].
 
+use std::process::Command;
 use std::sync::Arc;
 
 use tc_core::vfs::Remote;
@@ -84,6 +85,27 @@ impl Url {
     }
 }
 
+/// The system `ssh` running `cmd` in `dir` on the host of `url`, on a terminal (`-t`). Prompts
+/// for a password itself if keys or the agent do not log in.
+// shortcut: assumes a POSIX shell on the server, upgrade with an exec channel on the russh session
+pub fn ssh_command(url: &str, cmd: &str, dir: &str) -> Result<Command> {
+    let url = Url::parse(url)?;
+    if url.scheme != Scheme::Sftp {
+        return Err(Error::Remote(
+            "commands run only on SFTP connections".into(),
+        ));
+    }
+    let quoted = format!("'{}'", dir.replace('\'', r"'\''"));
+    let mut c = Command::new("ssh");
+    c.args(["-t", "-p", &url.port.to_string()]);
+    if !url.user.is_empty() {
+        c.args(["-l", &url.user]);
+    }
+    // `--` so a host starting with `-` is no option
+    c.args(["--", &url.host, &format!("cd {quoted} && {cmd}")]);
+    Ok(c)
+}
+
 /// Connect and log in; returns the connection and the directory to show first.
 pub fn connect(url: &str, ask: Ask) -> Result<(Arc<dyn Remote>, String)> {
     let url = Url::parse(url)?;
@@ -144,6 +166,29 @@ mod tests {
         for bad in ["host", "http://x", "sftp://", "sftp://h:port"] {
             assert!(Url::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn ssh_command_quotes_dir() {
+        let c = ssh_command("sftp://me@h:2222", "du -sh *", "/it's").unwrap();
+        let args: Vec<_> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-t",
+                "-p",
+                "2222",
+                "-l",
+                "me",
+                "--",
+                "h",
+                r"cd '/it'\''s' && du -sh *"
+            ]
+        );
+        assert!(ssh_command("ftp://h", "ls", "/").is_err());
     }
 
     #[test]

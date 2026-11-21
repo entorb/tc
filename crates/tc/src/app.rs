@@ -211,6 +211,10 @@ pub struct Stats {
     pub progress: Arc<ops::Progress>,
     /// Delete question for the selected entry, shown while set.
     pub confirm: Option<String>,
+    /// Connection of a remote panel the tree was scanned on.
+    remote: Option<Arc<dyn Remote>>,
+    /// Child of the browsed directory a running remote delete removes from the tree on success.
+    deleting: Option<usize>,
 }
 
 impl Stats {
@@ -486,7 +490,8 @@ pub struct App {
     pub history: Vec<String>,
     pub history_file: Option<PathBuf>,
     /// Command and directory for the main loop to run on the real terminal.
-    pub run: Option<(String, PathBuf)>,
+    /// The `url` of a remote connection runs it there over `ssh`.
+    pub run: Option<(String, PathBuf, Option<String>)>,
     /// Entry extracted from an archive for the viewer; removed once the viewer is closed.
     view_tmp: Option<TempDir>,
     /// File Stats left for a viewer or editor; back once the mode is `Normal` again.
@@ -1176,17 +1181,21 @@ impl App {
             self.mode = Mode::Message("No commands inside an archive.".into());
             return;
         }
-        if self.stats.is_none() && self.panels[self.active].remote().is_some() {
-            self.mode = Mode::Message(REMOTE.into());
-            return;
-        }
         cmdline::push_history(&mut self.history, cmd);
         if let Some(file) = &self.history_file
             && let Err(e) = cmdline::save_history(file, &self.history)
         {
             self.mode = Mode::Message(e.to_string());
         }
-        self.run = Some((cmd.to_owned(), self.cmd_dir()));
+        let remote = match &self.stats {
+            Some(st) => st.remote.as_ref(),
+            None => self.panels[self.active].remote(),
+        };
+        self.run = Some((
+            cmd.to_owned(),
+            self.cmd_dir(),
+            remote.map(|r| r.url().to_owned()),
+        ));
     }
 
     /// Where the command line runs: the browsed File Stats directory, else the active panel.
@@ -1272,20 +1281,21 @@ impl App {
             self.mode = Mode::Message("File Stats does not work in archives.".into());
             return;
         }
-        if panel.remote().is_some() {
-            self.mode = Mode::Message(REMOTE.into());
-            return;
-        }
         let dir = panel.path().to_owned();
         let progress = Arc::new(ops::Progress::default());
-        let (p, d) = (progress.clone(), dir.clone());
+        let (p, d, r) = (progress.clone(), dir.clone(), panel.remote().cloned());
         self.mode = Mode::Stats(Stats {
+            remote: r.clone(),
+            deleting: None,
             dir,
             root: Node::default(),
             path: Vec::new(),
             sel: 0,
             by_files: false,
-            job: Some(thread::spawn(move || stats::scan(&d, &p))),
+            job: Some(thread::spawn(move || match r {
+                Some(r) => stats::scan_remote(r.as_ref(), &vfs::rpath(&d), &p),
+                None => stats::scan(&d, &p),
+            })),
             progress,
             confirm: None,
         });
@@ -1309,6 +1319,10 @@ impl App {
                     if n.is_dir {
                         text.push_str("\nDirectories are deleted recursively.");
                     }
+                    if st.remote.is_some() {
+                        return text
+                            + "\n\nNo trash on remote panels.\n[p] delete permanently   [n] no";
+                    }
                     text + "\n\n[y] trash   [p] delete permanently   [n] no"
                 });
             }
@@ -1325,7 +1339,8 @@ impl App {
     /// Answer to the File Stats delete question: the entry leaves the tree without a rescan.
     fn stats_confirm_key(&mut self, mut st: Stats, code: KeyCode) {
         let to_trash = match code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => true,
+            // no trash on remote panels
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter if st.remote.is_none() => true,
             KeyCode::Char('p' | 'P') => false,
             KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 st.confirm = None;
@@ -1343,6 +1358,14 @@ impl App {
             return;
         };
         let target = st.path().join(name);
+        if let Some(r) = st.remote.clone() {
+            st.deleting = Some(st.sel);
+            self.stats = Some(st);
+            let side = Side::Remote(r);
+            return self.spawn_xfer((side.clone(), side.clone()), move |_, _| {
+                side.delete(&target)
+            });
+        }
         let result = if to_trash {
             ops::trash(&target)
         } else {
@@ -1364,11 +1387,20 @@ impl App {
             .children
             .get(st.sel)
             .filter(|n| !n.is_dir)
-            .map(|n| st.path().join(&n.name))
+            .map(|n| (st.path().join(&n.name), n.size))
         else {
             self.mode = Mode::Stats(st);
             return;
         };
+        let (path, size) = path;
+        if let Some(r) = st.remote.clone() {
+            self.stats = Some(st);
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                self.mode = Mode::Message(REMOTE.into());
+                return;
+            }
+            return self.fetch(r, path, size, key.code == KeyCode::F(4));
+        }
         self.stats = Some(st);
         match key.code {
             KeyCode::F(3) => self.open_viewer(path),
@@ -2016,13 +2048,17 @@ impl App {
         if e.is_dir {
             return;
         }
-        if e.size > VIEW_CAP {
+        let (r, path, size) = (r, panel.path().join(&e.name), e.size);
+        self.fetch(r, path, size, edit);
+    }
+
+    fn fetch(&mut self, r: Arc<dyn Remote>, path: PathBuf, size: u64, edit: bool) {
+        if size > VIEW_CAP {
             self.mode = Mode::Message("File over 1 GiB: copy it with F5 instead.".into());
             return;
         }
-        let path = panel.path().join(&e.name);
         let title = PathBuf::from(format!("{}{}", r.url(), vfs::rpath(&path)));
-        let total = e.size;
+        let total = size;
         self.spawn(
             "Downloading",
             title,
@@ -2316,7 +2352,8 @@ impl App {
         if self.view_tmp.is_some() && !matches!(self.mode, Mode::View { .. }) {
             self.view_tmp = None;
         }
-        if self.edit_remote.is_some() && matches!(self.mode, Mode::Normal) {
+        // File Stats comes back right after the editor closes, so it ends the remote edit too
+        if self.edit_remote.is_some() && matches!(self.mode, Mode::Normal | Mode::Stats(_)) {
             self.edit_remote = None;
         }
         if matches!(self.mode, Mode::Connecting(_)) {
@@ -2345,6 +2382,13 @@ impl App {
                 Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
                 Ok(XMsg::Done(error)) => {
                     self.mode = Mode::Normal;
+                    if let Some(st) = &mut self.stats
+                        && let Some(i) = st.deleting.take()
+                        && error.is_none()
+                    {
+                        stats::remove(&mut st.root, &st.path, i);
+                        st.sel = st.sel.min(st.current().children.len().saturating_sub(1));
+                    }
                     self.finish(error);
                 }
                 Err(TryRecvError::Empty) => {}
@@ -2596,7 +2640,7 @@ mod tests {
         key(&mut app, KeyCode::Char(':'));
         type_text(&mut app, "ls");
         key(&mut app, KeyCode::Enter);
-        assert_eq!(app.run, Some(("ls".into(), tmp.path().join("many"))));
+        assert_eq!(app.run, Some(("ls".into(), tmp.path().join("many"), None)));
         app.tick();
         assert!(matches!(app.mode, Mode::Stats(_)));
     }
@@ -2657,7 +2701,7 @@ mod tests {
         }
         assert!(app.run.is_none() && !app.quit);
         key(&mut app, KeyCode::Enter);
-        assert_eq!(app.run, Some(("ls".into(), tmp.path().to_owned())));
+        assert_eq!(app.run, Some(("ls".into(), tmp.path().to_owned(), None)));
         assert_eq!(app.history, ["ls"]);
         key(&mut app, KeyCode::Char(':'));
         key(&mut app, KeyCode::Up);
@@ -2783,6 +2827,70 @@ mod tests {
         text.chars().for_each(|c| key(app, KeyCode::Char(c)));
     }
 
+    /// File Stats on a remote panel: scan, view, `:` over ssh and permanent delete.
+    #[test]
+    fn remote_stats_view_cmd_and_delete() {
+        let left = tempfile::tempdir().unwrap();
+        let mem = tc_core::vfs::mem::Mem::new();
+        mem.dir("/d");
+        mem.put("/d/f", b"xyz");
+        let mut app = two_panels(left.path(), left.path());
+        app.active = 1;
+        app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
+        settle(&mut app);
+        // `:` on the panel runs over ssh in the panel directory
+        key(&mut app, KeyCode::Char(':'));
+        type_keys(&mut app, "ls");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.run,
+            Some(("ls".into(), "/".into(), Some("mem://".into())))
+        );
+        app.run = None;
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        assert!(matches!(&app.mode, Mode::Stats(st) if (st.root.size, st.root.files) == (3, 1)));
+        key(&mut app, KeyCode::Enter); // into "d"
+        key(&mut app, KeyCode::F(3));
+        settle(&mut app);
+        assert!(matches!(&app.mode, Mode::View { title, .. } if title.ends_with("/d/f")));
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        // F4 edits a temp copy and uploads it on save
+        key(&mut app, KeyCode::F(4));
+        settle(&mut app);
+        assert!(matches!(app.mode, Mode::Edit { .. }));
+        key(&mut app, KeyCode::Char('x'));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Char('y'));
+        wait(&mut app);
+        app.tick();
+        assert_eq!(mem.get("/d/f").unwrap(), b"xxyz");
+        assert!(matches!(app.mode, Mode::Stats(_)) && app.edit_remote.is_none());
+        key(&mut app, KeyCode::Char(':'));
+        type_keys(&mut app, "ls");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.run, Some((c, _, Some(u))) if c == "ls" && u == "mem://"));
+        app.run = None;
+        app.tick();
+        key(&mut app, KeyCode::F(8));
+        assert!(
+            matches!(&app.mode, Mode::Stats(st) if st.confirm.as_ref().is_some_and(|t| t.contains("No trash")))
+        );
+        key(&mut app, KeyCode::Char('y')); // no trash: ignored
+        key(&mut app, KeyCode::Char('p'));
+        settle(&mut app);
+        app.tick();
+        assert!(mem.get("/d/f").is_none());
+        assert!(
+            matches!(&app.mode, Mode::Stats(st) if st.root.size == 0 && st.current().children.is_empty())
+        );
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+    }
+
     #[test]
     fn remote_panel_copy_delete_mkdir_and_blocked_keys() {
         let left = tempfile::tempdir().unwrap();
@@ -2823,9 +2931,6 @@ mod tests {
         settle(&mut app);
         assert_eq!(mem.paths(), ["/", "/d"]);
         with(&mut app, KeyCode::F(7), KeyModifiers::ALT);
-        assert!(matches!(&app.mode, Mode::Message(m) if m == REMOTE));
-        key(&mut app, KeyCode::Esc);
-        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
         assert!(matches!(&app.mode, Mode::Message(m) if m == REMOTE));
         key(&mut app, KeyCode::Esc);
         // ".." at the remote root goes back to the local directory

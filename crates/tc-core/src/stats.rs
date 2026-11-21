@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use crate::ops::Progress;
+use crate::vfs::Remote;
 
 /// One entry of the tree; a directory sums its children.
 #[derive(Debug, Default)]
@@ -89,6 +90,51 @@ fn scan_dir(dir: &Path, p: &Progress, free: &AtomicUsize) -> Node {
             node.children.push(c);
         }
     });
+    node.size = node.children.iter().map(|c| c.size).sum();
+    node.files = node.children.iter().map(|c| c.files).sum();
+    sort(&mut node.children, false);
+    p.dirs_done.fetch_add(1, Ordering::Relaxed);
+    node
+}
+
+/// Like [`scan`] on a remote `dir`, single threaded since a connection serializes requests.
+/// Symlinks are counted as files, never descended into.
+pub fn scan_remote(r: &dyn Remote, dir: &str, p: &Progress) -> Node {
+    p.dirs.fetch_add(1, Ordering::Relaxed);
+    let mut node = scan_remote_dir(r, dir, p);
+    node.name = dir
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(dir)
+        .into();
+    node
+}
+
+fn scan_remote_dir(r: &dyn Remote, dir: &str, p: &Progress) -> Node {
+    let mut node = Node {
+        is_dir: true,
+        ..Node::default()
+    };
+    for e in r.list(dir).into_iter().flatten() {
+        if p.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if e.is_dir && !e.is_symlink {
+            p.dirs.fetch_add(1, Ordering::Relaxed);
+            let path = format!("{}/{}", dir.trim_end_matches('/'), e.name.to_string_lossy());
+            let mut c = scan_remote_dir(r, &path, p);
+            c.name = e.name;
+            node.children.push(c);
+        } else {
+            p.files.fetch_add(1, Ordering::Relaxed);
+            node.children.push(Node {
+                name: e.name,
+                size: e.size,
+                files: 1,
+                ..Node::default()
+            });
+        }
+    }
     node.size = node.children.iter().map(|c| c.size).sum();
     node.files = node.children.iter().map(|c| c.files).sum();
     sort(&mut node.children, false);
