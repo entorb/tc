@@ -92,6 +92,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "NTFS is not sparse by default, set_len reserves 1 TiB"
+    )]
     fn mask_and_content_with_huge_sparse_file() {
         let tmp = tempfile::tempdir().unwrap();
         let sub = tmp.path().join("sub");
