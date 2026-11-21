@@ -21,6 +21,7 @@ use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::eta::Estimator;
 use tc_core::panel::{Entry, Panel, SortKey};
+use tc_core::stats::{self, Node};
 use tc_core::{Error, find, hotlist, ops, search, view::Viewer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,8 @@ pub enum Mode {
     Message(String),
     /// Find results, filled live by a worker thread.
     Found(Found),
+    /// File Stats (ncdu-style) tree, scanned by a worker thread.
+    Stats(Stats),
     View {
         title: String,
         view: Viewer,
@@ -162,6 +165,93 @@ impl Found {
                     return;
                 }
             }
+        }
+    }
+}
+
+/// File Stats: the scanned tree and the directory being browsed.
+pub struct Stats {
+    pub dir: PathBuf,
+    pub root: Node,
+    /// Child indices from `root` down to the browsed directory.
+    path: Vec<usize>,
+    pub sel: usize,
+    /// Show and sort by file count instead of size.
+    pub by_files: bool,
+    /// Running scan; `root` is empty until it finishes.
+    job: Option<thread::JoinHandle<Node>>,
+    pub progress: Arc<ops::Progress>,
+}
+
+impl Stats {
+    pub fn scanning(&self) -> bool {
+        self.job.is_some()
+    }
+
+    pub fn current(&self) -> &Node {
+        self.path.iter().fold(&self.root, |n, &i| &n.children[i])
+    }
+
+    fn current_mut(&mut self) -> &mut Node {
+        let mut n = &mut self.root;
+        for &i in &self.path {
+            n = &mut n.children[i];
+        }
+        n
+    }
+
+    /// Browsed directory below `dir`, for the title.
+    pub fn path(&self) -> PathBuf {
+        let mut p = self.dir.clone();
+        let mut n = &self.root;
+        for &i in &self.path {
+            n = &n.children[i];
+            p.push(&n.name);
+        }
+        p
+    }
+
+    fn key(&mut self, code: KeyCode, page: usize) {
+        let last = self.current().children.len().saturating_sub(1);
+        match code {
+            KeyCode::Up => self.sel = self.sel.saturating_sub(1),
+            KeyCode::Down => self.sel = (self.sel + 1).min(last),
+            KeyCode::PageUp => self.sel = self.sel.saturating_sub(page),
+            KeyCode::PageDown => self.sel = (self.sel + page).min(last),
+            KeyCode::Home => self.sel = 0,
+            KeyCode::End => self.sel = last,
+            KeyCode::Enter | KeyCode::Right
+                if self
+                    .current()
+                    .children
+                    .get(self.sel)
+                    .is_some_and(|n| n.is_dir) =>
+            {
+                self.path.push(self.sel);
+                let by_files = self.by_files;
+                stats::sort(&mut self.current_mut().children, by_files);
+                self.sel = 0;
+            }
+            KeyCode::Backspace | KeyCode::Left => {
+                if let Some(i) = self.path.pop() {
+                    let by_files = self.by_files;
+                    let dir = self.current_mut();
+                    let name = dir.children[i].name.clone();
+                    stats::sort(&mut dir.children, by_files);
+                    self.sel = dir
+                        .children
+                        .iter()
+                        .position(|n| n.name == name)
+                        .unwrap_or(0);
+                }
+            }
+            KeyCode::Tab => {
+                self.by_files = !self.by_files;
+                let by_files = self.by_files;
+                stats::sort(&mut self.current_mut().children, by_files);
+                self.sel = 0;
+            }
+            _ => {}
         }
     }
 }
@@ -365,6 +455,8 @@ pub struct App {
     pub run: Option<(String, PathBuf)>,
     /// Entry extracted from an archive for the viewer; removed once the viewer is closed.
     view_tmp: Option<TempDir>,
+    /// File Stats left for a viewer or editor; back once the mode is `Normal` again.
+    stats: Option<Stats>,
 }
 
 /// Largest archive entry F3/F4 extracts to a temp file.
@@ -398,6 +490,7 @@ impl App {
             history_file: None,
             run: None,
             view_tmp: None,
+            stats: None,
         }
     }
 
@@ -518,6 +611,7 @@ impl App {
             return;
         }
         let idle = matches!(self.mode, Mode::Normal | Mode::View { .. })
+            || matches!(&self.mode, Mode::Stats(st) if !st.scanning())
             || matches!(self.mode, Mode::Edit { error: None, .. });
         if key.code == KeyCode::F(1) && idle && self.input.is_none() {
             self.help = true;
@@ -593,6 +687,7 @@ impl App {
                 }
                 KeyCode::Char('d') => self.hotlist_add(),
                 KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
+                KeyCode::Char(' ') => self.spawn_stats(),
                 KeyCode::Char('y') => {
                     let [a, b] = &mut self.panels;
                     a.compare_with(b);
@@ -732,6 +827,17 @@ impl App {
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
             Mode::Found(f) => self.found_key(key.code, f),
+            Mode::Stats(st)
+                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(10)) =>
+            {
+                st.progress.cancel.store(true, Ordering::Relaxed);
+            }
+            Mode::Stats(st) if st.scanning() => self.mode = Mode::Stats(st),
+            Mode::Stats(st) if matches!(key.code, KeyCode::F(3 | 4)) => self.stats_open(st, key),
+            Mode::Stats(mut st) => {
+                st.key(key.code, self.page);
+                self.mode = Mode::Stats(st);
+            }
             Mode::Message(_) => {}
             Mode::Xfer(mut x) => {
                 x.key(key);
@@ -1027,6 +1133,49 @@ impl App {
             rx,
             cancel,
         });
+    }
+
+    /// Ctrl+Space: File Stats of the active panel's directory.
+    fn spawn_stats(&mut self) {
+        let panel = &self.panels[self.active];
+        if panel.archive().is_some() {
+            self.mode = Mode::Message("File Stats does not work in archives.".into());
+            return;
+        }
+        let dir = panel.path().to_owned();
+        let progress = Arc::new(ops::Progress::default());
+        let (p, d) = (progress.clone(), dir.clone());
+        self.mode = Mode::Stats(Stats {
+            dir,
+            root: Node::default(),
+            path: Vec::new(),
+            sel: 0,
+            by_files: false,
+            job: Some(thread::spawn(move || stats::scan(&d, &p))),
+            progress,
+        });
+    }
+
+    /// F3 view, F4 edit, Shift+F4 external editor on the selected file of File Stats.
+    fn stats_open(&mut self, st: Stats, key: KeyEvent) {
+        let dir = st.current();
+        let Some(path) = dir
+            .children
+            .get(st.sel)
+            .filter(|n| !n.is_dir)
+            .map(|n| st.path().join(&n.name))
+        else {
+            self.mode = Mode::Stats(st);
+            return;
+        };
+        self.stats = Some(st);
+        match key.code {
+            KeyCode::F(3) => self.open_viewer(path),
+            _ if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.external_edit(path, "code".into());
+            }
+            _ => self.edit_path(path),
+        }
     }
 
     /// Keys in the results: Esc stops a running search, then closes; Enter panelizes.
@@ -1605,9 +1754,12 @@ impl App {
     }
 
     fn edit(&mut self) {
-        let Some(path) = self.current_file() else {
-            return;
-        };
+        if let Some(path) = self.current_file() {
+            self.edit_path(path);
+        }
+    }
+
+    fn edit_path(&mut self, path: PathBuf) {
         let ask = |text: String, can_load| Mode::AskViewer {
             path: path.clone(),
             text,
@@ -1701,6 +1853,11 @@ impl App {
 
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
+        if matches!(self.mode, Mode::Normal)
+            && let Some(st) = self.stats.take()
+        {
+            self.mode = Mode::Stats(st);
+        }
         if let Some((side, dir, p)) = &self.dir_job
             && p.scanned.load(Ordering::Acquire)
         {
@@ -1719,6 +1876,16 @@ impl App {
         }
         if let Mode::Found(f) = &mut self.mode {
             return f.pump();
+        }
+        if let Mode::Stats(st) = &mut self.mode
+            && st.job.as_ref().is_some_and(|j| j.is_finished())
+            && let Some(job) = st.job.take()
+        {
+            match job.join() {
+                Ok(root) => st.root = root,
+                Err(_) => self.mode = Mode::Message("File Stats scan failed.".into()),
+            }
+            return;
         }
         if let Mode::Xfer(x) = &mut self.mode {
             let done = x.progress.done.load(Ordering::Relaxed);
@@ -1911,6 +2078,41 @@ mod tests {
         assert_eq!(app.panels[0].selection_info(), (1, 5));
         // the right panel shows the same directory but was not asked
         assert_eq!(app.panels[1].dir_size(&app.panels[1].entries()[1]), None);
+    }
+
+    #[test]
+    fn stats_sorts_toggles_count_and_browses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let many = tmp.path().join("many");
+        std::fs::create_dir(&many).unwrap();
+        for n in ["a", "b", "c"] {
+            std::fs::write(many.join(n), "x").unwrap();
+        }
+        std::fs::write(tmp.path().join("big"), "x".repeat(100)).unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        let top = |app: &App| match &app.mode {
+            Mode::Stats(st) => st.current().children[st.sel].name.clone(),
+            _ => panic!("not in stats"),
+        };
+        assert_eq!(top(&app), "big");
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(top(&app), "many");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(top(&app), "a");
+        key(&mut app, KeyCode::Backspace);
+        assert_eq!(top(&app), "many");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::F(3));
+        assert!(matches!(app.mode, Mode::View { .. }));
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        assert_eq!(top(&app), "a"); // back in stats after the viewer
+        key(&mut app, KeyCode::F(10));
+        assert!(matches!(app.mode, Mode::Normal) && !app.quit);
     }
 
     #[test]
