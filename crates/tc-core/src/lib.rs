@@ -3,6 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 
+pub mod archive;
 pub mod cmdline;
 pub mod edit;
 pub mod eta;
@@ -31,6 +32,8 @@ pub enum Error {
     Binary,
     #[error("invalid pattern: {0}")]
     Pattern(String),
+    #[error("archive: {0}")]
+    Archive(String),
     #[error("cancelled")]
     Cancelled,
     #[error("text not representable in {0}, convert to UTF-8")]
