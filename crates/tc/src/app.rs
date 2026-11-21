@@ -1,6 +1,7 @@
 //! App state and key handling, independent of the terminal.
 
 use std::ffi::OsString;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -8,10 +9,11 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::widgets::ListState;
+use regex::Regex;
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
-use tc_core::{Error, ops, panel::Panel, view::Viewer};
+use tc_core::{Error, ops, panel::Panel, search, view::Viewer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -58,6 +60,34 @@ pub enum Mode {
         step: Step,
     },
     AskExit(Editor),
+}
+
+/// What a text prompt in the viewer or editor asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    Find,
+    Goto,
+    Replace,
+    /// Second step of replace, `Input::pattern` holds the first answer.
+    With,
+}
+
+impl Ask {
+    pub fn title(self) -> &'static str {
+        match self {
+            Ask::Find => "Find (regex)",
+            Ask::Goto => "Go to line (N% in viewer)",
+            Ask::Replace => "Replace (regex)",
+            Ask::With => "Replace with ($1 = group)",
+        }
+    }
+}
+
+pub struct Input {
+    pub ask: Ask,
+    pub text: String,
+    pattern: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +144,15 @@ pub struct App {
     pub quit: bool,
     /// Visible rows of a panel, set by the UI, used for PgUp/PgDn.
     pub page: usize,
+    /// Open text prompt of the viewer or editor.
+    pub input: Option<Input>,
+    /// Last search, used by next/previous.
+    pub search: Option<Regex>,
+    /// Short result of the last key, shown in the viewer or editor, e.g. "not found".
+    pub note: String,
+    /// Editor clipboard, kept across files.
+    // shortcut: not the system clipboard, upgrade when pasting to other programs matters
+    clipboard: String,
 }
 
 impl App {
@@ -125,6 +164,10 @@ impl App {
             mode: Mode::Normal,
             quit: false,
             page: 10,
+            input: None,
+            search: None,
+            note: String::new(),
+            clipboard: String::new(),
         }
     }
 
@@ -132,7 +175,35 @@ impl App {
         self.panels[1 - self.active].path()
     }
 
+    /// Wheel / touchpad scroll in viewer, editor and active file list (editor: moves the cursor, the window follows).
+    pub fn on_mouse(&mut self, ev: MouseEvent) {
+        let lines = match ev.kind {
+            MouseEventKind::ScrollUp => -3,
+            MouseEventKind::ScrollDown => 3,
+            _ => return,
+        };
+        if self.input.is_some() {
+            return;
+        }
+        match &mut self.mode {
+            Mode::View { view, .. } => {
+                if let Err(e) = view.scroll(lines) {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
+            Mode::Edit {
+                editor,
+                error: None,
+            } => editor.move_v(lines),
+            _ => {}
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
+        self.note.clear();
+        if self.input.is_some() {
+            return self.input_key(key);
+        }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Normal => self.normal_key(key.code),
             Mode::Confirm(op, targets) => match key.code {
@@ -226,6 +297,23 @@ impl App {
                     return;
                 }
                 let page = self.page as isize;
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                let prompt = matches!(key.code, KeyCode::F(3 | 4 | 7))
+                    || (ctrl && matches!(key.code, KeyCode::Char('g' | 'f' | 'r')));
+                if matches!(
+                    key.code,
+                    KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::Home
+                        | KeyCode::End
+                        | KeyCode::PageUp
+                        | KeyCode::PageDown
+                ) {
+                    editor.select(shift);
+                }
                 match key.code {
                     KeyCode::Esc | KeyCode::F(10) => {
                         if editor.dirty() {
@@ -239,10 +327,27 @@ impl App {
                         self.next_save_prompt(editor, false, false, Step::Encoding);
                         return;
                     }
+                    _ if prompt => {
+                        self.mode = Mode::Edit {
+                            editor,
+                            error: None,
+                        };
+                        match key.code {
+                            KeyCode::F(3) => self.find_or_ask(!shift),
+                            KeyCode::F(4) | KeyCode::Char('r') => self.ask(Ask::Replace),
+                            KeyCode::F(7) | KeyCode::Char('f') => self.ask(Ask::Find),
+                            _ => self.ask(Ask::Goto),
+                        }
+                        return;
+                    }
                     KeyCode::Up => editor.move_v(-1),
                     KeyCode::Down => editor.move_v(1),
                     KeyCode::PageUp => editor.move_v(-page),
                     KeyCode::PageDown => editor.move_v(page),
+                    KeyCode::Left if ctrl => editor.move_word(false),
+                    KeyCode::Right if ctrl => editor.move_word(true),
+                    KeyCode::Home if ctrl => editor.goto_idx(0),
+                    KeyCode::End if ctrl => editor.goto_idx(usize::MAX),
                     KeyCode::Left => editor.move_h(-1),
                     KeyCode::Right => editor.move_h(1),
                     KeyCode::Home => editor.home(),
@@ -251,11 +356,20 @@ impl App {
                     KeyCode::Tab => editor.insert_char('\t'),
                     KeyCode::Backspace => editor.backspace(),
                     KeyCode::Delete => editor.delete(),
-                    KeyCode::Char(c)
-                        if !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                    {
+                    KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
+                        'z' => editor.undo(),
+                        'y' => editor.redo(),
+                        'c' => {
+                            self.clipboard = editor.copy().unwrap_or(mem::take(&mut self.clipboard))
+                        }
+                        'x' => {
+                            self.clipboard = editor.cut().unwrap_or(mem::take(&mut self.clipboard))
+                        }
+                        'v' => editor.insert(&self.clipboard, false),
+                        'k' => editor.delete_line(),
+                        _ => {}
+                    },
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => {
                         editor.insert_char(c)
                     }
                     _ => {}
@@ -278,6 +392,24 @@ impl App {
                         Ok(())
                     }
                     KeyCode::End => view.end(self.page),
+                    KeyCode::Left | KeyCode::Right => {
+                        view.scroll_h(if key.code == KeyCode::Left { -8 } else { 8 });
+                        Ok(())
+                    }
+                    KeyCode::Char('e') => {
+                        view.next_encoding();
+                        Ok(())
+                    }
+                    KeyCode::Char('/' | 'f' | 'n' | 'N' | 'g') | KeyCode::F(7) => {
+                        self.mode = Mode::View { title, view };
+                        match key.code {
+                            KeyCode::Char('n') => self.find_or_ask(true),
+                            KeyCode::Char('N') => self.find_or_ask(false),
+                            KeyCode::Char('g') => self.ask(Ask::Goto),
+                            _ => self.ask(Ask::Find),
+                        }
+                        return;
+                    }
                     _ => Ok(()),
                 };
                 self.mode = match result {
@@ -286,6 +418,113 @@ impl App {
                 };
             }
         }
+    }
+
+    fn ask(&mut self, ask: Ask) {
+        self.input = Some(Input {
+            ask,
+            text: String::new(),
+            pattern: String::new(),
+            error: None,
+        });
+    }
+
+    fn find_or_ask(&mut self, forward: bool) {
+        if self.search.is_some() {
+            self.find(forward);
+        } else {
+            self.ask(Ask::Find);
+        }
+    }
+
+    /// Select or show the next match of the last search in the viewer or editor.
+    fn find(&mut self, forward: bool) {
+        let Some(re) = &self.search else {
+            return;
+        };
+        let found = match &mut self.mode {
+            Mode::Edit { editor, .. } => Ok(editor.find(re, forward)),
+            Mode::View { view, .. } => view.search(re, forward),
+            _ => return,
+        };
+        match found {
+            Ok(true) => {}
+            Ok(false) => self.note = "not found".into(),
+            Err(e) => self.mode = Mode::Message(e.to_string()),
+        }
+    }
+
+    fn goto(&mut self, text: &str) -> Result<(), String> {
+        let text = text.trim();
+        let err = |_| "not a number".to_owned();
+        match &mut self.mode {
+            Mode::Edit { editor, .. } => editor.goto_line(text.parse().map_err(err)?),
+            Mode::View { view, .. } => match text.strip_suffix('%') {
+                Some(p) => view.goto_percent(p.trim().parse().map_err(err)?),
+                None => view.goto_line(text.parse().map_err(err)?),
+            }
+            .map_err(|e| e.to_string())?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Key in the open prompt; Enter runs it, errors keep it open.
+    fn input_key(&mut self, key: KeyEvent) {
+        let Some(mut input) = self.input.take() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => return,
+            KeyCode::Enter => match self.submit(&mut input) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(e) => input.error = Some(e),
+            },
+            KeyCode::Backspace => {
+                input.text.pop();
+                input.error = None;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.text.push(c);
+                input.error = None;
+            }
+            _ => {}
+        }
+        self.input = Some(input);
+    }
+
+    /// `Ok(true)` when done, `Ok(false)` when the prompt goes on with its next step.
+    fn submit(&mut self, input: &mut Input) -> Result<bool, String> {
+        let text = input.text.clone();
+        let compile = |p: &str| search::compile(p).map_err(|e| e.to_string());
+        match input.ask {
+            Ask::Goto => self.goto(&text)?,
+            Ask::Find => {
+                // empty answer repeats the last search
+                if !text.is_empty() {
+                    self.search = Some(compile(&text)?);
+                } else if self.search.is_none() {
+                    return Err("empty pattern".into());
+                }
+                self.find(true);
+            }
+            Ask::Replace => {
+                compile(&text)?;
+                input.pattern = text;
+                input.text.clear();
+                input.ask = Ask::With;
+                return Ok(false);
+            }
+            Ask::With => {
+                let re = compile(&input.pattern)?;
+                if let Mode::Edit { editor, .. } = &mut self.mode {
+                    self.note = format!("{} replaced", editor.replace_all(&re, &text));
+                }
+                self.search = Some(re);
+            }
+        }
+        Ok(true)
     }
 
     fn normal_key(&mut self, code: KeyCode) {
@@ -322,6 +561,14 @@ impl App {
             KeyCode::F(8) => self.confirm(Op::Delete),
             KeyCode::F(7) => self.mode = Mode::Mkdir(String::new()),
             _ => {}
+        }
+    }
+
+    #[cfg(test)]
+    fn mode_view_percent(&self) -> u64 {
+        match &self.mode {
+            Mode::View { view, .. } => view.percent(),
+            _ => panic!("not in viewer"),
         }
     }
 
@@ -597,5 +844,107 @@ mod tests {
         key(&mut app, KeyCode::F(4));
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            key(app, KeyCode::Char(c));
+        }
+        key(app, KeyCode::Enter);
+    }
+
+    fn rows(app: &mut App) -> Vec<String> {
+        app.mode.editor_mut().unwrap().visible(5, 30)
+    }
+
+    #[test]
+    fn editor_find_replace_undo_clipboard() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo one\n").unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+
+        key(&mut app, KeyCode::F(7));
+        type_text(&mut app, "(");
+        assert_eq!(
+            app.input
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref()
+                .map(str::is_empty),
+            Some(false)
+        );
+        key(&mut app, KeyCode::Backspace);
+        assert!(app.input.as_ref().unwrap().error.is_none());
+        type_text(&mut app, "ONE"); // smart case: uppercase is exact, no match
+        assert!(app.input.is_none());
+        assert_eq!(app.note, "not found");
+        key(&mut app, KeyCode::F(3)); // next with the last search
+        key(&mut app, KeyCode::F(7));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::F(7));
+        type_text(&mut app, "one");
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (1, 4));
+        key(&mut app, KeyCode::F(3));
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (0, 0));
+
+        let ctrl =
+            |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'c'); // match is selected
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::End);
+        ctrl(&mut app, 'v');
+        assert_eq!(rows(&mut app), ["one", "two oneone", ""]);
+        ctrl(&mut app, 'z');
+        assert_eq!(rows(&mut app), ["one", "two one", ""]);
+
+        key(&mut app, KeyCode::F(4));
+        type_text(&mut app, "o(n)e");
+        assert!(app.input.is_some());
+        type_text(&mut app, "[${1}]");
+        assert_eq!(app.note, "2 replaced");
+        assert_eq!(rows(&mut app), ["[n]", "two [n]", ""]);
+
+        ctrl(&mut app, 'g');
+        type_text(&mut app, "2");
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (1, 0));
+    }
+
+    #[test]
+    fn viewer_search_and_goto() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a\nb\nfoo\nc\nfoo\n").unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        key(&mut app, KeyCode::Char('f')); // same as '/'
+        type_text(&mut app, "foo");
+        let top = |app: &mut App| match &mut app.mode {
+            Mode::View { view, .. } => view.lines(1, 10).unwrap(),
+            _ => panic!("not in viewer"),
+        };
+        assert_eq!(top(&mut app), ["foo"]);
+        assert_eq!(app.mode_view_percent(), 28);
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.mode_view_percent(), 71);
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.note, "not found");
+        key(&mut app, KeyCode::Char('N'));
+        assert_eq!(app.mode_view_percent(), 28);
+        key(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "1");
+        assert_eq!(app.mode_view_percent(), 0);
+        key(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "x%");
+        assert!(app.input.as_ref().unwrap().error.is_some());
     }
 }

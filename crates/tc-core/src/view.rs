@@ -4,23 +4,47 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use encoding_rs::{
+    Encoding, ISO_8859_15, KOI8_R, SHIFT_JIS, UTF_8, WINDOWS_1250, WINDOWS_1251, WINDOWS_1252,
+};
+use regex::Regex;
+
 /// Bytes searched per step when scanning backwards for a line start.
 const CHUNK: usize = 8 * 1024;
 /// Longest line part shown; the rest of the line is skipped.
 const MAX_LINE: u64 = 4 * 1024;
+/// Encodings `next_encoding` cycles through; all keep 0x0A as line end.
+const ENCODINGS: [&Encoding; 7] = [
+    UTF_8,
+    WINDOWS_1252,
+    ISO_8859_15,
+    WINDOWS_1250,
+    WINDOWS_1251,
+    KOI8_R,
+    SHIFT_JIS,
+];
 
 pub struct Viewer {
     file: File,
     len: u64,
     /// Byte offset of the first visible line, always a line start.
     top: u64,
+    /// First visible column.
+    left: usize,
+    encoding: &'static Encoding,
 }
 
 impl Viewer {
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
         let len = file.metadata()?.len();
-        Ok(Self { file, len, top: 0 })
+        Ok(Self {
+            file,
+            len,
+            top: 0,
+            left: 0,
+            encoding: UTF_8,
+        })
     }
 
     /// Positive scrolls down, negative up; stops at first and last line.
@@ -45,6 +69,88 @@ impl Viewer {
 
     pub fn home(&mut self) {
         self.top = 0;
+        self.left = 0;
+    }
+
+    /// Positive scrolls right, negative left; capped at the longest line part shown.
+    pub fn scroll_h(&mut self, cols: isize) {
+        self.left = self.left.saturating_add_signed(cols).min(MAX_LINE as usize);
+    }
+
+    pub fn encoding_name(&self) -> &'static str {
+        self.encoding.name()
+    }
+
+    pub fn next_encoding(&mut self) {
+        let i = ENCODINGS.iter().position(|&e| e == self.encoding);
+        self.encoding = ENCODINGS[i.map_or(0, |i| (i + 1) % ENCODINGS.len())];
+    }
+
+    /// Position in the file in percent, by byte offset of the top line.
+    pub fn percent(&self) -> u64 {
+        (self.top * 100).checked_div(self.len).unwrap_or(100)
+    }
+
+    /// Top line becomes line `n` (1-based), the last line if the file is shorter.
+    pub fn goto_line(&mut self, n: u64) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut reader = BufReader::new(&self.file);
+        let mut pos = 0;
+        for _ in 1..n {
+            let k = reader.skip_until(b'\n')? as u64;
+            if pos + k >= self.len {
+                break;
+            }
+            pos += k;
+        }
+        self.top = pos;
+        Ok(())
+    }
+
+    /// Top line becomes the line containing the byte at `percent` of the file size.
+    pub fn goto_percent(&mut self, percent: u64) -> io::Result<()> {
+        // u128: size * percent cannot overflow
+        let off = (self.len as u128 * percent.min(100) as u128 / 100) as u64;
+        self.top = if self.len == 0 || off == 0 {
+            0
+        } else {
+            self.prev_line_start(off.min(self.len - 1) + 1)?
+        };
+        Ok(())
+    }
+
+    /// Moves the top line to the next (or previous) line matching `re`; false if none.
+    /// Lines are matched one by one, so patterns cannot span lines and the file is never loaded.
+    // shortcut: backward search seeks per line, upgrade to chunked reverse scan if slow
+    pub fn search(&mut self, re: &Regex, forward: bool) -> io::Result<bool> {
+        let mut buf = Vec::new();
+        if forward {
+            let mut pos = self.next_line_start(self.top)?;
+            self.file.seek(SeekFrom::Start(pos))?;
+            let mut reader = BufReader::new(&self.file);
+            loop {
+                let n = read_line(&mut reader, &mut buf)?;
+                if n == 0 {
+                    return Ok(false);
+                }
+                if re.is_match(&self.encoding.decode_without_bom_handling(&buf).0) {
+                    self.top = pos;
+                    return Ok(true);
+                }
+                pos += n;
+            }
+        }
+        let mut pos = self.top;
+        while pos > 0 {
+            pos = self.prev_line_start(pos)?;
+            self.file.seek(SeekFrom::Start(pos))?;
+            read_line(&mut BufReader::new(&self.file), &mut buf)?;
+            if re.is_match(&self.encoding.decode_without_bom_handling(&buf).0) {
+                self.top = pos;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Show the last `page` lines.
@@ -53,26 +159,24 @@ impl Viewer {
         self.scroll(1 - page.max(1) as isize)
     }
 
-    /// Up to `count` lines from the top, lossily decoded, tabs expanded.
-    pub fn lines(&mut self, count: usize) -> io::Result<Vec<String>> {
+    /// Up to `count` lines from the top, decoded, tabs expanded, `width` columns from `left`.
+    pub fn lines(&mut self, count: usize, width: usize) -> io::Result<Vec<String>> {
         self.file.seek(SeekFrom::Start(self.top))?;
         let mut reader = BufReader::new(&self.file);
         let mut lines = Vec::with_capacity(count);
         let mut buf = Vec::new();
         while lines.len() < count {
-            buf.clear();
-            if (&mut reader).take(MAX_LINE).read_until(b'\n', &mut buf)? == 0 {
+            if read_line(&mut reader, &mut buf)? == 0 {
                 break;
             }
-            if buf.last() == Some(&b'\n') {
-                buf.pop();
-                if buf.last() == Some(&b'\r') {
-                    buf.pop();
-                }
-            } else {
-                reader.skip_until(b'\n')?;
-            }
-            lines.push(String::from_utf8_lossy(&buf).replace('\t', "    "));
+            let text = self.encoding.decode_without_bom_handling(&buf).0;
+            lines.push(
+                text.replace('\t', "    ")
+                    .chars()
+                    .skip(self.left)
+                    .take(width)
+                    .collect(),
+            );
         }
         Ok(lines)
     }
@@ -103,6 +207,25 @@ impl Viewer {
     }
 }
 
+/// Reads one line, capped at `MAX_LINE`, into `buf` without its line end.
+/// Returns the bytes consumed including the skipped rest, 0 at end of file.
+fn read_line(reader: &mut impl BufRead, buf: &mut Vec<u8>) -> io::Result<u64> {
+    buf.clear();
+    let mut n = reader.by_ref().take(MAX_LINE).read_until(b'\n', buf)? as u64;
+    if n == 0 {
+        return Ok(0);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+    } else {
+        n += reader.skip_until(b'\n')? as u64;
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,33 +240,33 @@ mod tests {
     #[test]
     fn scrolls_and_clamps() {
         let (_t, mut v) = viewer(b"a\nb\tx\nc\n");
-        assert_eq!(v.lines(10).unwrap(), ["a", "b    x", "c"]);
+        assert_eq!(v.lines(10, 80).unwrap(), ["a", "b    x", "c"]);
         v.scroll(1).unwrap();
-        assert_eq!(v.lines(1).unwrap(), ["b    x"]);
+        assert_eq!(v.lines(1, 80).unwrap(), ["b    x"]);
         v.scroll(10).unwrap();
-        assert_eq!(v.lines(10).unwrap(), ["c"]);
+        assert_eq!(v.lines(10, 80).unwrap(), ["c"]);
         v.scroll(-10).unwrap();
-        assert_eq!(v.lines(1).unwrap(), ["a"]);
+        assert_eq!(v.lines(1, 80).unwrap(), ["a"]);
         v.end(2).unwrap();
-        assert_eq!(v.lines(10).unwrap(), ["b    x", "c"]);
+        assert_eq!(v.lines(10, 80).unwrap(), ["b    x", "c"]);
         v.home();
-        assert_eq!(v.lines(1).unwrap(), ["a"]);
+        assert_eq!(v.lines(1, 80).unwrap(), ["a"]);
     }
 
     #[test]
     fn edge_files() {
         let (_t, mut v) = viewer(b"");
         v.end(5).unwrap();
-        assert!(v.lines(5).unwrap().is_empty());
+        assert!(v.lines(5, 80).unwrap().is_empty());
 
         let (_t, mut v) = viewer(b"a\r\nb");
         v.end(1).unwrap();
-        assert_eq!(v.lines(5).unwrap(), ["b"]);
+        assert_eq!(v.lines(5, 80).unwrap(), ["b"]);
         v.scroll(-1).unwrap();
-        assert_eq!(v.lines(5).unwrap(), ["a", "b"]);
+        assert_eq!(v.lines(5, 80).unwrap(), ["a", "b"]);
 
         let (_t, mut v) = viewer(b"\xff\xfe\n");
-        assert_eq!(v.lines(5).unwrap(), ["\u{fffd}\u{fffd}"]);
+        assert_eq!(v.lines(5, 80).unwrap(), ["\u{fffd}\u{fffd}"]);
     }
 
     #[test]
@@ -151,11 +274,61 @@ mod tests {
         let long = "x".repeat(CHUNK * 2 + 3);
         let (_t, mut v) = viewer(format!("a\n{long}\nb\n").as_bytes());
         v.scroll(1).unwrap();
-        assert_eq!(v.lines(1).unwrap()[0].len(), MAX_LINE as usize);
+        assert_eq!(v.lines(1, usize::MAX).unwrap()[0].len(), MAX_LINE as usize);
         v.scroll(1).unwrap();
-        assert_eq!(v.lines(1).unwrap(), ["b"]);
+        assert_eq!(v.lines(1, 80).unwrap(), ["b"]);
         v.scroll(-2).unwrap();
-        assert_eq!(v.lines(3).unwrap().len(), 3);
-        assert_eq!(v.lines(1).unwrap(), ["a"]);
+        assert_eq!(v.lines(3, 80).unwrap().len(), 3);
+        assert_eq!(v.lines(1, 80).unwrap(), ["a"]);
+    }
+
+    #[test]
+    fn search_both_directions() {
+        let (_t, mut v) = viewer(b"alpha\nBeta\ngamma\nbeta two\n");
+        let re = crate::search::compile("^beta").unwrap();
+        assert!(v.search(&re, true).unwrap());
+        assert_eq!(v.lines(1, 80).unwrap(), ["Beta"]);
+        assert!(v.search(&re, true).unwrap());
+        assert_eq!(v.lines(1, 80).unwrap(), ["beta two"]);
+        assert!(!v.search(&re, true).unwrap());
+        assert!(v.search(&re, false).unwrap());
+        assert_eq!(v.lines(1, 80).unwrap(), ["Beta"]);
+        assert!(!v.search(&re, false).unwrap());
+        // $ must match before the line end
+        let re = crate::search::compile("gamma$").unwrap();
+        assert!(v.search(&re, true).unwrap());
+    }
+
+    #[test]
+    fn goto_and_view_options() {
+        let (_t, mut v) = viewer(b"a\nb\nc\nd\n");
+        v.goto_line(3).unwrap();
+        assert_eq!(v.lines(1, 80).unwrap(), ["c"]);
+        v.goto_line(99).unwrap();
+        assert_eq!(v.lines(5, 80).unwrap(), ["d"]);
+        v.goto_line(0).unwrap();
+        assert_eq!(v.lines(1, 80).unwrap(), ["a"]);
+        v.goto_percent(50).unwrap(); // byte 4 is "c"
+        assert_eq!(v.lines(1, 80).unwrap(), ["c"]);
+        v.goto_percent(100).unwrap();
+        assert_eq!(v.lines(5, 80).unwrap(), ["d"]);
+        assert_eq!(v.percent(), 75);
+
+        let (_t, mut v) = viewer(b"abcdef\n");
+        v.scroll_h(2);
+        assert_eq!(v.lines(1, 3).unwrap(), ["cde"]);
+        v.scroll_h(-10);
+        assert_eq!(v.lines(1, 3).unwrap(), ["abc"]);
+
+        let (_t, mut v) = viewer(b"caf\xe9\n");
+        v.next_encoding();
+        assert_eq!(
+            (v.encoding_name(), v.lines(1, 80).unwrap()),
+            ("windows-1252", vec!["café".to_owned()])
+        );
+        for _ in 0..ENCODINGS.len() {
+            v.next_encoding();
+        }
+        assert_eq!(v.encoding_name(), "windows-1252");
     }
 }

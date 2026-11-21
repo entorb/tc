@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub mod edit;
 pub mod ops;
 pub mod panel;
+pub mod search;
 pub mod view;
 
 #[derive(Debug, thiserror::Error)]
@@ -22,6 +23,8 @@ pub enum Error {
     OutOfMemory { need: u64, free: u64 },
     #[error("not a text file")]
     Binary,
+    #[error("invalid pattern: {0}")]
+    Pattern(String),
     #[error("cancelled")]
     Cancelled,
     #[error("text not representable in {0}, convert to UTF-8")]

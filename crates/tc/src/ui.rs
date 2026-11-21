@@ -3,8 +3,9 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
+use regex::Regex;
 
 use crate::app::{App, Mode, Step};
 use tc_core::edit::Eol;
@@ -16,19 +17,30 @@ const DATE_WIDTH: usize = 14;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Mode::View { title, view } = &mut app.mode {
-        let block = Block::bordered().title(title.as_str());
-        let height = block.inner(frame.area()).height as usize;
+        let bottom = format!(
+            " {}%  {}  {}  / or f Find  n/N Next/Prev  g Goto  e Encoding ",
+            view.percent(),
+            view.encoding_name(),
+            app.note
+        );
+        let block = Block::bordered().title(title.as_str()).title_bottom(bottom);
+        let inner = block.inner(frame.area());
+        let height = inner.height as usize;
         app.page = height.max(1);
-        let visible: Vec<Line> = match view.lines(height) {
-            Ok(lines) => lines.into_iter().map(Line::raw).collect(),
+        let visible: Vec<Line> = match view.lines(height, inner.width as usize) {
+            Ok(lines) => lines
+                .into_iter()
+                .map(|l| highlight(l, app.search.as_ref(), None, 0))
+                .collect(),
             Err(e) => vec![Line::raw(e.to_string())],
         };
         frame.render_widget(Paragraph::new(visible).block(block), frame.area());
+        draw_input(frame, app);
         return;
     }
 
     if let Some(editor) = app.mode.editor_mut() {
-        draw_editor(frame, editor, &mut app.page);
+        draw_editor(frame, editor, &mut app.page, &app.note, app.search.as_ref());
     } else {
         let [main, status] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
@@ -90,9 +102,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ),
         Mode::Normal | Mode::View { .. } => {}
     }
+
+    draw_input(frame, app);
 }
 
-fn draw_editor(frame: &mut Frame, editor: &mut tc_core::edit::Editor, page: &mut usize) {
+fn draw_input(frame: &mut Frame, app: &App) {
+    if let Some(input) = &app.input {
+        let error = input.error.as_deref().unwrap_or_default();
+        popup(
+            frame,
+            input.ask.title(),
+            &format!("{}_\n{error}\nEnter ok   Esc cancel", input.text),
+        );
+    }
+}
+
+fn draw_editor(
+    frame: &mut Frame,
+    editor: &mut tc_core::edit::Editor,
+    page: &mut usize,
+    note: &str,
+    re: Option<&Regex>,
+) {
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
     let block = Block::bordered().title(editor.path().display().to_string());
@@ -103,7 +134,8 @@ fn draw_editor(frame: &mut Frame, editor: &mut tc_core::edit::Editor, page: &mut
     let lines: Vec<Line> = editor
         .visible(height, width)
         .into_iter()
-        .map(Line::from)
+        .enumerate()
+        .map(|(i, row)| highlight(row, re, editor.selection_cols(editor.top + i), editor.left))
         .collect();
     frame.render_widget(Paragraph::new(lines).block(block), main);
     let (line, col) = editor.cursor;
@@ -118,12 +150,47 @@ fn draw_editor(frame: &mut Frame, editor: &mut tc_core::edit::Editor, page: &mut
     };
     let dirty = if editor.dirty() { " *" } else { "" };
     let info = format!(
-        "{}:{}  {}  {eol}{dirty}  F2 Save  Esc Exit",
+        "{}:{}  {}  {eol}{dirty}  {note}  F2 Save  F3 Next  F4/^R Replace  F7/^F Find  ^Z Undo  Esc Exit",
         line + 1,
         col + 1,
         editor.encoding_name()
     );
     frame.render_widget(Line::raw(info).reversed(), status);
+}
+
+/// `row` with all matches of `re` marked yellow and the selected columns
+/// (counted from the first column of the line, minus `left`) reversed.
+// shortcut: matches the shown text, so a pattern with \t or one cut at the left edge can differ from the real match
+fn highlight(
+    row: String,
+    re: Option<&Regex>,
+    sel: Option<(usize, usize)>,
+    left: usize,
+) -> Line<'static> {
+    let mut styles = vec![Style::new(); row.chars().count()];
+    let at = |byte: usize| row[..byte].chars().count();
+    for m in re.into_iter().flat_map(|re| re.find_iter(&row)) {
+        styles[at(m.start())..at(m.end())].fill(Style::new().fg(Color::Black).bg(Color::Yellow));
+    }
+    if let Some((a, b)) = sel {
+        let end = styles.len();
+        for st in &mut styles[a.saturating_sub(left).min(end)..b.saturating_sub(left).min(end)] {
+            *st = st.reversed();
+        }
+    }
+    let mut spans: Vec<(String, Style)> = Vec::new();
+    for (c, st) in row.chars().zip(styles) {
+        match spans.last_mut() {
+            Some((text, last)) if *last == st => text.push(c),
+            _ => spans.push((c.to_string(), st)),
+        }
+    }
+    Line::from(
+        spans
+            .into_iter()
+            .map(|(t, st)| Span::styled(t, st))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
@@ -270,5 +337,49 @@ mod tests {
             .collect();
         assert!(screen.contains("world"));
         assert!(screen.contains("1:1  UTF-8  LF"));
+    }
+
+    #[test]
+    fn viewer_shows_find_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("v.txt"), "hello\n").unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Down,
+        ));
+        for c in [
+            ratatui::crossterm::event::KeyCode::F(3),
+            ratatui::crossterm::event::KeyCode::Char('/'),
+        ] {
+            app.on_key(ratatui::crossterm::event::KeyEvent::from(c));
+        }
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("Find (regex)"));
+    }
+
+    #[test]
+    fn highlights_all_matches() {
+        let re = tc_core::search::compile("o").unwrap();
+        let line = highlight("foo bar o".into(), Some(&re), None, 0);
+        let marked: String = line
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(marked, "ooo");
+        assert_eq!(line.to_string(), "foo bar o");
+        // selection overlay and multibyte text do not panic or shift columns
+        let line = highlight("é o".into(), Some(&re), Some((0, 2)), 0);
+        assert_eq!(line.to_string(), "é o");
     }
 }
