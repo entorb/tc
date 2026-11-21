@@ -1,0 +1,2 @@
+# SonarQube rust:S3776 allows 30
+cognitive-complexity-threshold = 30

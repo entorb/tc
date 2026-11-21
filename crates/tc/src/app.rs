@@ -598,17 +598,7 @@ impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         self.note.clear();
         if self.help {
-            let page = self.page;
-            match key.code {
-                KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
-                KeyCode::Down => self.help_scroll += 1,
-                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(page),
-                KeyCode::PageDown => self.help_scroll += page,
-                KeyCode::Home => self.help_scroll = 0,
-                KeyCode::End => self.help_scroll = usize::MAX,
-                _ => self.help = false,
-            }
-            return;
+            return self.help_key(key.code);
         }
         let idle = matches!(self.mode, Mode::Normal | Mode::View { .. })
             || matches!(&self.mode, Mode::Stats(st) if !st.scanning())
@@ -622,158 +612,9 @@ impl App {
             return self.input_key(key);
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
-            Mode::Normal
-                if key.code == KeyCode::F(4) && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.new_file_prompt();
-            }
-            Mode::Normal
-                if key.code == KeyCode::F(6) && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.rename();
-            }
-            Mode::Normal if key.code == KeyCode::Enter && self.default_open().is_some() => {
-                if let Some(path) = self.default_open() {
-                    self.open_default(path);
-                }
-            }
-            Mode::Normal
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    && matches!(key.code, KeyCode::F(1 | 2)) =>
-            {
-                let panel = usize::from(key.code == KeyCode::F(2));
-                self.mode = Mode::Drives(hotlist::mounts(), 0, panel);
-            }
-            Mode::Normal
-                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('.') =>
-            {
-                if let Err(e) = self.panels[self.active].toggle_hidden() {
-                    self.mode = Mode::Message(e.to_string());
-                }
-            }
-            Mode::Normal
-                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('=') =>
-            {
-                let path = self.panels[self.active].path().to_owned();
-                self.go(1 - self.active, path);
-            }
-            Mode::Normal
-                if key
-                    .modifiers
-                    .contains(KeyModifiers::ALT | KeyModifiers::SHIFT)
-                    && matches!(key.code, KeyCode::Char('c' | 'C')) =>
-            {
-                self.copy_paths();
-            }
-            Mode::Normal
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
-            {
-                let panel = &mut self.panels[self.active];
-                let c = panel.cursor();
-                // select the entry left behind
-                panel.select_range(c, c);
-                panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
-            }
-            Mode::Normal
-                if key.code == KeyCode::F(7) && key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                self.ask(Ask::FindMask);
-            }
-            Mode::Normal if key.modifiers.contains(KeyModifiers::CONTROL) => match key.code {
-                KeyCode::Char('s') => self.mode = Mode::Search(String::new()),
-                KeyCode::Char('f') => {
-                    self.mode = Mode::Filter(self.panels[self.active].filter().to_owned());
-                }
-                KeyCode::Char('d') => self.hotlist_add(),
-                KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
-                KeyCode::Char(' ') => self.spawn_stats(),
-                KeyCode::Char('y') => {
-                    let [a, b] = &mut self.panels;
-                    a.compare_with(b);
-                }
-                KeyCode::Char('u') => {
-                    self.panels.swap(0, 1);
-                    self.lists.swap(0, 1);
-                    if let Some(job) = &mut self.dir_job {
-                        job.0 = 1 - job.0;
-                    }
-                }
-                KeyCode::Char('r') => {
-                    if let Err(e) = self.panels[self.active].reload() {
-                        self.mode = Mode::Message(e.to_string());
-                    }
-                }
-                // terminals send Ctrl+\ as 0x1c, which crossterm reports as '4'
-                KeyCode::Char('\\' | '4') => {
-                    let root = self.panels[self.active].path().ancestors().last();
-                    if let Some(root) = root.map(Path::to_owned) {
-                        self.go(self.active, root);
-                    }
-                }
-                KeyCode::Insert => self.copy_paths(),
-                KeyCode::F(n @ 3..=6) => {
-                    let key = [SortKey::Name, SortKey::Ext, SortKey::Date, SortKey::Size];
-                    self.panels[self.active].set_sort(key[usize::from(n) - 3]);
-                }
-                _ => {}
-            },
-            Mode::Normal
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    && matches!(key.code, KeyCode::Left | KeyCode::Right) =>
-            {
-                let delta = if key.code == KeyCode::Left { -1 } else { 1 };
-                if let Err(e) = self.panels[self.active].history_step(delta) {
-                    self.mode = Mode::Message(e.to_string());
-                }
-            }
-            Mode::Normal if key.code == KeyCode::Esc => {
-                let panel = &mut self.panels[self.active];
-                panel.apply_filter("");
-                if let Err(e) = panel.leave_virtual() {
-                    self.mode = Mode::Message(e.to_string());
-                }
-            }
-            Mode::Normal => self.normal_key(key.code),
-            Mode::Search(mut text) => {
-                let panel = &mut self.panels[self.active];
-                match key.code {
-                    KeyCode::Esc | KeyCode::Enter => return,
-                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        panel.search(&text, 1);
-                    }
-                    KeyCode::Backspace => {
-                        text.pop();
-                        panel.search(&text, 0);
-                    }
-                    KeyCode::Char(c) => {
-                        text.push(c);
-                        panel.search(&text, 0);
-                    }
-                    _ => {}
-                }
-                self.mode = Mode::Search(text);
-            }
-            Mode::Filter(mut text) => {
-                let panel = &mut self.panels[self.active];
-                match key.code {
-                    KeyCode::Enter => return,
-                    KeyCode::Esc => {
-                        panel.apply_filter("");
-                        return;
-                    }
-                    KeyCode::Backspace => {
-                        text.pop();
-                        panel.apply_filter(&text);
-                    }
-                    KeyCode::Char(c) => {
-                        text.push(c);
-                        panel.apply_filter(&text);
-                    }
-                    _ => {}
-                }
-                self.mode = Mode::Filter(text);
-            }
+            Mode::Normal => self.normal_mode_key(key),
+            Mode::Search(text) => self.search_key(text, key),
+            Mode::Filter(text) => self.filter_key(text, key),
             Mode::Editor(path, mut cmd) => match key.code {
                 KeyCode::Enter => self.external_edit(path, cmd.text),
                 KeyCode::Esc => {}
@@ -906,145 +747,292 @@ impl App {
                     }
                 }
             },
-            Mode::Edit { mut editor, error } => {
-                if error.is_some() {
-                    self.mode = Mode::Edit {
-                        editor,
-                        error: None,
-                    };
-                    return;
+            Mode::Edit { editor, error } => self.editor_key(editor, error, key),
+            Mode::View { title, view } => self.viewer_key(title, view, key),
+        }
+    }
+
+    fn help_key(&mut self, code: KeyCode) {
+        let page = self.page;
+        match code {
+            KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+            KeyCode::Down => self.help_scroll += 1,
+            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(page),
+            KeyCode::PageDown => self.help_scroll += page,
+            KeyCode::Home => self.help_scroll = 0,
+            KeyCode::End => self.help_scroll = usize::MAX,
+            _ => self.help = false,
+        }
+    }
+
+    fn normal_mode_key(&mut self, key: KeyEvent) {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::F(4) if shift => self.new_file_prompt(),
+            KeyCode::F(6) if shift => self.rename(),
+            KeyCode::Enter if self.default_open().is_some() => {
+                if let Some(path) = self.default_open() {
+                    self.open_default(path);
                 }
-                let page = self.page as isize;
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                let prompt = matches!(key.code, KeyCode::F(3 | 4 | 7))
-                    || (ctrl && matches!(key.code, KeyCode::Char('g' | 'f' | 'r')));
-                if matches!(
-                    key.code,
-                    KeyCode::Up
-                        | KeyCode::Down
-                        | KeyCode::Left
-                        | KeyCode::Right
-                        | KeyCode::Home
-                        | KeyCode::End
-                        | KeyCode::PageUp
-                        | KeyCode::PageDown
-                ) {
-                    editor.select(shift);
+            }
+            KeyCode::F(n @ 1..=2) if alt => {
+                self.mode = Mode::Drives(hotlist::mounts(), 0, usize::from(n == 2));
+            }
+            KeyCode::Char('.') if alt => {
+                if let Err(e) = self.panels[self.active].toggle_hidden() {
+                    self.mode = Mode::Message(e.to_string());
                 }
-                match key.code {
-                    KeyCode::Esc | KeyCode::F(10) => {
-                        if editor.dirty() {
-                            self.mode = Mode::AskExit(editor);
-                        } else {
-                            self.leave_editor();
-                        }
-                        return;
-                    }
-                    KeyCode::F(2) => {
-                        self.next_save_prompt(editor, false, false, Step::Encoding);
-                        return;
-                    }
-                    _ if prompt => {
-                        self.mode = Mode::Edit {
-                            editor,
-                            error: None,
-                        };
-                        match key.code {
-                            KeyCode::F(3) => self.find_or_ask(!shift),
-                            KeyCode::F(4) | KeyCode::Char('r') => self.ask(Ask::Replace),
-                            KeyCode::F(7) | KeyCode::Char('f') => self.ask(Ask::Find),
-                            _ => self.ask(Ask::Goto),
-                        }
-                        return;
-                    }
-                    KeyCode::Up => editor.move_v(-1),
-                    KeyCode::Down => editor.move_v(1),
-                    KeyCode::PageUp => editor.move_v(-page),
-                    KeyCode::PageDown => editor.move_v(page),
-                    KeyCode::Left if ctrl => editor.move_word(false),
-                    KeyCode::Right if ctrl => editor.move_word(true),
-                    KeyCode::Home if ctrl => editor.goto_idx(0),
-                    KeyCode::End if ctrl => editor.goto_idx(usize::MAX),
-                    KeyCode::Left => editor.move_h(-1),
-                    KeyCode::Right => editor.move_h(1),
-                    KeyCode::Home => editor.home(),
-                    KeyCode::End => editor.end(),
-                    KeyCode::Enter => editor.insert_char('\n'),
-                    KeyCode::Tab => editor.insert_char('\t'),
-                    KeyCode::Backspace => editor.backspace(),
-                    KeyCode::Delete => editor.delete(),
-                    KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
-                        'z' => editor.undo(),
-                        'y' => editor.redo(),
-                        'c' | 'x' => {
-                            let text = if c.eq_ignore_ascii_case(&'c') {
-                                editor.copy()
-                            } else {
-                                editor.cut()
-                            };
-                            if let Some(text) = text {
-                                self.clipboard.clone_from(&text);
-                                self.copied = Some(text);
-                            }
-                        }
-                        'v' => editor.insert(&self.clipboard, false),
-                        'k' => editor.delete_line(),
-                        _ => {}
-                    },
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => {
-                        editor.insert_char(c)
-                    }
-                    _ => {}
+            }
+            KeyCode::Char('=') if alt => {
+                let path = self.panels[self.active].path().to_owned();
+                self.go(1 - self.active, path);
+            }
+            KeyCode::Char('c' | 'C') if alt && shift => self.copy_paths(),
+            KeyCode::Up | KeyCode::Down if shift => {
+                let panel = &mut self.panels[self.active];
+                let c = panel.cursor();
+                // select the entry left behind
+                panel.select_range(c, c);
+                panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
+            }
+            KeyCode::F(7) if alt => self.ask(Ask::FindMask),
+            code if key.modifiers.contains(KeyModifiers::CONTROL) => self.ctrl_key(code),
+            KeyCode::Left | KeyCode::Right if alt => {
+                let delta = if key.code == KeyCode::Left { -1 } else { 1 };
+                if let Err(e) = self.panels[self.active].history_step(delta) {
+                    self.mode = Mode::Message(e.to_string());
                 }
+            }
+            KeyCode::Esc => {
+                let panel = &mut self.panels[self.active];
+                panel.apply_filter("");
+                if let Err(e) = panel.leave_virtual() {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
+            code => self.normal_key(code),
+        }
+    }
+
+    fn ctrl_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char('s') => self.mode = Mode::Search(String::new()),
+            KeyCode::Char('f') => {
+                self.mode = Mode::Filter(self.panels[self.active].filter().to_owned());
+            }
+            KeyCode::Char('d') => self.hotlist_add(),
+            KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
+            KeyCode::Char(' ') => self.spawn_stats(),
+            KeyCode::Char('y') => {
+                let [a, b] = &mut self.panels;
+                a.compare_with(b);
+            }
+            KeyCode::Char('u') => {
+                self.panels.swap(0, 1);
+                self.lists.swap(0, 1);
+                if let Some(job) = &mut self.dir_job {
+                    job.0 = 1 - job.0;
+                }
+            }
+            KeyCode::Char('r') => {
+                if let Err(e) = self.panels[self.active].reload() {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
+            // terminals send Ctrl+\ as 0x1c, which crossterm reports as '4'
+            KeyCode::Char('\\' | '4') => {
+                let root = self.panels[self.active].path().ancestors().last();
+                if let Some(root) = root.map(Path::to_owned) {
+                    self.go(self.active, root);
+                }
+            }
+            KeyCode::Insert => self.copy_paths(),
+            KeyCode::F(n @ 3..=6) => {
+                let key = [SortKey::Name, SortKey::Ext, SortKey::Date, SortKey::Size];
+                self.panels[self.active].set_sort(key[usize::from(n) - 3]);
+            }
+            _ => {}
+        }
+    }
+
+    fn search_key(&mut self, mut text: String, key: KeyEvent) {
+        let panel = &mut self.panels[self.active];
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => return,
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                panel.search(&text, 1);
+            }
+            KeyCode::Backspace => {
+                text.pop();
+                panel.search(&text, 0);
+            }
+            KeyCode::Char(c) => {
+                text.push(c);
+                panel.search(&text, 0);
+            }
+            _ => {}
+        }
+        self.mode = Mode::Search(text);
+    }
+
+    fn filter_key(&mut self, mut text: String, key: KeyEvent) {
+        let panel = &mut self.panels[self.active];
+        match key.code {
+            KeyCode::Enter => return,
+            KeyCode::Esc => {
+                panel.apply_filter("");
+                return;
+            }
+            KeyCode::Backspace => {
+                text.pop();
+                panel.apply_filter(&text);
+            }
+            KeyCode::Char(c) => {
+                text.push(c);
+                panel.apply_filter(&text);
+            }
+            _ => {}
+        }
+        self.mode = Mode::Filter(text);
+    }
+
+    fn editor_key(&mut self, mut editor: Editor, error: Option<String>, key: KeyEvent) {
+        if error.is_some() {
+            self.mode = Mode::Edit {
+                editor,
+                error: None,
+            };
+            return;
+        }
+        let page = self.page as isize;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let prompt = matches!(key.code, KeyCode::F(3 | 4 | 7))
+            || (ctrl && matches!(key.code, KeyCode::Char('g' | 'f' | 'r')));
+        if matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+        ) {
+            editor.select(shift);
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::F(10) => {
+                if editor.dirty() {
+                    self.mode = Mode::AskExit(editor);
+                } else {
+                    self.leave_editor();
+                }
+                return;
+            }
+            KeyCode::F(2) => {
+                self.next_save_prompt(editor, false, false, Step::Encoding);
+                return;
+            }
+            _ if prompt => {
                 self.mode = Mode::Edit {
                     editor,
                     error: None,
                 };
+                match key.code {
+                    KeyCode::F(3) => self.find_or_ask(!shift),
+                    KeyCode::F(4) | KeyCode::Char('r') => self.ask(Ask::Replace),
+                    KeyCode::F(7) | KeyCode::Char('f') => self.ask(Ask::Find),
+                    _ => self.ask(Ask::Goto),
+                }
+                return;
             }
-            Mode::View { title, mut view } => {
-                let page = self.page as isize;
-                let result = match key.code {
-                    KeyCode::Esc | KeyCode::F(3 | 10) | KeyCode::Char('q') => return,
-                    KeyCode::Up => view.scroll(-1),
-                    KeyCode::Down => view.scroll(1),
-                    KeyCode::PageUp => view.scroll(-page),
-                    KeyCode::PageDown => view.scroll(page),
-                    KeyCode::Home => {
-                        view.home();
-                        Ok(())
+            KeyCode::Up => editor.move_v(-1),
+            KeyCode::Down => editor.move_v(1),
+            KeyCode::PageUp => editor.move_v(-page),
+            KeyCode::PageDown => editor.move_v(page),
+            KeyCode::Left if ctrl => editor.move_word(false),
+            KeyCode::Right if ctrl => editor.move_word(true),
+            KeyCode::Home if ctrl => editor.goto_idx(0),
+            KeyCode::End if ctrl => editor.goto_idx(usize::MAX),
+            KeyCode::Left => editor.move_h(-1),
+            KeyCode::Right => editor.move_h(1),
+            KeyCode::Home => editor.home(),
+            KeyCode::End => editor.end(),
+            KeyCode::Enter => editor.insert_char('\n'),
+            KeyCode::Tab => editor.insert_char('\t'),
+            KeyCode::Backspace => editor.backspace(),
+            KeyCode::Delete => editor.delete(),
+            KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
+                'z' => editor.undo(),
+                'y' => editor.redo(),
+                'c' | 'x' => {
+                    let text = if c.eq_ignore_ascii_case(&'c') {
+                        editor.copy()
+                    } else {
+                        editor.cut()
+                    };
+                    if let Some(text) = text {
+                        self.clipboard.clone_from(&text);
+                        self.copied = Some(text);
                     }
-                    KeyCode::End => view.end(self.page),
-                    KeyCode::Left | KeyCode::Right => {
-                        view.scroll_h(if key.code == KeyCode::Left { -8 } else { 8 });
-                        Ok(())
-                    }
-                    KeyCode::Char('w') => {
-                        view.wrap = !view.wrap;
-                        Ok(())
-                    }
-                    KeyCode::Char('l') => {
-                        self.view_numbers = !self.view_numbers;
-                        Ok(())
-                    }
-                    KeyCode::Char('/' | 'f' | 'n' | 'N' | 'g') | KeyCode::F(7) => {
-                        self.mode = Mode::View { title, view };
-                        match key.code {
-                            KeyCode::Char('n') => self.find_or_ask(true),
-                            KeyCode::Char('N') => self.find_or_ask(false),
-                            KeyCode::Char('g') => self.ask(Ask::Goto),
-                            _ => self.ask(Ask::Find),
-                        }
-                        return;
-                    }
-                    _ => Ok(()),
-                };
-                self.mode = match result {
-                    Ok(()) => Mode::View { title, view },
-                    Err(e) => Mode::Message(format!("{title}: {e}")),
-                };
-            }
+                }
+                'v' => editor.insert(&self.clipboard, false),
+                'k' => editor.delete_line(),
+                _ => {}
+            },
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => editor.insert_char(c),
+            _ => {}
         }
+        self.mode = Mode::Edit {
+            editor,
+            error: None,
+        };
+    }
+
+    fn viewer_key(&mut self, title: String, mut view: Viewer, key: KeyEvent) {
+        let page = self.page as isize;
+        let result = match key.code {
+            KeyCode::Esc | KeyCode::F(3 | 10) | KeyCode::Char('q') => return,
+            KeyCode::Up => view.scroll(-1),
+            KeyCode::Down => view.scroll(1),
+            KeyCode::PageUp => view.scroll(-page),
+            KeyCode::PageDown => view.scroll(page),
+            KeyCode::Home => {
+                view.home();
+                Ok(())
+            }
+            KeyCode::End => view.end(self.page),
+            KeyCode::Left | KeyCode::Right => {
+                view.scroll_h(if key.code == KeyCode::Left { -8 } else { 8 });
+                Ok(())
+            }
+            KeyCode::Char('w') => {
+                view.wrap = !view.wrap;
+                Ok(())
+            }
+            KeyCode::Char('l') => {
+                self.view_numbers = !self.view_numbers;
+                Ok(())
+            }
+            KeyCode::Char('/' | 'f' | 'n' | 'N' | 'g') | KeyCode::F(7) => {
+                self.mode = Mode::View { title, view };
+                match key.code {
+                    KeyCode::Char('n') => self.find_or_ask(true),
+                    KeyCode::Char('N') => self.find_or_ask(false),
+                    KeyCode::Char('g') => self.ask(Ask::Goto),
+                    _ => self.ask(Ask::Find),
+                }
+                return;
+            }
+            _ => Ok(()),
+        };
+        self.mode = match result {
+            Ok(()) => Mode::View { title, view },
+            Err(e) => Mode::Message(format!("{title}: {e}")),
+        };
     }
 
     /// Remember the command and hand it to the main loop; empty does nothing.
@@ -1878,7 +1866,10 @@ impl App {
             return f.pump();
         }
         if let Mode::Stats(st) = &mut self.mode
-            && st.job.as_ref().is_some_and(|j| j.is_finished())
+            && st
+                .job
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished)
             && let Some(job) = st.job.take()
         {
             match job.join() {
