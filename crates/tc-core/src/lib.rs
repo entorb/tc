@@ -3,6 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 
+pub mod cmdline;
 pub mod edit;
 pub mod eta;
 pub mod find;

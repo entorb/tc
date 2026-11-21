@@ -43,8 +43,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(editor) = app.mode.editor_mut() {
         draw_editor(frame, editor, &mut app.page, &app.note, app.search.as_ref());
     } else {
-        let [main, status] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+        let [main, cmd, status] = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
+        draw_cmdline(frame, app, cmd);
         let halves: [Rect; 2] = Layout::horizontal([Constraint::Fill(1); 2]).areas(main);
         app.areas = halves;
         app.page = main.height.saturating_sub(2).max(1) as usize;
@@ -146,10 +151,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "Edit",
             "Save changes?\n\n[y] yes   [n] no   Esc cancel",
         ),
-        Mode::Normal | Mode::View { .. } | Mode::Search(_) | Mode::Filter(_) => {}
+        Mode::Normal | Mode::View { .. } | Mode::Search(_) | Mode::Filter(_) | Mode::Cmd(_) => {}
     }
 
     draw_input(frame, app);
+}
+
+/// `dir> text` row; a long line shows its tail so the cursor stays visible.
+fn draw_cmdline(frame: &mut Frame, app: &App, area: Rect) {
+    let prompt = format!("{}> ", app.panels[app.active].path().display());
+    let (text, cur) = match &app.mode {
+        Mode::Cmd(l) => (l.text.as_str(), Some(l.text[..l.cur].chars().count())),
+        _ => ("", None),
+    };
+    let line = format!("{prompt}{text}");
+    let skip =
+        (prompt.chars().count() + text.chars().count() + 1).saturating_sub(usize::from(area.width));
+    let shown: String = line.chars().skip(skip).collect();
+    frame.render_widget(Line::raw(shown), area);
+    if let Some(c) = cur {
+        let col = (prompt.chars().count() + c).saturating_sub(skip);
+        frame.set_cursor_position((area.x + col as u16, area.y));
+    }
 }
 
 fn draw_found(frame: &mut Frame, f: &Found) {

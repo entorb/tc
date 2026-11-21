@@ -15,6 +15,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use regex::Regex;
+use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::eta::Estimator;
 use tc_core::panel::{Entry, Panel};
@@ -49,6 +50,8 @@ pub enum Mode {
     Filter(String),
     /// Command prompt for the external editor (shown when the default is missing).
     Editor(PathBuf, String),
+    /// Command line, run with Enter.
+    Cmd(LineEdit),
     /// Bookmark list with the selected row.
     Hotlist(usize),
     Message(String),
@@ -307,6 +310,11 @@ pub struct App {
     pub hotlist_file: Option<PathBuf>,
     /// Time and cell of the last left click, to detect double clicks (terminals send none).
     last_click: Option<(Instant, u16, u16)>,
+    /// Command history (oldest first) and the file it is saved to.
+    pub history: Vec<String>,
+    pub history_file: Option<PathBuf>,
+    /// Command and directory for the main loop to run on the real terminal.
+    pub run: Option<(String, PathBuf)>,
 }
 
 impl App {
@@ -327,6 +335,9 @@ impl App {
             hotlist: Vec::new(),
             hotlist_file: None,
             last_click: None,
+            history: Vec::new(),
+            history_file: None,
+            run: None,
         }
     }
 
@@ -554,6 +565,32 @@ impl App {
                 }
                 _ => self.mode = Mode::Mkdir(name),
             },
+            Mode::Cmd(mut l) => {
+                match key.code {
+                    KeyCode::Esc => return,
+                    KeyCode::Enter => return self.run_cmd(&l.text),
+                    KeyCode::Up => l.prev(&self.history),
+                    KeyCode::Down => l.next(&self.history),
+                    KeyCode::Left => l.left(),
+                    KeyCode::Right => l.right(),
+                    KeyCode::Home => l.home(),
+                    KeyCode::End => l.end(),
+                    KeyCode::Backspace => l.backspace(),
+                    KeyCode::Delete => l.delete(),
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        l.clear()
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        l.insert(c)
+                    }
+                    _ => {}
+                }
+                self.mode = Mode::Cmd(l);
+            }
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
             Mode::Found(f) => self.found_key(key.code, f),
             Mode::Message(_) => {}
@@ -752,6 +789,30 @@ impl App {
                     Ok(()) => Mode::View { title, view },
                     Err(e) => Mode::Message(format!("{title}: {e}")),
                 };
+            }
+        }
+    }
+
+    /// Remember the command and hand it to the main loop; empty does nothing.
+    fn run_cmd(&mut self, text: &str) {
+        let cmd = text.trim();
+        if cmd.is_empty() {
+            return;
+        }
+        cmdline::push_history(&mut self.history, cmd);
+        if let Some(file) = &self.history_file
+            && let Err(e) = cmdline::save_history(file, &self.history)
+        {
+            self.mode = Mode::Message(e.to_string());
+        }
+        self.run = Some((cmd.to_owned(), self.panels[self.active].path().to_owned()));
+    }
+
+    /// After a command ran: files may have changed in both panels.
+    pub fn reload_all(&mut self) {
+        for p in &mut self.panels {
+            if let Err(e) = p.reload() {
+                self.mode = Mode::Message(e.to_string());
             }
         }
     }
@@ -982,6 +1043,7 @@ impl App {
             KeyCode::Char('+') => self.ask(Ask::Select),
             KeyCode::Char('-') => self.ask(Ask::Deselect),
             KeyCode::Char('*') => panel.invert_selection(),
+            KeyCode::Char(':') => self.mode = Mode::Cmd(LineEdit::default()),
             KeyCode::Enter | KeyCode::Backspace => {
                 let result = if code == KeyCode::Enter {
                     panel.enter().map(drop)
@@ -1310,6 +1372,28 @@ mod tests {
 
     fn key(app: &mut App, code: KeyCode) {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn command_line_runs_only_on_enter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        for c in ":ls".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        assert!(app.run.is_none() && !app.quit);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.run, Some(("ls".into(), tmp.path().to_owned())));
+        assert_eq!(app.history, ["ls"]);
+        key(&mut app, KeyCode::Char(':'));
+        key(&mut app, KeyCode::Up);
+        assert!(matches!(&app.mode, Mode::Cmd(l) if l.text == "ls"));
+        key(&mut app, KeyCode::Esc);
+        app.run = None;
+        key(&mut app, KeyCode::Char(':'));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.run.is_none());
     }
 
     #[test]
