@@ -434,7 +434,9 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
             return None;
         }
         match &app.dir_job {
-            Some((p, _)) if *p == panel.path().join(&e.name) => Some("...".into()),
+            Some((side, p, _)) if *side == i && *p == panel.path().join(&e.name) => {
+                Some("...".into())
+            }
             _ => panel.dir_size(e).map(human),
         }
     };

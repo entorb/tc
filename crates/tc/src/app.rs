@@ -350,7 +350,7 @@ pub struct App {
     /// Text for the main loop to put on the system clipboard (OSC 52).
     pub copied: Option<String>,
     /// Size calculation in a worker thread: directory and its progress (`scanned` = result ready).
-    pub dir_job: Option<(PathBuf, Arc<ops::Progress>)>,
+    pub dir_job: Option<(usize, PathBuf, Arc<ops::Progress>)>,
     /// Viewer line numbers on (`l`).
     pub view_numbers: bool,
     /// Bookmarked directories and the file they are saved to (none: not persisted).
@@ -600,6 +600,9 @@ impl App {
                 KeyCode::Char('u') => {
                     self.panels.swap(0, 1);
                     self.lists.swap(0, 1);
+                    if let Some(job) = &mut self.dir_job {
+                        job.0 = 1 - job.0;
+                    }
                 }
                 KeyCode::Char('r') => {
                     if let Err(e) = self.panels[self.active].reload() {
@@ -1313,13 +1316,13 @@ impl App {
 
     /// Space on a directory: sum its size in a worker thread (a newer request cancels the older one).
     fn calc_dir_size(&mut self, dir: PathBuf) {
-        if let Some((_, old)) = self.dir_job.take() {
+        if let Some((_, _, old)) = self.dir_job.take() {
             old.cancel.store(true, Ordering::Relaxed);
         }
         let progress = Arc::new(ops::Progress::default());
         let (p, d) = (progress.clone(), dir.clone());
         thread::spawn(move || ops::scan(&[d], &p));
-        self.dir_job = Some((dir, progress));
+        self.dir_job = Some((self.active, dir, progress));
     }
 
     fn go(&mut self, i: usize, path: PathBuf) {
@@ -1702,16 +1705,16 @@ impl App {
 
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
-        if let Some((dir, p)) = &self.dir_job
+        if let Some((side, dir, p)) = &self.dir_job
             && p.scanned.load(Ordering::Acquire)
         {
-            let (dir, bytes) = (dir.clone(), p.total.load(Ordering::Relaxed));
+            let (side, dir, bytes) = (*side, dir.clone(), p.total.load(Ordering::Relaxed));
             self.dir_job = None;
             if let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
-                for panel in &mut self.panels {
-                    if panel.path() == parent && !panel.is_virtual() && panel.archive().is_none() {
-                        panel.set_dir_size(name.to_owned(), bytes);
-                    }
+                // only the panel Space was pressed in, the other one may show the same directory
+                let panel = &mut self.panels[side];
+                if panel.path() == parent && !panel.is_virtual() && panel.archive().is_none() {
+                    panel.set_dir_size(name.to_owned(), bytes);
                 }
             }
         }
@@ -1910,6 +1913,8 @@ mod tests {
         }
         assert_eq!(app.panels[0].dir_size(&app.panels[0].entries()[1]), Some(5));
         assert_eq!(app.panels[0].selection_info(), (1, 5));
+        // the right panel shows the same directory but was not asked
+        assert_eq!(app.panels[1].dir_size(&app.panels[1].entries()[1]), None);
     }
 
     #[test]
