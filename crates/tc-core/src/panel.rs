@@ -50,6 +50,8 @@ pub struct Panel {
     /// Visited directories, oldest first, `pos` is the current one.
     history: Vec<PathBuf>,
     pos: usize,
+    /// Panelized result list: entry names are absolute paths, `path` is where Backspace/Esc returns to.
+    virt: bool,
 }
 
 impl Panel {
@@ -65,7 +67,31 @@ impl Panel {
             selected: HashSet::new(),
             filter: String::new(),
             all: None,
+            virt: false,
         })
+    }
+
+    pub fn is_virtual(&self) -> bool {
+        self.virt
+    }
+
+    /// Show `entries` (names are absolute paths) as a flat list; `leave_virtual` goes back.
+    pub fn panelize(&mut self, entries: Vec<Entry>) {
+        self.entries = entries;
+        self.all = None;
+        self.filter.clear();
+        self.selected.clear();
+        self.cursor = 0;
+        self.virt = true;
+    }
+
+    /// Back to the directory the list was made from; false if the panel was not virtual.
+    pub fn leave_virtual(&mut self) -> Result<bool> {
+        if !self.virt {
+            return Ok(false);
+        }
+        self.load(self.path.clone())?;
+        Ok(true)
     }
 
     pub fn path(&self) -> &Path {
@@ -91,7 +117,15 @@ impl Panel {
     /// Re-read the directory, keeping cursor name and still existing selections.
     pub fn reload(&mut self) -> Result<()> {
         let keep = self.current().map(|e| e.name.clone());
-        self.entries = read_entries(&self.path)?;
+        self.entries = if self.virt {
+            // entries that vanished (e.g. deleted from the list) drop out
+            let all = self.all.take().unwrap_or(std::mem::take(&mut self.entries));
+            all.into_iter()
+                .filter_map(|e| entry_for(e.name.clone(), Path::new(&e.name)))
+                .collect()
+        } else {
+            read_entries(&self.path)?
+        };
         self.all = None;
         if !self.filter.is_empty() {
             let f = std::mem::take(&mut self.filter);
@@ -133,6 +167,9 @@ impl Panel {
 
     /// Go to the parent directory, cursor on the directory we came from.
     pub fn parent(&mut self) -> Result<()> {
+        if self.leave_virtual()? {
+            return Ok(());
+        }
         let (Some(parent), Some(came_from)) = (self.path.parent(), self.path.file_name()) else {
             return Ok(());
         };
@@ -296,6 +333,7 @@ impl Panel {
         self.entries = read_entries(&path)?;
         self.all = None;
         self.filter.clear();
+        self.virt = false;
         self.path = path;
         self.cursor = 0;
         self.selected.clear();
@@ -313,28 +351,31 @@ impl Panel {
     }
 }
 
+/// Entry named `name` for `path`; None if it cannot be stat'ed.
+pub(crate) fn entry_for(name: OsString, path: &Path) -> Option<Entry> {
+    let link_meta = fs::symlink_metadata(path).ok()?;
+    let is_symlink = link_meta.file_type().is_symlink();
+    // dangling symlink: fall back to link metadata
+    let meta = if is_symlink {
+        fs::metadata(path).unwrap_or(link_meta)
+    } else {
+        link_meta
+    };
+    Some(Entry {
+        name,
+        is_dir: meta.is_dir(),
+        is_symlink,
+        size: meta.len(),
+        modified: meta.modified().ok(),
+    })
+}
+
 fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for item in fs::read_dir(dir).map_err(io_err(dir))? {
         let item = item.map_err(io_err(dir))?;
-        let path = item.path();
-        let Ok(link_meta) = fs::symlink_metadata(&path) else {
-            continue; // vanished between read_dir and stat
-        };
-        let is_symlink = link_meta.file_type().is_symlink();
-        // dangling symlink: fall back to link metadata
-        let meta = if is_symlink {
-            fs::metadata(&path).unwrap_or(link_meta)
-        } else {
-            link_meta
-        };
-        entries.push(Entry {
-            name: item.file_name(),
-            is_dir: meta.is_dir(),
-            is_symlink,
-            size: meta.len(),
-            modified: meta.modified().ok(),
-        });
+        // None: vanished between read_dir and stat
+        entries.extend(entry_for(item.file_name(), &item.path()));
     }
     entries.sort_by_cached_key(|e| {
         (
@@ -480,6 +521,25 @@ mod tests {
         assert_eq!(names(&p), ["..", "apple", "cap", "grape"]);
         p.apply_filter("");
         assert_eq!(p.entries().len(), 5);
+    }
+
+    #[test]
+    fn panelize_and_leave() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        fs::write(&a, "").unwrap();
+        fs::write(&b, "").unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        let list = [&a, &b].map(|f| entry_for(f.clone().into_os_string(), f).unwrap());
+        p.panelize(list.to_vec());
+        assert!(p.is_virtual());
+        p.toggle_select();
+        assert_eq!(p.targets(), std::slice::from_ref(&a));
+        fs::remove_file(&b).unwrap();
+        p.reload().unwrap();
+        assert_eq!(p.entries().len(), 1);
+        p.parent().unwrap();
+        assert!(!p.is_virtual() && p.entries().len() == 2); // "..", a
     }
 
     #[cfg(unix)]

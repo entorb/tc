@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 pub mod edit;
+pub mod find;
 pub mod hotlist;
 pub mod ops;
 pub mod panel;
