@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
 use regex::Regex;
 
-use crate::app::{App, FOOTER, Found, Mode, Step, Xfer};
+use crate::app::{App, FOOTER, Found, Mode, Stats, Step, Xfer};
 use ratatui::widgets::ListState;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -187,6 +187,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "Enter go  Esc close",
         ),
         Mode::Found(f) => draw_found(frame, f),
+        Mode::Stats(st) => draw_stats(frame, st),
         Mode::Message(msg) => popup(frame, "Error", &format!("{msg}\n\nany key")),
         Mode::Edit { error, .. } => {
             if let Some(msg) = error {
@@ -297,11 +298,58 @@ fn draw_found(frame: &mut Frame, f: &Found) {
     frame.render_stateful_widget(list, area, &mut st);
 }
 
+/// File Stats: entries of the browsed directory, largest first, with share and bar.
+fn draw_stats(frame: &mut Frame, st: &Stats) {
+    const BAR_WIDTH: usize = 10;
+    let area = frame.area();
+    let h = usize::from(area.height.saturating_sub(3)).max(1);
+    let dir = st.current();
+    let value = |n: &tc_core::stats::Node| if st.by_files { n.files } else { n.size };
+    let fmt = |v: u64| if st.by_files { thousands(v) } else { human(v) };
+    let total = value(dir).max(1);
+    let start = st.sel / h * h;
+    let items = dir.children.iter().skip(start).take(h).map(|n| {
+        let share = value(n) as f64 / total as f64;
+        let filled = (share * BAR_WIDTH as f64).round() as usize;
+        let bar = "#".repeat(filled) + &" ".repeat(BAR_WIDTH - filled.min(BAR_WIDTH));
+        let slash = if n.is_dir { "/" } else { "" };
+        format!(
+            "{:>11} {:>5.1}% [{bar}] {}{slash}",
+            fmt(value(n)),
+            share * 100.0,
+            n.name.to_string_lossy()
+        )
+    });
+    let footer = if st.scanning() {
+        format!(
+            "scanning: {} files  Esc/F10 cancel",
+            thousands(st.progress.files.load(Ordering::Relaxed))
+        )
+    } else {
+        let mode = if st.by_files { "count" } else { "size" };
+        format!(
+            "{}, {} files  Tab size/count ({mode})  Enter open  Bksp up  F1 Help  F3 View  F4 Edit  S-F4 Ext  F10 Quit",
+            human(dir.size),
+            thousands(dir.files)
+        )
+    };
+    let list = List::new(items)
+        .style(PANEL)
+        .block(themed_block().title(format!(" Stats: {} ", st.path().display())))
+        .highlight_style(BAR);
+    let mut state = ListState::default().with_selected(Some(st.sel.saturating_sub(start)));
+    let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(list, main, &mut state);
+    frame.render_widget(Line::raw(footer).style(BAR), status);
+}
+
 fn draw_input(frame: &mut Frame, app: &mut App) {
     if app.help {
         let (title, text) = match app.mode {
             Mode::View { .. } => ("Help: viewer", HELP_VIEW),
             Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
+            Mode::Stats(_) => ("Help: file stats", HELP_STATS),
             _ => ("Help", HELP_MAIN),
         };
         let lines = text.lines().count();
@@ -596,6 +644,7 @@ Alt+=  other panel to this directory
 Alt+.  show / hide hidden files
 Ctrl+F3/F4/F5/F6  sort name/ext/date/size (again: reverse)
 Ctrl+B  hotlist
+Ctrl+Space  file stats (Tab size/count, Enter/Bksp, Esc/F10)
 Ctrl+D  add directory to hotlist
 Esc  clear filter, leave found list
 
@@ -624,6 +673,16 @@ Shift+F6  rename
 F7  make directory
 F8  delete
 F10 / q  quit";
+
+const HELP_STATS: &str = "\
+Up/Down/PgUp/PgDn/Home/End  move cursor
+Enter / Right  open directory
+Backspace / Left  parent directory
+Tab  toggle size / file count
+F3  view file
+F4  edit file
+Shift+F4  edit in external editor
+Esc / q / F10  close";
 
 const HELP_VIEW: &str = "\
 == Move ==
@@ -940,6 +999,16 @@ mod tests {
                 app.on_key(ratatui::crossterm::event::KeyEvent::from(
                     ratatui::crossterm::event::KeyCode::Enter,
                 ));
+            }
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            app.mode = Mode::Normal;
+            app.on_key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char(' '),
+                ratatui::crossterm::event::KeyModifiers::CONTROL,
+            ));
+            term.draw(|f| draw(f, &mut app)).unwrap(); // scanning
+            while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+                app.tick();
             }
             term.draw(|f| draw(f, &mut app)).unwrap();
         }
