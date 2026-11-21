@@ -87,6 +87,8 @@ enum Then {
     },
     /// Re-read of the shown directory: keep cursor and selection.
     Reload,
+    /// Re-stat of a virtual list: like `Reload`, vanished entries drop out.
+    Restat,
 }
 
 /// A directory listing read in a worker; the panel shows the old list until it arrives.
@@ -354,21 +356,37 @@ impl Panel {
     pub fn reload(&mut self) -> Result<()> {
         if let Some(p) = self.pending.take() {
             p.cancel.store(true, Ordering::Relaxed);
+            if matches!(p.then, Then::Restat) {
+                return self.restat();
+            }
             return self.load_on(p.remote, p.path, p.then);
         }
-        let entries = if let Some(e) = self.archive_entries() {
-            e
-        } else if self.virt {
+        if let Some(e) = self.archive_entries() {
+            self.reloaded(e);
+            return Ok(());
+        }
+        if self.virt {
+            return self.restat();
+        }
+        self.load(self.path.clone(), Then::Reload)
+    }
+
+    /// Stat the (unfiltered) virtual list in a worker: up to 100k files, maybe on a slow mount.
+    fn restat(&mut self) -> Result<()> {
+        let names: Vec<OsString> = (self.all.as_ref().unwrap_or(&self.entries).iter())
+            .map(|e| e.name.clone())
+            .collect();
+        self.start(None, self.path.clone(), Then::Restat, move |cancel| {
             // entries that vanished (e.g. deleted from the list) drop out
-            let all = self.all.take().unwrap_or(std::mem::take(&mut self.entries));
-            all.into_iter()
-                .filter_map(|e| entry_for(e.name.clone(), Path::new(&e.name)))
-                .collect()
-        } else {
-            return self.load(self.path.clone(), Then::Reload);
-        };
-        self.reloaded(entries);
-        Ok(())
+            Ok(names
+                .into_iter()
+                .take_while(|_| !cancel.load(Ordering::Relaxed))
+                .filter_map(|n| {
+                    let path = PathBuf::from(&n);
+                    entry_for(n, &path)
+                })
+                .collect())
+        })
     }
 
     fn reloaded(&mut self, entries: Vec<Entry>) {
@@ -661,19 +679,28 @@ impl Panel {
         path: PathBuf,
         then: Then,
     ) -> Result<()> {
+        let (dir, sort, hidden) = (path.clone(), self.sort, self.show_hidden);
+        let r = remote.clone();
+        self.start(remote, path, then, move |c| match r {
+            Some(r) => remote_entries(&*r, &dir, sort, hidden),
+            None => read_entries(&dir, sort, hidden, c),
+        })
+    }
+
+    /// Run `job` in a worker; fast results are applied before returning, slow ones by [`Panel::poll`].
+    fn start(
+        &mut self,
+        remote: Option<Arc<dyn Remote>>,
+        path: PathBuf,
+        then: Then,
+        job: impl FnOnce(&AtomicBool) -> Result<Vec<Entry>> + Send + 'static,
+    ) -> Result<()> {
         self.cancel_load();
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let (dir, c, sort, hidden) = (path.clone(), cancel.clone(), self.sort, self.show_hidden);
-        let r = remote.clone();
+        let (c, sort) = (cancel.clone(), self.sort);
         // a hung network mount or server blocks this thread, not the UI; cancel only drops its result
-        thread::spawn(move || {
-            let list = match r {
-                Some(r) => remote_entries(&*r, &dir, sort, hidden),
-                None => read_entries(&dir, sort, hidden, &c),
-            };
-            drop(tx.send(list));
-        });
+        thread::spawn(move || drop(tx.send(job(&c))));
         self.pending = Some(Pending {
             path,
             sort,
@@ -706,7 +733,7 @@ impl Panel {
                 sort_entries(&mut entries[start..], self.sort);
             }
             match p.then {
-                Then::Reload => self.reloaded(entries),
+                Then::Reload | Then::Restat => self.reloaded(entries),
                 Then::Show { pos, visit, focus } => {
                     self.show(p.path, entries);
                     self.remote = p.remote;
@@ -1081,6 +1108,9 @@ mod tests {
         assert_eq!(p.targets(), std::slice::from_ref(&a));
         fs::remove_file(&b).unwrap();
         p.reload().unwrap();
+        settle(&mut p);
+        assert!(p.is_virtual());
+        assert_eq!(p.targets(), std::slice::from_ref(&a)); // selection kept
         assert_eq!(p.entries().len(), 1);
         p.parent().unwrap();
         assert!(!p.is_virtual() && p.entries().len() == 2); // "..", a
