@@ -414,9 +414,9 @@ fn draw_view(ui: &mut Ui, app: &mut App) {
         return;
     };
     // numbers only while the top line is known, see `Viewer::top_line`
-    let top = view.top_line().filter(|_| numbers);
+    let top = view.top_line().filter(|_| numbers && !view.hex());
     let gutter = if top.is_some() { 7 } else { 0 };
-    let lang = syntax::lang(Path::new(title.as_str()));
+    let lang = syntax::lang(Path::new(title.as_str())).filter(|_| !view.hex());
     let mut fence = false;
     let mut job = LayoutJob::default();
     match view.rows(rows, cols.saturating_sub(gutter)) {

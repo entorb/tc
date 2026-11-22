@@ -467,15 +467,18 @@ PgUp/PgDn       page up / down
 Home/End        start / end of file
 Left/Right      scroll sideways
 Mouse wheel     scroll
-g / Ctrl+G      go to line or N%
+g / Ctrl+G      go to line or N% (hex: offset 0x.. / decimal)
 
 == Search ==
 / f F7 Ctrl+F   find (prompt: Up/Down earlier patterns)
 n / Shift+F7    next match
 N               previous match
 Alt+C           case sensitive / smart case
+                hex: jumps to the row where the matching line starts
 
 == View ==
+h / Alt+H       hex view (offset | bytes | ASCII)
+Alt+Left/Right  previous / next file of the panel (skips dirs and media); Alt+b/f same
 w / Alt+W       wrap long lines
 l / Alt+L       line numbers
 F4              edit this file at the top line (local files)

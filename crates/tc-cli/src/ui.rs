@@ -55,7 +55,11 @@ fn draw_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let bottom = format!(
         " {}%  {}  {} ",
         view.percent(),
-        view.encoding_name(),
+        if view.hex() {
+            "hex"
+        } else {
+            view.encoding_name()
+        },
         app.note
     );
     let block = themed_block().title(title.as_str()).title_bottom(bottom);
@@ -63,9 +67,9 @@ fn draw_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let height = inner.height as usize;
     app.page = height.max(1);
     // numbers only while the top line is known, see `Viewer::top_line`
-    let top = view.top_line().filter(|_| app.view_numbers);
+    let top = view.top_line().filter(|_| app.view_numbers && !view.hex());
     let gutter = if top.is_some() { 7 } else { 0 };
-    let lang = syntax::lang(Path::new(title.as_str()));
+    let lang = syntax::lang(Path::new(title.as_str())).filter(|_| !view.hex());
     // shortcut: viewer assumes no code fence open above the screen, upgrade with a fence index in `Viewer`
     let mut fence = false;
     let visible: Vec<Line> = match view.rows(height, (inner.width as usize).saturating_sub(gutter))

@@ -30,7 +30,10 @@ use tc_core::panel::{Entry, Panel, SortKey};
 use tc_core::procs::{self, Proc, ProcSort, Sampler, Snapshot};
 use tc_core::stats::{self, Node};
 use tc_core::vfs::{self, Remote, Side};
-use tc_core::{Error, find, hotlist, ops, rename, search, view::Viewer};
+use tc_core::{
+    Error, find, hotlist, ops, rename, search,
+    view::{Viewer, parse_offset},
+};
 use tc_remote::Prompt;
 
 mod config;
@@ -161,7 +164,7 @@ impl Ask {
     pub fn title(self) -> &'static str {
         match self {
             Ask::Find => "Find (regex)",
-            Ask::Goto => "Go to line (N% in viewer)",
+            Ask::Goto => "Go to line (N%; offset in hex view)",
             Ask::Replace => "Replace (regex)",
             Ask::With => "Replace with ($1 = group)",
             Ask::Select => "Select files (mask, default *)",
@@ -1589,13 +1592,14 @@ const fn f(label: &'static str, n: u8) -> (&'static str, KeyCode, KeyModifiers) 
 const CLOSE: (&str, KeyCode, KeyModifiers) = f("F10 Close", 10);
 const HELP: (&str, KeyCode, KeyModifiers) = f("F1 Help", 1);
 
-const VIEW_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
+const VIEW_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
     HELP,
     f("F4 Edit", 4),
     f("F7 Search", 7),
     ("g Goto", KeyCode::Char('g'), KeyModifiers::NONE),
     ("w Wrap", KeyCode::Char('w'), KeyModifiers::NONE),
     ("l Lines", KeyCode::Char('l'), KeyModifiers::NONE),
+    ("h Hex", KeyCode::Char('h'), KeyModifiers::NONE),
     CLOSE,
 ];
 
@@ -2966,9 +2970,19 @@ impl App {
                 Ok(())
             }
             KeyCode::End => view.end(self.page),
+            KeyCode::Left | KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                return self.view_step(title, view, key.code == KeyCode::Right);
+            }
+            // macOS terminals send Option+Left/Right as ESC b / ESC f
+            KeyCode::Char('b' | 'f') if key.modifiers.contains(KeyModifiers::ALT) => {
+                return self.view_step(title, view, key.code == KeyCode::Char('f'));
+            }
             KeyCode::Left | KeyCode::Right => {
                 view.scroll_h(if key.code == KeyCode::Left { -8 } else { 8 });
                 Ok(())
+            }
+            KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                view.set_hex(!view.hex())
             }
             KeyCode::Char('w') => {
                 view.wrap = !view.wrap;
@@ -3751,6 +3765,53 @@ impl App {
         };
     }
 
+    /// Alt+Right / Alt+Left: view the next / previous file of the panel, cursor follows.
+    fn view_step(&mut self, title: String, view: Viewer, forward: bool) {
+        let dir = if forward { "next" } else { "previous" };
+        let from_panel = self.found.is_none() && self.stats.is_none() && self.sync_back.is_none();
+        let next = if from_panel && self.current_file().as_deref() == Some(view.path()) {
+            self.next_viewable(forward)
+        } else {
+            self.note = "next / previous file: panel files only".into();
+            self.mode = Mode::View { title, view };
+            return;
+        };
+        let Some(i) = next else {
+            self.note = format!("no {dir} file");
+            self.mode = Mode::View { title, view };
+            return;
+        };
+        self.panels[self.active].set_cursor(i);
+        let Some(path) = self.current_file() else {
+            return;
+        };
+        let line = self.panels[self.active].hit_line(path.as_os_str());
+        self.open_at(path, line, false);
+        if let Mode::View { view: v, .. } = &mut self.mode {
+            v.wrap = view.wrap;
+            if view.hex()
+                && let Err(e) = v.set_hex(true)
+            {
+                self.mode = Mode::Message(e.to_string());
+            }
+        }
+    }
+
+    /// Index of the nearest file before or after the cursor that the viewer can show.
+    fn next_viewable(&self, forward: bool) -> Option<usize> {
+        let p = &self.panels[self.active];
+        let cur = p.cursor();
+        let ok = |&i: &usize| {
+            let e = &p.entries()[i];
+            !e.is_dir && !cmdline::opens_externally(&p.path().join(&e.name))
+        };
+        if forward {
+            (cur + 1..p.entries().len()).find(ok)
+        } else {
+            (0..cur).rev().find(ok)
+        }
+    }
+
     fn goto(&mut self, text: &str) -> Result<(), String> {
         let text = text.trim();
         let err = |_| "not a number".to_owned();
@@ -3758,6 +3819,7 @@ impl App {
             Mode::Edit { editor, .. } => editor.goto_line(text.parse().map_err(err)?),
             Mode::View { view, .. } => match text.strip_suffix('%') {
                 Some(p) => view.goto_percent(p.trim().parse().map_err(err)?),
+                None if view.hex() => view.goto_offset(parse_offset(text).ok_or("not an offset")?),
                 None => view.goto_line(text.parse().map_err(err)?),
             }
             .map_err(|e| e.to_string())?,
@@ -6384,6 +6446,93 @@ mod tests {
         ctrl(&mut app, 'g');
         type_text(&mut app, "2");
         assert_eq!(app.mode.editor_mut().unwrap().cursor, (1, 0));
+    }
+
+    #[test]
+    fn viewer_next_prev_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a.txt", "b.png", "c.txt"] {
+            std::fs::write(dir.path().join(n), "x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        let a = app.panels[0]
+            .entries()
+            .iter()
+            .position(|e| e.name == "a.txt")
+            .unwrap();
+        app.panels[0].set_cursor(a);
+        key(&mut app, KeyCode::F(3));
+        key(&mut app, KeyCode::Char('h'));
+        let alt = |app: &mut App, code| with(app, code, KeyModifiers::ALT);
+        let title = |app: &App| match &app.mode {
+            Mode::View { title, view } => (title.clone(), view.hex()),
+            _ => panic!("not in viewer"),
+        };
+        alt(&mut app, KeyCode::Right);
+        assert!(title(&app).0.ends_with("c.txt") && title(&app).1);
+        assert_eq!(app.panels[0].current().unwrap().name, "c.txt");
+        alt(&mut app, KeyCode::Right);
+        assert_eq!(app.note, "no next file");
+        assert!(title(&app).0.ends_with("c.txt"));
+        alt(&mut app, KeyCode::Left);
+        assert!(title(&app).0.ends_with("a.txt"));
+        alt(&mut app, KeyCode::Left);
+        assert_eq!(app.note, "no previous file");
+
+        alt(&mut app, KeyCode::Char('b'));
+        assert!(title(&app).0.ends_with("a.txt"));
+        alt(&mut app, KeyCode::Char('f'));
+        assert!(title(&app).0.ends_with("c.txt"));
+        // Ctrl+H (some terminals' Backspace) is not the hex toggle
+        with(&mut app, KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert!(title(&app).1);
+
+        app.open_viewer(dir.path().join("c.txt"));
+        app.panels[0].set_cursor(a);
+        alt(&mut app, KeyCode::Right);
+        assert_eq!(app.note, "next / previous file: panel files only");
+
+        // viewer opened from a dialog: panel cursor may match, still no stepping
+        app.note.clear();
+        app.panels[0].set_cursor(a);
+        app.open_viewer(dir.path().join("a.txt"));
+        app.found = Some(Found {
+            list: Vec::new(),
+            view: Vec::new(),
+            filter: Filter::default(),
+            sort: None,
+            sel: 0,
+            running: false,
+            remote: false,
+            error: Arc::default(),
+            re: None,
+            query: find::Query::default(),
+            rx: mpsc::channel().1,
+            cancel: Arc::default(),
+        });
+        alt(&mut app, KeyCode::Right);
+        assert_eq!(app.note, "next / previous file: panel files only");
+    }
+
+    #[test]
+    fn viewer_hex_goto_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.bin"), [b'a'; 64]).unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        key(&mut app, KeyCode::Char('h'));
+        key(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "0x20");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode_view_percent(), 50);
     }
 
     #[test]
