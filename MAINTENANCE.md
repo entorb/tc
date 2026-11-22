@@ -29,7 +29,7 @@
   - security
   - best practice of 2026
 
-## Code Review Dependencies
+## Code Review: Dependencies
 
 - perform a code review
 - use codegraph and context7
@@ -44,7 +44,7 @@
 ## Merge commits touching same feature
 
 - check git history after last tag
-- squash merge commits that touch the same feature to keep history clean
+- squash commits that touch the same feature to keep history cleaner
 
 ## Review and compress README.md and AGENTS.md files
 
