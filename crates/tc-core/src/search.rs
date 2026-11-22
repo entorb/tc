@@ -21,24 +21,66 @@ pub fn compile_case(pattern: &str, exact: bool) -> Result<Regex> {
 
 /// Case-insensitive glob (`*`, `?`) against any of the comma or space separated masks; empty means `*`.
 pub fn mask_match(masks: &str, name: &str) -> bool {
-    fn glob(p: &[char], n: &[char]) -> bool {
-        match p.split_first() {
-            None => n.is_empty(),
-            Some(('*', rest)) => (0..=n.len()).any(|i| glob(rest, &n[i..])),
-            Some((c, rest)) => n
-                .first()
-                .is_some_and(|x| (*c == '?' || c == x) && glob(rest, &n[1..])),
+    Masks::new(masks).matches(name)
+}
+
+/// Name masks parsed once, for matching many names (find, select by mask).
+pub struct Masks {
+    masks: Vec<Vec<char>>,
+    case: bool,
+}
+
+impl Masks {
+    pub fn new(masks: &str) -> Self {
+        Self::with_case(masks, false)
+    }
+
+    /// With `case` the masks match case-sensitively.
+    pub fn with_case(masks: &str, case: bool) -> Self {
+        let masks = if case {
+            masks.to_owned()
+        } else {
+            masks.to_lowercase()
+        };
+        Masks {
+            masks: masks
+                .split([',', ' '])
+                .filter(|m| !m.is_empty())
+                .map(|m| m.chars().collect())
+                .collect(),
+            case,
         }
     }
-    let name: Vec<char> = name.to_lowercase().chars().collect();
-    let masks = masks.to_lowercase();
-    let mut all = masks.split([',', ' ']).filter(|m| !m.is_empty()).peekable();
-    all.peek().is_none() || all.any(|m| glob(&m.chars().collect::<Vec<_>>(), &name))
+
+    pub fn is_empty(&self) -> bool {
+        self.masks.is_empty()
+    }
+
+    pub fn matches(&self, name: &str) -> bool {
+        fn glob(p: &[char], n: &[char]) -> bool {
+            match p.split_first() {
+                None => n.is_empty(),
+                Some(('*', rest)) => (0..=n.len()).any(|i| glob(rest, &n[i..])),
+                Some((c, rest)) => n
+                    .first()
+                    .is_some_and(|x| (*c == '?' || c == x) && glob(rest, &n[1..])),
+            }
+        }
+        if self.masks.is_empty() {
+            return true;
+        }
+        let name: Vec<char> = if self.case {
+            name.chars().collect()
+        } else {
+            name.to_lowercase().chars().collect()
+        };
+        self.masks.iter().any(|m| glob(m, &name))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Error, Masks, compile, mask_match};
 
     #[test]
     fn masks() {
@@ -48,6 +90,8 @@ mod tests {
         assert!(mask_match("a?c*", "abc"));
         assert!(!mask_match("*.rs", "main.rs.bak"));
         assert!(!mask_match("a?c", "ac"));
+        assert!(!Masks::with_case("*.RS", true).matches("main.rs"));
+        assert!(Masks::with_case("*.RS", true).matches("main.RS"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 achown
 addrs
 apfs
+arboard
 autotools
 axäb
 bksp
@@ -17,6 +18,7 @@ codegraph
 colour
 colouring
 colours
+conds
 consaver
 constexpr
 copysign
@@ -115,6 +117,7 @@ ftreeviewmenu
 fviewer
 fviewoperations
 hjkl
+hostclip
 hostport
 hotlist
 hotspots
@@ -138,6 +141,7 @@ mmin
 mountlist
 msvc
 mtimes
+mult
 multiarc
 multiarchive
 multibyte
@@ -145,13 +149,17 @@ multilist
 natsort
 ncdu
 neighbourhood
+newermt
 noch
+noext
 nosonar
 nroff
+nsurl
 ntfs
 nund
 oneone
 optionsi
+osascript
 panelization
 panelize
 panelized
@@ -167,6 +175,7 @@ procs
 publickey
 q'uote
 qdirstat
+qlmanage
 ratatui
 recyclebin
 reflinks
@@ -179,6 +188,7 @@ ropey
 rposition
 rsplit
 rumdl
+rundll
 russh
 rustls
 rustsec
@@ -188,6 +198,8 @@ selcodepage
 sevenzip
 sftpfs
 shellfolder
+shimgvw
+signum
 smeta
 sonarcloud
 sonarqube
@@ -279,6 +291,7 @@ utrash
 uvariablemenusupport
 uwdxmodule
 uwlxmodule
+venv
 virt
 vline
 vsftpd
@@ -289,6 +302,7 @@ winnet
 xabc
 xattr
 xbfh
+xclip
 xfeh
 xfer
 xffrs

@@ -8,6 +8,7 @@ pub mod cmdline;
 pub mod edit;
 pub mod eta;
 pub mod find;
+pub mod hostclip;
 pub mod hotlist;
 pub mod ops;
 pub mod panel;

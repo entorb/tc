@@ -7,7 +7,7 @@ use eframe::egui::{
     ScrollArea, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob, vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{App, MENUS, Mode, Stats, TOOLBAR, help_action};
+use tc::app::{App, FindForm, MENUS, Mode, Stats, TOOLBAR};
 use tc::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
     panel_title, stats_footer, stats_row,
@@ -522,7 +522,7 @@ fn draw_found(ui: &mut Ui, app: &mut App) {
     let start = f.sel / h * h;
     let mut clicked = None;
     for (k, e) in f.list.iter().enumerate().skip(start).take(h) {
-        if let Some(double) = list_row(ui, e.name.to_string_lossy().into_owned(), k == f.sel) {
+        if let Some(double) = list_row(ui, fmt::found_row(e), k == f.sel) {
             clicked = Some((k, double));
         }
     }
@@ -643,6 +643,9 @@ fn overlays(ctx: &Context, app: &mut App) {
     if let Some(d) = dialog(app) {
         show_dialog(ctx, "dialog", &d);
     }
+    if let Mode::FindForm(form) = &app.mode {
+        show_find_form(ctx, form);
+    }
     if let Mode::Stats(st) = &app.mode
         && let Some(text) = &st.confirm
     {
@@ -723,28 +726,52 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) {
     });
 }
 
+/// Find files form: fields and checkboxes, the focused one highlighted; keys go through the app.
+fn show_find_form(ctx: &Context, form: &FindForm) {
+    Modal::new(Id::unique("find-form")).show(ctx, |ui| {
+        ui.heading("Find files");
+        ui.separator();
+        for (text, focus) in fmt::find_form_lines(form) {
+            let mut t = RichText::new(text).font(mono());
+            if focus {
+                t = t.background_color(SELECT_BG).color(Color32::WHITE);
+            }
+            ui.label(t);
+        }
+        if let Some(e) = &form.error {
+            ui.label(RichText::new(e).color(Color32::LIGHT_RED));
+        }
+        ui.label(RichText::new(fmt::FIND_FORM_KEYS).color(MUTED));
+    });
+}
+
 fn show_help(ctx: &Context, app: &mut App) {
-    let (title, text) = fmt::help(&app.mode);
-    let lines = text.lines().count();
+    let title = fmt::help(&app.mode).0;
+    let text = app.help_entries();
     let row_h = ctx.fonts_mut(|f| f.row_height(&mono()));
     let max_h = ctx.content_rect().height() * 0.7;
     let rows = (max_h / row_h) as usize;
-    app.help_scroll = app.help_scroll.min(lines.saturating_sub(rows));
+    app.help_rows = rows;
+    app.help_scroll = app.help_scroll.min(text.len().saturating_sub(rows));
     let offset = app.help_scroll as f32 * row_h;
     let mut clicked = None;
     Modal::new(Id::unique("help")).show(ctx, |ui| {
         ui.heading(title);
+        ui.label(RichText::new(format!("Find: {}_", app.help_filter)).color(ACCENT));
         ui.separator();
         ScrollArea::vertical()
             .max_height(max_h)
             .vertical_scroll_offset(offset)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for (i, line) in text.lines().enumerate() {
-                    let mut t = RichText::new(line).font(mono());
-                    let clickable = text == fmt::HELP_MAIN && help_action(line).is_some();
+                for (i, (line, action)) in text.iter().enumerate() {
+                    let mut t = RichText::new(*line).font(mono());
+                    let clickable = action.is_some();
                     if clickable {
                         t = t.color(ACCENT);
+                    }
+                    if clickable && i == app.help_sel {
+                        t = t.background_color(SELECT_BG).color(Color32::WHITE);
                     }
                     let l = Label::new(t).sense(if clickable {
                         Sense::CLICK
@@ -761,7 +788,8 @@ fn show_help(ctx: &Context, app: &mut App) {
                 }
             });
         ui.label(
-            RichText::new("Up/Down scroll  click a key to run it  other key closes").color(MUTED),
+            RichText::new("Up/Down select  Enter or click runs  type to filter  Esc closes")
+                .color(MUTED),
         );
     });
     if let Some(i) = clicked {

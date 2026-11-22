@@ -29,6 +29,11 @@ struct Gui {
     output: Option<tempfile::NamedTempFile>,
 }
 
+/// Text on the system clipboard (egui does not hand it over when clipboard shortcuts are off).
+fn system_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
 fn main() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("cannot read current directory")?;
     let open = || Panel::open(&cwd).with_context(|| format!("cannot open {}", cwd.display()));
@@ -38,6 +43,8 @@ fn main() -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Torben's Commander")
             .with_inner_size([1280.0, 800.0]),
+        // Ctrl+C/X/V reach the app as keys: egui swallows Ctrl+V when the clipboard holds no text (files)
+        clipboard_shortcuts: false,
         ..Default::default()
     };
     let gui = Gui {
@@ -80,6 +87,16 @@ impl Gui {
         });
         for ev in &events {
             match keys::translate(ev, alt) {
+                // in the file panel Ctrl+V pastes files; elsewhere it pastes text into the prompt or editor
+                Some(keys::Input::Key(k))
+                    if k.code == tc::KeyCode::Char('v')
+                        && k.modifiers == KeyModifiers::CONTROL
+                        && !self.app.panel_keys() =>
+                {
+                    if let Some(text) = system_text() {
+                        self.app.on_paste(text);
+                    }
+                }
                 Some(keys::Input::Key(k)) => self.app.on_key(k),
                 Some(keys::Input::Paste(t)) => self.app.on_paste(t),
                 None => {}

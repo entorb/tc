@@ -1,19 +1,19 @@
 //! Frontend-neutral text: help, sizes, dates, progress.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use regex::Regex;
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::{Editor, Eol, human};
-use tc_core::find::MAX_RESULTS;
+use tc_core::find::{Hit, MAX_RESULTS};
 use tc_core::panel::{Entry, SortKey};
 use tc_core::stats::Node;
 use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Found, Input, Mode, Procs, Stats, Step, Xfer};
+use crate::app::{App, FindForm, FormRow, Found, Input, Mode, Procs, Stats, Step, Xfer};
 use tc_core::procs::{Proc, ProcSort};
 
 /// Length of "YY-MM-DD HH:MM".
@@ -138,6 +138,7 @@ Alt+=           other panel to this directory
 Alt+.           show / hide hidden files
 Ctrl+F3..F6     sort name/ext/date/size (again: reverse)
 Esc             clear filter, leave found list
+Ctrl+G          found list: go to the file's directory
 
 == Selection ==
 Insert / Space  select entry
@@ -148,15 +149,16 @@ Ctrl+Y          select differences to other panel
 
 == Search ==
 Ctrl+S          quick search (again: next match)
-Ctrl+F          quick filter
-Alt+F7          find files
+/               quick filter
+Ctrl+F          find files
 :               command line
 
 == Files ==
-F3 / F4         view / edit
+F3 / F4         view (media: preview) / edit
 Shift+F4        create file, edit in external editor
 Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
 F5 / F6         copy / move
+Ctrl+C / Ctrl+X copy / cut files, Ctrl+V pastes them here
 Shift+F6        rename
 F7 / F8         make directory / delete
 F10 / q         quit";
@@ -434,8 +436,13 @@ pub fn entry_cols(app: &App, i: usize, e: &Entry, today: jiff::civil::Date) -> [
     } else {
         human(e.size)
     };
+    // found lists hold full paths: show them below the search root
+    let name = match Path::new(&e.name).strip_prefix(app.panels[i].path()) {
+        Ok(rel) if app.panels[i].is_virtual() => rel.as_os_str(),
+        _ => e.name.as_os_str(),
+    };
     [
-        format!("{prefix}{}", e.name.to_string_lossy()),
+        format!("{prefix}{}", name.to_string_lossy()),
         size,
         date_of(e, today),
     ]
@@ -509,10 +516,60 @@ pub fn found_title(f: &Found) -> String {
     } else {
         ""
     };
-    format!(
-        " Find: {} found, {state}{cap}  Enter panelize  Esc stop/close ",
-        f.list.len()
-    )
+    let err = match f.error.lock().ok().and_then(|e| e.clone()) {
+        Some(e) => format!(", {e}"),
+        None => String::new(),
+    };
+    let keys = if f.remote {
+        "Esc stop/close"
+    } else {
+        "Enter panelize  F3/F4 view/edit  Ctrl+G go to file  Esc stop/close"
+    };
+    format!(" Find: {} found, {state}{cap}{err}  {keys} ", f.list.len())
+}
+
+/// Find result row: size (blank for directories), full path and the matching line if any.
+pub fn found_row(h: &Hit) -> String {
+    let e = &h.entry;
+    let size = if e.is_dir {
+        String::new()
+    } else {
+        human(e.size)
+    };
+    let name = e.name.to_string_lossy();
+    match &h.line {
+        Some((n, text)) => format!("{size:>9}  {name}:{n}: {text}"),
+        None => format!("{size:>9}  {name}"),
+    }
+}
+
+/// Keys shown under the find form.
+pub const FIND_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter search  Esc cancel
+F2 save as \"Saved search\"  F3 load next saved  F8 delete saved";
+
+/// Find form lines as (text, focused), the caret after the focused field's text.
+pub fn find_form_lines(f: &FindForm) -> Vec<(String, bool)> {
+    f.rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let focus = i == f.focus;
+            let text = match row {
+                FormRow::Check(label, on) => {
+                    format!("[{}] {label}", if *on { "x" } else { " " })
+                }
+                FormRow::Text(label, l) => {
+                    let value = if focus {
+                        format!("{}_{}", &l.text[..l.cur], &l.text[l.cur..])
+                    } else {
+                        l.text.clone()
+                    };
+                    format!("{label:<18} {value}")
+                }
+            };
+            (text, focus)
+        })
+        .collect()
 }
 
 /// File Stats row: value, share, text bar and name.

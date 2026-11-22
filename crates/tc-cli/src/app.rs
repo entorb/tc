@@ -1,12 +1,12 @@
 //! App state and key handling, independent of the terminal.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,8 @@ use tc_core::archive::{Archive, Format, TempDir};
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::eta::Estimator;
-use tc_core::panel::{Entry, Panel, SortKey};
+use tc_core::find::Hit;
+use tc_core::panel::{Panel, SortKey};
 use tc_core::procs::{self, Proc, ProcSort, Sampler, Snapshot};
 use tc_core::stats::{self, Node};
 use tc_core::vfs::{self, Remote, Side};
@@ -69,6 +70,8 @@ pub enum Mode {
     /// Mount points, selected row and the panel Enter jumps.
     Drives(Vec<PathBuf>, usize, usize),
     Message(String),
+    /// Find files form (Ctrl+F): fields and checkboxes, one focused.
+    FindForm(FindForm),
     /// Find results, filled live by a worker thread.
     Found(Found),
     /// File Stats (ncdu-style) tree, scanned by a worker thread.
@@ -132,9 +135,6 @@ pub enum Ask {
     /// File panel: select (`+`) or deselect (`-`) files by mask.
     Select,
     Deselect,
-    /// Find files: name mask, then content regex (`pattern` holds the mask).
-    FindMask,
-    FindText,
 }
 
 impl Ask {
@@ -146,8 +146,6 @@ impl Ask {
             Ask::With => "Replace with ($1 = group)",
             Ask::Select => "Select files (mask, default *)",
             Ask::Deselect => "Deselect files (mask, default *)",
-            Ask::FindMask => "Find files: name mask (default *)",
-            Ask::FindText => "Find files: content regex (empty = any)",
         }
     }
 }
@@ -180,15 +178,284 @@ enum Done {
     ),
     Loaded(tc_core::Result<Editor>),
     Saved(Editor, tc_core::Result<()>),
+    /// Files on the host clipboard for Ctrl+V; `None` when the read was cancelled.
+    HostFiles(Option<Vec<PathBuf>>),
+}
+
+/// Files copied (Ctrl+C) or cut (Ctrl+X) from a panel, pasted with Ctrl+V into the active one.
+#[derive(Clone)]
+pub struct FileClip {
+    pub op: Op,
+    pub paths: Vec<PathBuf>,
+    pub side: Side,
 }
 
 /// Results of a running or finished file search.
 pub struct Found {
-    pub list: Vec<Entry>,
+    pub list: Vec<Hit>,
     pub sel: usize,
     pub running: bool,
-    rx: Receiver<Entry>,
+    /// Search on a remote panel: results are not panelized.
+    pub remote: bool,
+    /// Why a remote search stopped early (the server cannot run `find`, ...).
+    pub error: Arc<Mutex<Option<String>>>,
+    /// Content regex of the search: highlighted when a result opens in the viewer or editor.
+    re: Option<Regex>,
+    rx: Receiver<Hit>,
     cancel: Arc<AtomicBool>,
+}
+
+// Find form row labels; also the keys of saved searches.
+const F_NAME: &str = "Name (masks)";
+const F_NAME_RE: &str = "Name is a regex";
+const F_NAME_CASE: &str = "Name case-sensitive";
+const F_SKIP_FILES: &str = "Exclude files";
+const F_CONTENT_ON: &str = "Search file contents";
+const F_CONTENT: &str = "Content";
+const F_REGEX: &str = "Content is a regex";
+const F_CASE: &str = "Content case-sensitive";
+const F_WORD: &str = "Whole words";
+const F_NOT: &str = "Not containing";
+const F_EVERY: &str = "List every match";
+const F_SKIP_DIRS: &str = "Exclude dirs";
+const F_HIDDEN: &str = "Skip hidden";
+const F_GITIGNORE: &str = "Use .gitignore";
+const F_FOLLOW: &str = "Follow symlinks";
+const F_DEPTH: &str = "Max depth";
+const F_MIN: &str = "Min size";
+const F_MAX: &str = "Max size";
+const F_AFTER: &str = "Modified after";
+const F_BEFORE: &str = "Modified before";
+const F_AGE: &str = "Not older than";
+const F_EXTS: &str = "Extensions";
+const F_SAVED: &str = "Saved search";
+
+/// Find files form rows in focus order.
+fn find_rows() -> Vec<FormRow> {
+    let text = |label| FormRow::Text(label, LineEdit::default());
+    let check = |label| FormRow::Check(label, false);
+    vec![
+        text(F_NAME),
+        check(F_NAME_RE),
+        check(F_NAME_CASE),
+        text(F_SKIP_FILES),
+        check(F_CONTENT_ON),
+        text(F_CONTENT),
+        check(F_REGEX),
+        check(F_CASE),
+        check(F_WORD),
+        check(F_NOT),
+        check(F_EVERY),
+        text(F_SKIP_DIRS),
+        check(F_HIDDEN),
+        check(F_GITIGNORE),
+        check(F_FOLLOW),
+        text(F_DEPTH),
+        text(F_MIN),
+        text(F_MAX),
+        text(F_AFTER),
+        text(F_BEFORE),
+        text(F_AGE),
+        text(F_EXTS),
+        text(F_SAVED),
+    ]
+}
+
+/// One line of the find form: a text field or a checkbox.
+#[derive(Clone)]
+pub enum FormRow {
+    Text(&'static str, LineEdit),
+    Check(&'static str, bool),
+}
+
+impl FormRow {
+    fn label(&self) -> &'static str {
+        match self {
+            FormRow::Text(l, _) | FormRow::Check(l, _) => l,
+        }
+    }
+}
+
+/// Find files form: rows, the focused one, and the error (or note) of the last try.
+#[derive(Clone)]
+pub struct FindForm {
+    pub rows: Vec<FormRow>,
+    pub focus: usize,
+    pub error: Option<String>,
+}
+
+impl FindForm {
+    pub fn new() -> Self {
+        FindForm {
+            rows: find_rows(),
+            focus: 0,
+            error: None,
+        }
+    }
+
+    fn row(&self, label: &str) -> Option<&FormRow> {
+        self.rows.iter().find(|r| r.label() == label)
+    }
+
+    fn text(&self, label: &str) -> &str {
+        match self.row(label) {
+            Some(FormRow::Text(_, l)) => &l.text,
+            _ => "",
+        }
+    }
+
+    fn checked(&self, label: &str) -> bool {
+        matches!(self.row(label), Some(FormRow::Check(_, true)))
+    }
+
+    /// Typing and space toggle on the focused row.
+    fn key(&mut self, code: KeyCode, ctrl: bool) {
+        let i = self.focus;
+        match (&mut self.rows[i], code) {
+            (FormRow::Check(_, on), KeyCode::Char(' ')) => *on = !*on,
+            (FormRow::Text(_, l), KeyCode::Char(c)) if !ctrl => l.insert(c),
+            (FormRow::Text(_, l), KeyCode::Backspace) => l.backspace(),
+            (FormRow::Text(_, l), KeyCode::Delete) => l.delete(),
+            (FormRow::Text(_, l), KeyCode::Left) => l.left(),
+            (FormRow::Text(_, l), KeyCode::Right) => l.right(),
+            (FormRow::Text(_, l), KeyCode::Home) => l.home(),
+            (FormRow::Text(_, l), KeyCode::End) => l.end(),
+            _ => {}
+        }
+        self.tick_content();
+    }
+
+    /// Pasted text goes into the focused text field.
+    fn paste(&mut self, text: &str) {
+        if let FormRow::Text(_, l) = &mut self.rows[self.focus] {
+            paste_line(l, text);
+        }
+        self.tick_content();
+    }
+
+    /// Typed content text turns content search on, so it is not silently ignored.
+    fn tick_content(&mut self) {
+        if self.text(F_CONTENT).is_empty() {
+            return;
+        }
+        for row in &mut self.rows {
+            if let FormRow::Check(F_CONTENT_ON, on) = row {
+                *on = true;
+            }
+        }
+    }
+
+    /// One line of the saved searches file: `name`, then tab separated `label=value`
+    /// (checkboxes `1`/`0`); tabs inside values become spaces.
+    fn to_line(&self, name: &str) -> String {
+        let mut line = name.replace('\t', " ");
+        for row in self.rows.iter().filter(|r| r.label() != F_SAVED) {
+            let value = match row {
+                FormRow::Text(_, l) => l.text.replace('\t', " "),
+                FormRow::Check(_, on) => if *on { "1" } else { "0" }.into(),
+            };
+            line += &format!("\t{}={value}", row.label());
+        }
+        line
+    }
+
+    /// The form a saved line describes; unknown labels are ignored, missing ones stay empty.
+    fn from_line(line: &str) -> Self {
+        let mut form = FindForm::new();
+        let mut parts = line.split('\t');
+        let name = parts.next().unwrap_or_default();
+        let values: HashMap<&str, &str> = parts.filter_map(|p| p.split_once('=')).collect();
+        for row in &mut form.rows {
+            match row {
+                FormRow::Text(F_SAVED, l) => l.text = name.into(),
+                FormRow::Text(label, l) => l.text = values.get(label).unwrap_or(&"").to_string(),
+                FormRow::Check(label, on) => *on = values.get(label) == Some(&"1"),
+            }
+            if let FormRow::Text(_, l) = row {
+                l.end();
+            }
+        }
+        form
+    }
+
+    /// The search the fields describe; the first field that does not parse is the error.
+    fn query(&self, exact: bool, remote: bool) -> Result<find::Query, String> {
+        let name = self.text(F_NAME).trim();
+        let name_case = exact || self.checked(F_NAME_CASE);
+        let name_re = if self.checked(F_NAME_RE) {
+            Some(search::compile_case(name, name_case).map_err(|e| format!("Name: {e}"))?)
+        } else {
+            None
+        };
+        let size = |label: &str| match self.text(label).trim() {
+            "" => Ok(None),
+            t => find::parse_size(t).map(Some),
+        };
+        let date = |label: &str, end: bool| match self.text(label).trim() {
+            "" => Ok(None),
+            t => find::parse_date(t, end).map(Some),
+        };
+        let age = match self.text(F_AGE).trim() {
+            "" => None,
+            t => Some(find::parse_age(t)?),
+        };
+        let max_depth = match self.text(F_DEPTH).trim() {
+            "" => None,
+            t => Some(
+                t.parse::<usize>()
+                    .ok()
+                    .filter(|&d| d > 0)
+                    .ok_or_else(|| format!("not a depth (1 = this directory only): {t}"))?,
+            ),
+        };
+        let q = find::Query {
+            mask: if name_re.is_some() { "" } else { name }.into(),
+            name_re,
+            mask_case: name_case,
+            exclude_files: self.text(F_SKIP_FILES).trim().into(),
+            content: self.content(exact)?,
+            exclude: find::parse_list(self.text(F_SKIP_DIRS)),
+            min_size: size(F_MIN)?,
+            max_size: size(F_MAX)?,
+            after: date(F_AFTER, false)?.max(age),
+            before: date(F_BEFORE, true)?,
+            exts: find::parse_exts(self.text(F_EXTS)),
+            max_depth,
+            skip_hidden: self.checked(F_HIDDEN),
+            gitignore: self.checked(F_GITIGNORE),
+            follow_links: self.checked(F_FOLLOW),
+        };
+        match q.remote_unsupported() {
+            Some(e) if remote => Err(e.into()),
+            _ => Ok(q),
+        }
+    }
+
+    /// Content search of the form; `None` while its checkbox is off.
+    fn content(&self, exact: bool) -> Result<Option<find::Content>, String> {
+        if !self.checked(F_CONTENT_ON) {
+            return Ok(None);
+        }
+        let text = self.text(F_CONTENT);
+        if text.is_empty() {
+            return Err("Content search needs text in its field.".into());
+        }
+        let mut c = find::Content::new(
+            text,
+            !self.checked(F_REGEX),
+            self.checked(F_WORD),
+            exact || self.checked(F_CASE),
+        )?;
+        c.negate = self.checked(F_NOT);
+        c.every = self.checked(F_EVERY) && !c.negate;
+        Ok(Some(c))
+    }
+}
+
+impl Default for FindForm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Found {
@@ -673,6 +940,9 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Make directory      F7", KeyCode::F(7), N),
             ("Delete              F8", KeyCode::F(8), N),
             ("Copy paths          Ctrl+Insert", KeyCode::Insert, C),
+            ("Copy files          Ctrl+C", KeyCode::Char('c'), C),
+            ("Cut files           Ctrl+X", KeyCode::Char('x'), C),
+            ("Paste files         Ctrl+V", KeyCode::Char('v'), C),
             ("Quit                F10", KeyCode::F(10), N),
         ],
     ),
@@ -706,9 +976,10 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Help                F1", KeyCode::F(1), N),
             ("File stats (ncdu)   Ctrl+Space", KeyCode::Char(' '), C),
             ("Processes (top)     Ctrl+P", KeyCode::Char('p'), C),
-            ("Find files          Alt+F7", KeyCode::F(7), A),
+            ("Find files          Ctrl+F", KeyCode::Char('f'), C),
+            ("Go to found file    Ctrl+G", KeyCode::Char('g'), C),
             ("Quick search        Ctrl+S", KeyCode::Char('s'), C),
-            ("Quick filter        Ctrl+F", KeyCode::Char('f'), C),
+            ("Quick filter        /", KeyCode::Char('/'), N),
             ("Command line        :", KeyCode::Char(':'), N),
         ],
     ),
@@ -808,9 +1079,15 @@ pub struct App {
     pub page: usize,
     /// Open text prompt of the viewer or editor.
     pub input: Option<Input>,
-    /// Shortcut popup over the current mode, any key closes it.
+    /// Shortcut popup over the current mode: typing filters it, Up/Down select, Enter runs, Esc closes.
     pub help: bool,
     pub help_scroll: usize,
+    /// Text typed into the help filter (case-insensitive substring of each line).
+    pub help_filter: String,
+    /// Selected line of the filtered help text.
+    pub help_sel: usize,
+    /// Visible text rows of the help popup, set by the UI.
+    pub help_rows: usize,
     /// Last search, used by next/previous.
     pub search: Option<Regex>,
     /// Short result of the last key, shown in the viewer or editor, e.g. "not found".
@@ -825,6 +1102,19 @@ pub struct App {
     pub edit_text: Rect,
     /// Text for the main loop to put on the system clipboard (OSC 52).
     pub copied: Option<String>,
+    /// Files copied or cut with Ctrl+C / Ctrl+X, until pasted (a cut is pasted once).
+    pub file_clip: Option<FileClip>,
+    /// Host clipboard files seen at the last Ctrl+V: a different list is newer than `file_clip`.
+    last_host: Vec<PathBuf>,
+    /// Find form as last searched or cancelled; Ctrl+F reopens it.
+    last_find: Option<FindForm>,
+    /// Find results while a result is open in the viewer or editor; shown again after it.
+    found: Option<Found>,
+    /// Saved find forms, one line each (see `FindForm::to_line`), and their file.
+    searches: Vec<String>,
+    searches_file: Option<PathBuf>,
+    /// The running transfer pastes a cut: `file_clip` is dropped once it succeeds.
+    cut_pending: bool,
     /// Size calculation in a worker thread: directory and its progress (`scanned` = result ready).
     pub dir_job: Option<(usize, PathBuf, Arc<ops::Progress>)>,
     /// Viewer line numbers on (`l`).
@@ -873,6 +1163,9 @@ impl App {
             input: None,
             help: false,
             help_scroll: 0,
+            help_filter: String::new(),
+            help_sel: 0,
+            help_rows: 0,
             search: None,
             note: String::new(),
             clipboard: String::new(),
@@ -880,6 +1173,13 @@ impl App {
             exact: false,
             edit_text: Rect::default(),
             copied: None,
+            file_clip: None,
+            last_host: Vec::new(),
+            last_find: None,
+            found: None,
+            searches: Vec::new(),
+            searches_file: None,
+            cut_pending: false,
             dir_job: None,
             view_numbers: false,
             hotlist: Vec::new(),
@@ -909,6 +1209,13 @@ impl App {
             .map(|f| f.with_file_name("connections"));
         if let Some(file) = &self.connections_file {
             self.connections = hotlist::load(file).context("cannot read connections")?;
+        }
+        self.searches_file = self
+            .hotlist_file
+            .as_ref()
+            .map(|f| f.with_file_name("searches"));
+        if let Some(file) = &self.searches_file {
+            self.searches = cmdline::load_history(file).context("cannot read saved searches")?;
         }
         self.history_file = cmdline::history_path();
         if let Some(file) = &self.history_file {
@@ -1096,11 +1403,12 @@ impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         self.note.clear();
         if self.help {
-            return self.help_key(key.code);
+            return self.help_key(key);
         }
         if key.code == KeyCode::F(1) && self.idle() {
             self.help = true;
             self.help_scroll = 0;
+            self.help_set_filter(String::new());
             return;
         }
         if self.input.is_some() {
@@ -1157,7 +1465,8 @@ impl App {
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
             Mode::Menu(group, sel) => self.menu_key(key.code, group, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
-            Mode::Found(f) => self.found_key(key.code, f),
+            Mode::Found(f) => self.found_key(key, f),
+            Mode::FindForm(form) => self.find_form_key(key, form),
             Mode::Stats(st) => self.stats_mode_key(st, key),
             Mode::Procs(mut p) => {
                 if p.key(key, self.page) {
@@ -1281,7 +1590,7 @@ impl App {
     fn ask_viewer_key(&mut self, path: PathBuf, text: String, can_load: bool, code: KeyCode) {
         match code {
             KeyCode::Char('y' | 'Y') => self.open_viewer(path),
-            KeyCode::Char('n' | 'N') if can_load => self.spawn_load(path),
+            KeyCode::Char('n' | 'N') if can_load => self.spawn_load(path, None),
             KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
             _ => {
                 self.mode = Mode::AskViewer {
@@ -1293,28 +1602,101 @@ impl App {
         }
     }
 
+    /// Help lines as shown (matching the filter, all when it is empty) with the key each runs
+    /// (only the main help has keys). Built once per frame or key, not per line.
+    pub fn help_entries(&self) -> Vec<(&'static str, Option<(KeyCode, KeyModifiers)>)> {
+        let (_, text) = fmt::help(&self.mode);
+        let main = text == fmt::HELP_MAIN;
+        let f = self.help_filter.to_lowercase();
+        text.lines()
+            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
+            .map(|l| (l, if main { help_action(l) } else { None }))
+            .collect()
+    }
+
+    /// Key a shown help line runs.
+    pub fn help_action_at(&self, line: usize) -> Option<(KeyCode, KeyModifiers)> {
+        self.help_entries().get(line).and_then(|e| e.1)
+    }
+
     /// Click on help text line `line`: close the help and run the action the line describes.
     pub fn help_click(&mut self, line: usize) {
-        let (_, text) = fmt::help(&self.mode);
-        if text == fmt::HELP_MAIN
-            && let Some(l) = text.lines().nth(line)
-            && let Some((c, m)) = help_action(l)
-        {
+        if let Some((c, m)) = self.help_action_at(line) {
             self.help = false;
             self.on_key(KeyEvent::new(c, m));
         }
     }
 
-    fn help_key(&mut self, code: KeyCode) {
+    /// New filter text: selects the first key line and scrolls to the top.
+    fn help_set_filter(&mut self, filter: String) {
+        self.help_filter = filter;
+        self.help_scroll = 0;
+        self.help_sel = self
+            .help_entries()
+            .iter()
+            .position(|e| e.1.is_some())
+            .unwrap_or(0);
+    }
+
+    /// Moves the selection to the next key line in `dir`, or scrolls when there are none.
+    fn help_move(&mut self, dir: isize) {
+        let sel = self.help_sel as isize;
+        let next = self
+            .help_entries()
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| e.1.is_some() && (*i as isize - sel).signum() == dir)
+            .map(|(i, _)| i)
+            .min_by_key(|&i| (i as isize - sel).abs());
+        match next {
+            Some(i) => {
+                self.help_sel = i;
+                self.help_follow();
+            }
+            None if dir < 0 => self.help_scroll = self.help_scroll.saturating_sub(1),
+            None => self.help_scroll += 1,
+        }
+    }
+
+    /// Keeps the selected line inside the popup.
+    fn help_follow(&mut self) {
+        let rows = self.help_rows.max(1);
+        if self.help_sel < self.help_scroll {
+            self.help_scroll = self.help_sel;
+        } else if self.help_sel >= self.help_scroll + rows {
+            self.help_scroll = self.help_sel + 1 - rows;
+        }
+    }
+
+    fn help_key(&mut self, key: KeyEvent) {
         let page = self.page;
-        match code {
-            KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
-            KeyCode::Down => self.help_scroll += 1,
+        let typing = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc if !self.help_filter.is_empty() => self.help_set_filter(String::new()),
+            KeyCode::Esc | KeyCode::F(1) | KeyCode::F(10) => self.help = false,
+            KeyCode::Enter if self.help_action_at(self.help_sel).is_some() => {
+                self.help_click(self.help_sel)
+            }
+            KeyCode::Enter => self.help = false,
+            KeyCode::Backspace => {
+                let mut f = self.help_filter.clone();
+                f.pop();
+                self.help_set_filter(f);
+            }
+            KeyCode::Char(c) if typing => {
+                let mut f = self.help_filter.clone();
+                f.push(c);
+                self.help_set_filter(f);
+            }
+            KeyCode::Up => self.help_move(-1),
+            KeyCode::Down => self.help_move(1),
             KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(page),
             KeyCode::PageDown => self.help_scroll += page,
             KeyCode::Home => self.help_scroll = 0,
             KeyCode::End => self.help_scroll = usize::MAX,
-            _ => self.help = false,
+            _ => {}
         }
     }
 
@@ -1357,10 +1739,6 @@ impl App {
                 panel.select_range(c, c);
                 panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
             }
-            KeyCode::F(7) if alt && self.panels[self.active].remote().is_some() => {
-                self.mode = Mode::Message(REMOTE.into())
-            }
-            KeyCode::F(7) if alt => self.ask(Ask::FindMask),
             code if key.modifiers.contains(KeyModifiers::CONTROL) => self.ctrl_key(code),
             KeyCode::Left | KeyCode::Right if alt => {
                 let delta = if key.code == KeyCode::Left { -1 } else { 1 };
@@ -1385,13 +1763,25 @@ impl App {
     fn ctrl_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('s') => self.mode = Mode::Search(String::new()),
+            KeyCode::Char('c') => self.clip_files(Op::Copy),
+            KeyCode::Char('x') => self.clip_files(Op::Move),
+            KeyCode::Char('v') => self.paste(),
             KeyCode::Char('f') => {
-                self.mode = Mode::Filter(self.panels[self.active].filter().to_owned());
+                self.mode = Mode::FindForm(self.last_find.take().unwrap_or_default());
             }
             KeyCode::Char('d') if self.panels[self.active].remote().is_some() => {
                 self.mode = Mode::Message(REMOTE.into())
             }
             KeyCode::Char('d') => self.hotlist_add(),
+            KeyCode::Char('g') => {
+                let panel = &mut self.panels[self.active];
+                let file = (panel.current())
+                    .filter(|_| panel.is_virtual())
+                    .map(|e| PathBuf::from(&e.name));
+                if let Some(Err(e)) = file.map(|f| panel.reveal(&f)) {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
             KeyCode::Char('n') => self.mode = Mode::Connections(0),
             KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
             KeyCode::Char(' ') => self.spawn_stats(),
@@ -1890,21 +2280,104 @@ impl App {
     }
 
     /// Search the active panel's directory in a worker thread, results arrive via `tick`.
-    fn spawn_find(&mut self, mask: String, re: Option<Regex>) {
-        let root = self.panels[self.active].path().to_owned();
+    fn spawn_find(&mut self, q: find::Query) {
+        let panel = &self.panels[self.active];
+        let remote = panel.remote().cloned();
+        let root = panel.path().to_owned();
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let c = cancel.clone();
-        thread::spawn(move || {
-            find::find(&root, &mask, re.as_ref(), &c, |e| drop(tx.send(e)));
+        let error = Arc::new(Mutex::new(None));
+        let (c, err) = (cancel.clone(), error.clone());
+        let is_remote = remote.is_some();
+        let re = q.content.as_ref().map(|c| c.re.clone());
+        thread::spawn(move || match remote {
+            None => find::find(&root, &q, &c, |h| drop(tx.send(h))),
+            Some(r) => {
+                let send = |entry| drop(tx.send(Hit { entry, line: None }));
+                let res = find::find_remote(r.as_ref(), &vfs::rpath(&root), &q, &c, send);
+                if let (Err(e), Ok(mut slot)) = (res, err.lock()) {
+                    *slot = Some(e.to_string());
+                }
+            }
         });
         self.mode = Mode::Found(Found {
             list: Vec::new(),
             sel: 0,
             running: true,
+            remote: is_remote,
+            error,
+            re,
             rx,
             cancel,
         });
+    }
+
+    /// Find files form: Enter searches, Tab/Up/Down move, Space toggles, Esc cancels.
+    fn find_form_key(&mut self, key: KeyEvent, mut form: FindForm) {
+        let remote = self.panels[self.active].remote().is_some();
+        let last = form.rows.len() - 1;
+        form.error = None;
+        match key.code {
+            KeyCode::Esc => return self.last_find = Some(form),
+            KeyCode::Enter => match form.query(self.exact, remote) {
+                Ok(q) => {
+                    self.last_find = Some(form);
+                    return self.spawn_find(q);
+                }
+                Err(e) => form.error = Some(e),
+            },
+            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
+            KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
+            KeyCode::F(2 | 3 | 8) => form = self.saved_search_key(key.code, form),
+            code => form.key(
+                code,
+                key.modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
+            ),
+        }
+        self.mode = Mode::FindForm(form);
+    }
+
+    /// F2 saves the form under the "Saved search" name, F3 loads the next saved search,
+    /// F8 deletes the named one; the file is written at once.
+    fn saved_search_key(&mut self, code: KeyCode, form: FindForm) -> FindForm {
+        let name = form.text(F_SAVED).trim().to_owned();
+        let pos = (self.searches.iter()).position(|l| l.split('\t').next() == Some(name.as_str()));
+        let (mut form, note) = match (code, pos) {
+            (KeyCode::F(3), _) if self.searches.is_empty() => {
+                (form, "No saved searches yet: F2 saves one.".to_owned())
+            }
+            (KeyCode::F(3), _) => {
+                let next = pos.map_or(0, |i| (i + 1) % self.searches.len());
+                let mut f = FindForm::from_line(&self.searches[next]);
+                f.focus = form.focus;
+                let note = format!("Loaded {}.", f.text(F_SAVED));
+                (f, note)
+            }
+            _ if name.is_empty() => (form, "Type a name in \"Saved search\" first.".into()),
+            (KeyCode::F(2), Some(i)) => {
+                self.searches[i] = form.to_line(&name);
+                (form, format!("Saved {name}."))
+            }
+            (KeyCode::F(2), None) => {
+                self.searches.push(form.to_line(&name));
+                (form, format!("Saved {name}."))
+            }
+            (_, Some(i)) => {
+                self.searches.remove(i);
+                (form, format!("Deleted {name}."))
+            }
+            (_, None) => (form, format!("No saved search {name}.")),
+        };
+        let saved = self
+            .searches_file
+            .as_ref()
+            .map(|f| cmdline::save_history(f, &self.searches));
+        form.error = Some(match saved {
+            Some(Err(e)) if code != KeyCode::F(3) => format!("Cannot save searches: {e}"),
+            _ => note,
+        });
+        form
     }
 
     /// Ctrl+Space: File Stats of the active panel's directory.
@@ -2036,6 +2509,13 @@ impl App {
         }
         self.stats = Some(st);
         match key.code {
+            KeyCode::F(3) if cmdline::opens_externally(&path) => self.open_preview(path),
+            KeyCode::F(4)
+                if !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && cmdline::opens_externally(&path) =>
+            {
+                self.open_default(path)
+            }
             KeyCode::F(3) => self.open_viewer(path),
             _ if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.external_edit(path, "code".into());
@@ -2044,17 +2524,44 @@ impl App {
         }
     }
 
-    /// Keys in the results: Esc stops a running search, then closes; Enter panelizes.
-    fn found_key(&mut self, code: KeyCode, mut f: Found) {
+    /// Keys in the results: Esc stops a running search, then closes; Enter panelizes;
+    /// F3/F4 open the selected file at its match, Ctrl+G jumps to it in the panel.
+    fn found_key(&mut self, key: KeyEvent, mut f: Found) {
         let page = self.page;
         let last = f.list.len().saturating_sub(1);
-        match code {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
             KeyCode::Esc if f.running => f.cancel.store(true, Ordering::Relaxed),
             KeyCode::Esc => return,
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::F(3 | 4) if f.remote => {
+                self.found = Some(f);
+                self.mode = Mode::Message("Remote results are only listed.".into());
+                return;
+            }
+            KeyCode::Enter => return self.panelize_found(f),
+            KeyCode::F(3 | 4) => {
+                let Some(hit) = f.list.get(f.sel).filter(|h| !h.entry.is_dir).cloned() else {
+                    self.mode = Mode::Found(f);
+                    return;
+                };
+                if f.re.is_some() {
+                    self.search.clone_from(&f.re);
+                }
+                self.found = Some(f);
+                let line = hit.line.map(|l| l.0);
+                return self.open_at(
+                    PathBuf::from(hit.entry.name),
+                    line,
+                    key.code == KeyCode::F(4),
+                );
+            }
+            KeyCode::Char('g') if ctrl && !f.remote => {
                 f.cancel.store(true, Ordering::Relaxed);
-                if !f.list.is_empty() {
-                    self.panels[self.active].panelize(f.list);
+                if let Some(h) = f.list.get(f.sel) {
+                    let file = PathBuf::from(&h.entry.name);
+                    if let Err(e) = self.panels[self.active].reveal(&file) {
+                        self.mode = Mode::Message(e.to_string());
+                    }
                 }
                 return;
             }
@@ -2067,6 +2574,47 @@ impl App {
             _ => {}
         }
         self.mode = Mode::Found(f);
+    }
+
+    /// Enter in the results: the found files (once each, in search order) become a virtual
+    /// panel; their first matching line stays for F3/F4 there.
+    fn panelize_found(&mut self, f: Found) {
+        f.cancel.store(true, Ordering::Relaxed);
+        if f.list.is_empty() {
+            return;
+        }
+        if f.re.is_some() {
+            self.search.clone_from(&f.re);
+        }
+        let (mut seen, mut lines, mut entries) = (HashSet::new(), HashMap::new(), Vec::new());
+        for h in f.list {
+            if !seen.insert(h.entry.name.clone()) {
+                continue;
+            }
+            if let Some((n, _)) = h.line {
+                lines.insert(h.entry.name.clone(), n);
+            }
+            entries.push(h.entry);
+        }
+        self.panels[self.active].panelize(entries, lines);
+    }
+
+    /// Viewer (top line) or editor (cursor) at `line` when known; media files open the
+    /// host's preview (F3) or default application (F4).
+    fn open_at(&mut self, path: PathBuf, line: Option<u64>, edit: bool) {
+        match (edit, cmdline::opens_externally(&path)) {
+            (false, true) => self.open_preview(path),
+            (true, true) => self.open_default(path),
+            (true, false) => self.edit_path_at(path, line),
+            (false, false) => {
+                self.open_viewer(path);
+                if let (Some(n), Mode::View { view, .. }) = (line, &mut self.mode)
+                    && let Err(e) = view.goto_line(n)
+                {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
+        }
     }
 
     fn ask(&mut self, ask: Ask) {
@@ -2172,20 +2720,6 @@ impl App {
                 let on = input.ask == Ask::Select;
                 self.panels[self.active].select_mask(&text, on);
             }
-            Ask::FindMask => {
-                input.pattern = text;
-                input.text.clear();
-                input.ask = Ask::FindText;
-                return Ok(false);
-            }
-            Ask::FindText => {
-                let re = if text.is_empty() {
-                    None
-                } else {
-                    Some(compile(&text)?)
-                };
-                self.spawn_find(mem::take(&mut input.pattern), re);
-            }
             Ask::Find => {
                 // empty answer repeats the last search
                 if !text.is_empty() {
@@ -2247,6 +2781,7 @@ impl App {
                     self.calc_dir_size(dir);
                 }
             }
+            KeyCode::Char('/') => self.mode = Mode::Filter(panel.filter().to_owned()),
             KeyCode::Char('+') => self.ask(Ask::Select),
             KeyCode::Char('-') => self.ask(Ask::Deselect),
             KeyCode::Char('*') => panel.invert_selection(),
@@ -2282,12 +2817,24 @@ impl App {
             KeyCode::F(7) if panel.archive().is_some() => {
                 self.mode = Mode::Message(READ_ONLY.into())
             }
-            KeyCode::F(3) => {
+            KeyCode::F(3 | 4)
+                if self
+                    .current_file()
+                    .is_some_and(|p| cmdline::opens_externally(&p)) =>
+            {
                 if let Some(path) = self.current_file() {
-                    self.open_viewer(path);
+                    match code {
+                        KeyCode::F(3) => self.open_preview(path),
+                        _ => self.open_default(path),
+                    }
                 }
             }
-            KeyCode::F(4) => self.edit(),
+            KeyCode::F(3 | 4) => {
+                if let Some(path) = self.current_file() {
+                    let line = self.panels[self.active].hit_line(path.as_os_str());
+                    self.open_at(path, line, code == KeyCode::F(4));
+                }
+            }
             KeyCode::F(5) => self.confirm(Op::Copy),
             KeyCode::F(6) => self.confirm(Op::Move),
             KeyCode::F(8) => self.confirm(Op::Delete),
@@ -2440,8 +2987,17 @@ impl App {
 
     /// Start the default application detached; `xdg-open` and friends return at once.
     fn open_default(&mut self, path: PathBuf) {
+        self.spawn_detached(path, cmdline::open_command);
+    }
+
+    /// F3 on media and office files: the host's quick preview.
+    fn open_preview(&mut self, path: PathBuf) {
+        self.spawn_detached(path, cmdline::view_command);
+    }
+
+    fn spawn_detached(&mut self, path: PathBuf, command: fn(&Path) -> std::process::Command) {
         use std::process::Stdio;
-        let spawned = cmdline::open_command(&path)
+        let spawned = command(&path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -2506,6 +3062,7 @@ impl App {
                 ..
             }) => paste_line(l, &text),
             Mode::Editor(_, l) => paste_line(l, &text),
+            Mode::FindForm(f) => f.paste(&text),
             Mode::Xfer(Xfer {
                 rename: Some(l), ..
             }) => paste_line(l, &text),
@@ -2540,8 +3097,8 @@ impl App {
         } else {
             active.side()
         };
-        let sides = (src_side.clone(), dst_side.clone());
-        self.spawn_xfer(sides, move |c, ask| {
+        let sides = (src_side, dst_side);
+        self.spawn_xfer(sides.clone(), move |c, ask| {
             // shortcut: needs temp space for the whole selection, upgrade to copy straight from the stream
             let (jobs, _tmp) = match arch {
                 None => (jobs, None),
@@ -2552,20 +3109,90 @@ impl App {
                     (out.into_iter().zip(targets).collect(), Some(tmp))
                 }
             };
-            let srcs: Vec<PathBuf> = jobs.iter().map(|(s, _)| s.clone()).collect();
-            vfs::scan(&src_side, &srcs, c);
-            let local = matches!((&src_side, &dst_side), (Side::Local, Side::Local));
-            let mv = op == Op::Move;
-            // Stops at the first error so the user sees it before anything else happens.
-            jobs.iter().try_for_each(|(src, target)| {
-                if !local {
-                    vfs::transfer(&src_side, src, &dst_side, target, mv, ask, c)
-                } else if mv {
-                    ops::move_(src, target, ask, c)
-                } else {
-                    ops::copy(src, target, ask, c)
-                }
-            })
+            copy_jobs(op, &jobs, &sides, c, ask)
+        });
+    }
+
+    /// Ctrl+C / Ctrl+X: remember the selection (or cursor entry) of the active panel for Ctrl+V.
+    fn clip_files(&mut self, op: Op) {
+        let panel = &self.panels[self.active];
+        if panel.archive().is_some() {
+            self.mode = Mode::Message("Copy from an archive with F5 instead.".into());
+            return;
+        }
+        let paths = panel.targets();
+        let side = panel.side();
+        if paths.is_empty() {
+            return;
+        }
+        if matches!(side, Side::Local) {
+            // also on the host clipboard, so Explorer, Finder or a file manager can paste them
+            #[cfg(not(test))]
+            {
+                let host = paths.clone();
+                thread::spawn(move || tc_core::hostclip::write_files(&host));
+            }
+            // our own list is not a new host paste at the next Ctrl+V
+            self.last_host = paths.clone();
+        }
+        self.file_clip = Some(FileClip { op, paths, side });
+    }
+
+    /// True where keys go to the file panel (no prompt, dialog or help open).
+    pub fn panel_keys(&self) -> bool {
+        matches!(self.mode, Mode::Normal) && self.idle()
+    }
+
+    /// Ctrl+V: copy or move the files of the host clipboard (if they changed since the last
+    /// Ctrl+V) or of Ctrl+C / Ctrl+X into the active panel's directory; conflicts ask.
+    pub fn paste(&mut self) {
+        // the host tools (PowerShell starts in about a second) run in a worker
+        let dest = self.panels[self.active].path().to_owned();
+        self.spawn("Reading clipboard", dest, 1, false, |_, cancel| {
+            // tests never read the developer's real clipboard
+            let files = if cfg!(test) {
+                Vec::new()
+            } else {
+                tc_core::hostclip::read_files()
+            };
+            Done::HostFiles((!cancel.load(Ordering::Relaxed)).then_some(files))
+        });
+    }
+
+    fn paste_with(&mut self, host: Vec<PathBuf>) {
+        let fresh = !host.is_empty() && host != self.last_host;
+        let host_clip = fresh.then(|| FileClip {
+            op: Op::Copy,
+            paths: host.clone(),
+            side: Side::Local,
+        });
+        self.last_host = host;
+        let Some(clip) = host_clip.or_else(|| self.file_clip.clone()) else {
+            self.mode =
+                Mode::Message("Nothing copied or cut yet: Ctrl+C or Ctrl+X on files first.".into());
+            return;
+        };
+        let active = &self.panels[self.active];
+        if active.archive().is_some() {
+            self.mode = Mode::Message(READ_ONLY.into());
+            return;
+        }
+        let dest = active.path().to_owned();
+        let sides = (clip.side.clone(), active.side());
+        let jobs: Vec<(PathBuf, PathBuf)> = clip
+            .paths
+            .iter()
+            .filter_map(|src| Some((src.clone(), dest.join(src.file_name()?))))
+            .filter(|(src, target)| src != target)
+            .collect();
+        if jobs.is_empty() {
+            self.mode = Mode::Message("Those files are already in this directory.".into());
+            return;
+        }
+        let op = clip.op;
+        self.cut_pending = op == Op::Move;
+        self.spawn_xfer(sides.clone(), move |c, ask| {
+            copy_jobs(op, &jobs, &sides, c, ask)
         });
     }
 
@@ -2858,20 +3485,19 @@ impl App {
         };
     }
 
-    fn edit(&mut self) {
-        if let Some(path) = self.current_file() {
-            self.edit_path(path);
-        }
+    fn edit_path(&mut self, path: PathBuf) {
+        self.edit_path_at(path, None);
     }
 
-    fn edit_path(&mut self, path: PathBuf) {
+    /// Editor with the cursor on `line` (1-based) when given.
+    fn edit_path_at(&mut self, path: PathBuf, line: Option<u64>) {
         let ask = |text: String, can_load| Mode::AskViewer {
             path: path.clone(),
             text,
             can_load,
         };
         match edit::check_size(&path) {
-            Ok(SizeCheck::Ok) => self.spawn_load(path.clone()),
+            Ok(SizeCheck::Ok) => self.spawn_load(path.clone(), line),
             Ok(SizeCheck::Large(n)) => {
                 self.mode = ask(
                     format!(
@@ -2918,11 +3544,15 @@ impl App {
         });
     }
 
-    fn spawn_load(&mut self, path: PathBuf) {
+    fn spawn_load(&mut self, path: PathBuf, line: Option<u64>) {
         let total = std::fs::metadata(&path).map_or(1, |m| m.len());
         let p = path.clone();
         self.spawn("Loading", path, total, false, move |progress, cancel| {
-            Done::Loaded(Editor::open(&p, progress, cancel))
+            let mut loaded = Editor::open(&p, progress, cancel);
+            if let (Ok(e), Some(n)) = (&mut loaded, line) {
+                e.goto_line(usize::try_from(n).unwrap_or(usize::MAX));
+            }
+            Done::Loaded(loaded)
         });
     }
 
@@ -3011,6 +3641,10 @@ impl App {
             Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
             Ok(XMsg::Done(error)) => {
                 self.mode = Mode::Normal;
+                // a failed cut keeps its clipboard, so Ctrl+V can retry
+                if mem::take(&mut self.cut_pending) && error.is_none() {
+                    self.file_clip = None;
+                }
                 if let Some(st) = &mut self.stats
                     && let Some(i) = st.deleting.take()
                     && error.is_none()
@@ -3041,6 +3675,11 @@ impl App {
             && let Some(st) = self.stats.take()
         {
             self.mode = Mode::Stats(st);
+        }
+        if matches!(self.mode, Mode::Normal)
+            && let Some(f) = self.found.take()
+        {
+            self.mode = Mode::Found(f);
         }
         self.dir_job_tick();
         if self.view_tmp.is_some() && !matches!(self.mode, Mode::View { .. }) {
@@ -3124,6 +3763,8 @@ impl App {
             Done::Loaded(Err(Error::Binary)) => self.open_viewer(path),
             Done::Loaded(Err(Error::Cancelled)) => {}
             Done::Loaded(Err(e)) => self.mode = Mode::Message(e.to_string()),
+            Done::HostFiles(Some(host)) => self.paste_with(host),
+            Done::HostFiles(None) => {}
             Done::Saved(_, Ok(())) if exit => self.leave_editor(),
             Done::Saved(editor, result) => {
                 let error = result.err().filter(|e| !matches!(e, Error::Cancelled));
@@ -3134,6 +3775,30 @@ impl App {
             }
         }
     }
+}
+
+/// Copy or move `jobs` (source, target) between the sides; stops at the first error.
+fn copy_jobs(
+    op: Op,
+    jobs: &[(PathBuf, PathBuf)],
+    sides: &(Side, Side),
+    c: &ops::Progress,
+    ask: ops::Ask,
+) -> tc_core::Result<()> {
+    let (src_side, dst_side) = sides;
+    let srcs: Vec<PathBuf> = jobs.iter().map(|(s, _)| s.clone()).collect();
+    vfs::scan(src_side, &srcs, c);
+    let local = matches!((src_side, dst_side), (Side::Local, Side::Local));
+    let mv = op == Op::Move;
+    jobs.iter().try_for_each(|(src, target)| {
+        if !local {
+            vfs::transfer(src_side, src, dst_side, target, mv, ask, c)
+        } else if mv {
+            ops::move_(src, target, ask, c)
+        } else {
+            ops::copy(src, target, ask, c)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -3407,14 +4072,52 @@ mod tests {
     }
 
     #[test]
-    fn f1_opens_help_any_key_closes() {
+    fn f1_help_esc_closes_typing_filters() {
         let tmp = tempfile::tempdir().unwrap();
         let p = || Panel::open(tmp.path()).unwrap();
         let mut app = App::new(p(), p());
         key(&mut app, KeyCode::F(1));
         assert!(app.help);
-        key(&mut app, KeyCode::Char('x'));
+        for c in "ncdu".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(app.help_entries().len(), 1);
+        assert!(app.help_entries()[0].0.contains("FILE STATS"));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.help && app.help_filter.is_empty());
+        key(&mut app, KeyCode::Esc);
         assert!(!app.help && matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn help_down_scrolls_without_key_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        key(&mut app, KeyCode::F(1));
+        type_keys(&mut app, "== search");
+        assert!(app.help_entries().iter().all(|e| e.1.is_none()));
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.help_scroll, 1);
+    }
+
+    #[test]
+    fn help_filter_and_enter_runs_selected_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        key(&mut app, KeyCode::F(1));
+        // first key line is selected; Down moves to the next key line
+        let first = app.help_sel;
+        key(&mut app, KeyCode::Down);
+        assert!(app.help_sel > first && app.help_action_at(app.help_sel).is_some());
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.help_sel, first);
+        // filter to Ctrl+B bookmarks, Enter runs it
+        type_text(&mut app, "bookmarks");
+        assert!(app.help_action_at(app.help_sel).is_some());
+        key(&mut app, KeyCode::Enter);
+        assert!(!app.help && matches!(app.mode, Mode::Hotlist(_)));
     }
 
     #[test]
@@ -3553,6 +4256,68 @@ mod tests {
         text.chars().for_each(|c| key(app, KeyCode::Char(c)));
     }
 
+    /// Fills the find form (name, then content regex, which ticks its checkbox) and searches.
+    fn find_in_form(app: &mut App, mask: &str, content: Option<&str>) {
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        type_keys(app, mask);
+        if let Some(re) = content {
+            form_focus(app, F_CONTENT);
+            type_keys(app, re);
+        }
+        key(app, KeyCode::Enter);
+    }
+
+    fn form_focus(app: &mut App, label: &str) {
+        let Mode::FindForm(f) = &mut app.mode else {
+            panic!("no find form");
+        };
+        f.focus = f.rows.iter().position(|r| r.label() == label).unwrap();
+    }
+
+    fn wait_found(app: &mut App) {
+        while matches!(&app.mode, Mode::Found(f) if f.running) {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn find_form_bad_field_keeps_form_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        find_in_form(&mut app, "*", None); // starts a search
+        assert!(matches!(app.mode, Mode::Found(_)));
+        key(&mut app, KeyCode::Esc); // stop
+        while matches!(&app.mode, Mode::Found(f) if f.running) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::Esc); // close
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        type_keys(&mut app, "*");
+        form_focus(&mut app, F_MIN);
+        type_keys(&mut app, "10X");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.mode, Mode::FindForm(f) if f.error.is_some()));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+        // Ctrl+F reopens the last form; a typed or pasted regex ticks content search
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        let Mode::FindForm(f) = &mut app.mode else {
+            panic!("no find form");
+        };
+        assert_eq!(
+            (f.text(F_NAME), f.text(F_MIN), f.error.as_deref()),
+            ("**", "10X", None)
+        );
+        assert!(!f.checked(F_CONTENT_ON));
+        form_focus(&mut app, F_CONTENT);
+        app.on_paste("needle".into());
+        assert!(
+            matches!(&app.mode, Mode::FindForm(f) if f.checked(F_CONTENT_ON) && f.text(F_CONTENT) == "needle")
+        );
+    }
+
     /// File Stats on a remote panel: scan, view, `:` over ssh and permanent delete.
     #[test]
     fn remote_stats_view_cmd_and_delete() {
@@ -3656,8 +4421,8 @@ mod tests {
         key(&mut app, KeyCode::Enter);
         settle(&mut app);
         assert_eq!(mem.paths(), ["/", "/d"]);
-        with(&mut app, KeyCode::F(7), KeyModifiers::ALT);
-        assert!(matches!(&app.mode, Mode::Message(m) if m == REMOTE));
+        with(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(matches!(&app.mode, Mode::FindForm(_)));
         key(&mut app, KeyCode::Esc);
         // ".." at the remote root goes back to the local directory
         app.panels[1].set_cursor(0);
@@ -4013,13 +4778,8 @@ mod tests {
             Panel::open(dir.path()).unwrap(),
             Panel::open(dir.path()).unwrap(),
         );
-        app.on_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::ALT));
-        type_text(&mut app, "*.txt");
-        type_text(&mut app, "hello");
-        while matches!(&app.mode, Mode::Found(f) if f.running) {
-            app.tick();
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        find_in_form(&mut app, "*.txt", Some("hello"));
+        wait_found(&mut app);
         assert!(matches!(&app.mode, Mode::Found(f) if f.list.len() == 1));
         key(&mut app, KeyCode::Enter);
         assert!(matches!(app.mode, Mode::Normal) && app.panels[0].is_virtual());
@@ -4028,15 +4788,172 @@ mod tests {
         key(&mut app, KeyCode::Esc); // back to the directory
         assert!(!app.panels[0].is_virtual());
         // Esc cancels a running search, a second Esc closes
-        app.on_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::ALT));
-        type_text(&mut app, "");
-        type_text(&mut app, "");
+        find_in_form(&mut app, "", None);
         key(&mut app, KeyCode::Esc);
         while matches!(&app.mode, Mode::Found(f) if f.running) {
             app.tick();
         }
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn found_lines_open_at_match_and_feed_the_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::create_dir(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/b.txt"), "x\nhello one\ny\nhello two\n").unwrap();
+        let mut app = two_panels(d, d);
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        form_focus(&mut app, F_EVERY);
+        key(&mut app, KeyCode::Char(' '));
+        form_focus(&mut app, F_CONTENT);
+        type_keys(&mut app, "hello");
+        key(&mut app, KeyCode::Enter);
+        wait_found(&mut app);
+        let Mode::Found(f) = &app.mode else {
+            panic!("no results");
+        };
+        let lines: Vec<_> = f.list.iter().map(|h| h.line.clone().unwrap().0).collect();
+        assert_eq!(lines, [2, 4]);
+        assert!(fmt::found_row(&f.list[1]).ends_with("b.txt:4: hello two"));
+        // F3 opens the second hit at its line; closing the viewer brings the list back
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        let Mode::View { view, .. } = &mut app.mode else {
+            panic!("no viewer");
+        };
+        assert_eq!(view.lines(1, 80).unwrap(), ["hello two"]);
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        assert!(matches!(&app.mode, Mode::Found(f) if f.sel == 1));
+        // Enter: one panel row per file, shown below the search root; F3 there at the first hit
+        key(&mut app, KeyCode::Enter);
+        let file = d.join("sub/b.txt");
+        assert_eq!(app.panels[0].entries().len(), 1);
+        assert_eq!(app.panels[0].hit_line(file.as_os_str()), Some(2));
+        let today = jiff::ZonedDateTime::now().date();
+        let shown = &fmt::entry_cols(&app, 0, &app.panels[0].entries()[0], today)[0];
+        assert_eq!(
+            shown.trim(),
+            Path::new("sub").join("b.txt").to_string_lossy()
+        );
+        key(&mut app, KeyCode::F(3));
+        let Mode::View { view, .. } = &mut app.mode else {
+            panic!("no viewer");
+        };
+        assert_eq!(view.lines(1, 80).unwrap(), ["hello one"]);
+        assert!(app.search.as_ref().is_some_and(|re| re.is_match("hello")));
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        // F4 puts the editor cursor on the hit
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        assert!(matches!(&app.mode, Mode::Edit { editor, .. } if editor.cursor.0 == 1));
+        key(&mut app, KeyCode::Esc);
+        // Ctrl+G: the real directory with the cursor on the file
+        with(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        settle(&mut app);
+        let p = &app.panels[0];
+        assert!(!p.is_virtual() && p.path() == d.join("sub"));
+        assert_eq!(p.current().unwrap().name, "b.txt");
+    }
+
+    #[test]
+    fn saved_searches_save_load_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        let file = dir.path().join("searches");
+        app.searches_file = Some(file.clone());
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        type_keys(&mut app, "*.rs");
+        form_focus(&mut app, F_HIDDEN);
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::F(2)); // no name yet
+        assert!(
+            matches!(&app.mode, Mode::FindForm(f) if f.error.as_deref().is_some_and(|e| e.contains("name")))
+        );
+        form_focus(&mut app, F_SAVED);
+        type_keys(&mut app, "rust");
+        key(&mut app, KeyCode::F(2));
+        assert_eq!(cmdline::load_history(&file).unwrap().len(), 1);
+        key(&mut app, KeyCode::Esc);
+        app.last_find = None; // a fresh form
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        key(&mut app, KeyCode::F(3));
+        let Mode::FindForm(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!((f.text(F_NAME), f.text(F_SAVED)), ("*.rs", "rust"));
+        assert!(f.checked(F_HIDDEN) && !f.checked(F_FOLLOW));
+        key(&mut app, KeyCode::F(8));
+        assert!(cmdline::load_history(&file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ctrl_v_pastes_changed_host_files_before_app_clip() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("h.txt"), "host\n").unwrap();
+        std::fs::write(src.path().join("a.txt"), "app\n").unwrap();
+        let mut app = two_panels(src.path(), dst.path());
+        key(&mut app, KeyCode::Tab); // paste into the destination panel
+        // host files: pasted once, then the app clipboard is used again
+        app.paste_with(vec![src.path().join("h.txt")]);
+        wait(&mut app);
+        assert!(dst.path().join("h.txt").exists());
+        app.file_clip = Some(FileClip {
+            op: Op::Copy,
+            paths: vec![src.path().join("a.txt")],
+            side: Side::Local,
+        });
+        app.paste_with(vec![src.path().join("h.txt")]);
+        wait(&mut app);
+        assert!(dst.path().join("a.txt").exists());
+    }
+
+    #[test]
+    fn failed_cut_paste_keeps_the_clip() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let mut app = two_panels(src.path(), dst.path());
+        app.file_clip = Some(FileClip {
+            op: Op::Move,
+            paths: vec![src.path().join("gone.txt")],
+            side: Side::Local,
+        });
+        key(&mut app, KeyCode::Tab);
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(app.file_clip.is_some() && !dst.path().join("gone.txt").exists());
+    }
+
+    #[test]
+    fn ctrl_c_v_copies_and_ctrl_x_v_moves_between_panels() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), "one\n").unwrap();
+        std::fs::write(src.path().join("b.txt"), "two\n").unwrap();
+        let mut app = two_panels(src.path(), dst.path());
+        key(&mut app, KeyCode::Down); // a.txt, the first entry after ".."
+        with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Tab); // paste into the other panel
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(dst.path().join("a.txt").exists() && src.path().join("a.txt").exists());
+        // cut b.txt from the left panel and paste it into the right one: it moves
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Down); // b.txt
+        with(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Tab);
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(dst.path().join("b.txt").exists() && !src.path().join("b.txt").exists());
+        assert!(app.file_clip.is_none());
+        // nothing left to paste
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(matches!(&app.mode, Mode::Message(m) if m.starts_with("Nothing copied")));
     }
 
     fn procs(app: &App) -> &Procs {

@@ -116,6 +116,8 @@ pub struct Panel {
     pos: usize,
     /// Panelized result list: entry names are absolute paths, `path` is where Backspace/Esc returns to.
     virt: bool,
+    /// Line of the first content match per found entry (by name), for F3/F4 at the match.
+    hits: HashMap<OsString, u64>,
     /// Open archive and the directory inside it (`""` = root); `path` is then the archive file joined with it.
     archive: Option<(Arc<Archive>, String)>,
     /// Connected remote; `path` is then the remote path and `local` the directory ".." at its root returns to.
@@ -147,6 +149,7 @@ impl Panel {
             filter: String::new(),
             all: None,
             virt: false,
+            hits: HashMap::new(),
             archive: None,
             remote: None,
             sort: (SortKey::Name, false),
@@ -166,11 +169,7 @@ impl Panel {
     }
 
     /// Same key reverses the order, another key sorts ascending. In memory, cursor stays on its entry.
-    /// Found lists keep their search order.
     pub fn set_sort(&mut self, key: SortKey) {
-        if self.virt {
-            return;
-        }
         self.sort = (key, self.sort.0 == key && !self.sort.1);
         let keep = self.current().map(|e| e.name.clone());
         let sort = self.sort;
@@ -303,10 +302,17 @@ impl Panel {
         self.virt
     }
 
-    /// Show `entries` (names are absolute paths) as a flat list; `leave_virtual` goes back.
-    pub fn panelize(&mut self, entries: Vec<Entry>) {
+    /// First content match line of a found entry; `None` outside a found list.
+    pub fn hit_line(&self, name: &OsStr) -> Option<u64> {
+        self.hits.get(name).copied().filter(|_| self.virt)
+    }
+
+    /// Show `entries` (names are absolute paths) as a flat list in search order; `hits` holds the
+    /// first matching line per name. `leave_virtual` goes back.
+    pub fn panelize(&mut self, entries: Vec<Entry>, hits: HashMap<OsString, u64>) {
         self.cancel_load();
         self.entries = entries;
+        self.hits = hits;
         self.all = None;
         self.filter.clear();
         self.selected.clear();
@@ -558,10 +564,11 @@ impl Panel {
     /// Select (`on`) or deselect visible files matching `masks`; directories are left alone.
     pub fn select_mask(&mut self, masks: &str, on: bool) {
         self.sel_sum.set(None);
+        let masks = crate::search::Masks::new(masks);
         for e in self
             .entries
             .iter()
-            .filter(|e| !e.is_dir && crate::search::mask_match(masks, &e.name.to_string_lossy()))
+            .filter(|e| !e.is_dir && masks.matches(&e.name.to_string_lossy()))
         {
             if on {
                 self.selected.insert(e.name.clone());
@@ -619,6 +626,19 @@ impl Panel {
             focus: None,
         };
         self.load_on(None, path, then)
+    }
+
+    /// Jump to the local directory of `file` with the cursor on it (leaves a found list).
+    pub fn reveal(&mut self, file: &Path) -> Result<()> {
+        let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+            return Ok(());
+        };
+        let then = Then::Show {
+            pos: None,
+            visit: true,
+            focus: Some(name.to_owned()),
+        };
+        self.load_on(None, dir.to_owned(), then)
     }
 
     /// Change to `path` on the panel's current side (local or remote).
@@ -772,6 +792,7 @@ impl Panel {
         self.all = None;
         self.filter.clear();
         self.virt = false;
+        self.hits.clear();
         self.archive = None;
         self.path = path;
         self.cursor = 0;
@@ -1102,7 +1123,11 @@ mod tests {
         fs::write(&b, "").unwrap();
         let mut p = Panel::open(tmp.path()).unwrap();
         let list = [&a, &b].map(|f| entry_for(f.clone().into_os_string(), f).unwrap());
-        p.panelize(list.to_vec());
+        p.panelize(
+            list.to_vec(),
+            HashMap::from([(a.clone().into_os_string(), 3)]),
+        );
+        assert_eq!(p.hit_line(a.as_os_str()), Some(3));
         assert!(p.is_virtual());
         p.toggle_select();
         assert_eq!(p.targets(), std::slice::from_ref(&a));

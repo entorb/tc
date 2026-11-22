@@ -151,6 +151,48 @@ pub fn shell_command(cmd: &str, dir: &Path) -> Command {
     c
 }
 
+/// Media and office files: F3/F4 hand them to the desktop's default application, not the text viewer.
+pub fn opens_externally(path: &Path) -> bool {
+    const EXT: &[&str] = &[
+        "mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "mp4", "mkv", "avi", "mov", "webm",
+        "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "heic", "pdf", "doc", "docx",
+        "odt", "xls", "xlsx", "ods", "ppt", "pptx", "odp",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EXT.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// F3 on media and office files: the host's quick preview (Quick Look on macOS, Photo Viewer
+/// for images on Windows, else the default application).
+#[cfg(target_os = "macos")]
+pub fn view_command(path: &Path) -> Command {
+    let mut c = Command::new("qlmanage");
+    c.args(["-p"]).arg(path);
+    c
+}
+
+#[cfg(windows)]
+pub fn view_command(path: &Path) -> Command {
+    let image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tif" | "tiff"
+        )
+    });
+    if !image {
+        return open_command(path);
+    }
+    let mut c = Command::new("rundll32");
+    c.arg("shimgvw.dll,ImageView_Fullscreen").arg(path);
+    c
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn view_command(path: &Path) -> Command {
+    open_command(path)
+}
+
 /// Open `path` with the desktop's default application.
 #[cfg(target_os = "macos")]
 pub fn open_command(path: &Path) -> Command {
@@ -234,6 +276,27 @@ mod tests {
         assert!(load_history(&file).unwrap().is_empty());
         save_history(&file, &h).unwrap();
         assert_eq!(load_history(&file).unwrap(), h);
+    }
+
+    #[test]
+    fn media_and_office_open_externally() {
+        assert!(opens_externally(Path::new("a/Song.MP3")));
+        assert!(opens_externally(Path::new("sheet.xlsx")));
+        assert!(!opens_externally(Path::new("notes.txt")));
+        assert!(!opens_externally(Path::new("noext")));
+    }
+
+    #[test]
+    fn view_command_per_platform() {
+        let c = view_command(Path::new("f.jpg"));
+        let prog = if cfg!(windows) {
+            "rundll32"
+        } else if cfg!(target_os = "macos") {
+            "qlmanage"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(c.get_program(), prog);
     }
 
     #[test]

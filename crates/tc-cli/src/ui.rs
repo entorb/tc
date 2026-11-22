@@ -2,14 +2,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
 use regex::Regex;
 
 use ratatui::widgets::ListState;
 use std::path::{Path, PathBuf};
-use tc::app::{App, FOOTER, Found, MENUS, Mode, Stats, menu_drop};
+use tc::app::{App, FOOTER, FindForm, Found, MENUS, Mode, Stats, menu_drop};
 use tc::fmt::{
     self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
     help, input_dialog, panel_info, panel_title, stats_footer, stats_row,
@@ -138,6 +138,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match &app.mode {
         Mode::Found(f) => draw_found(frame, f),
+        Mode::FindForm(form) => draw_find_form(frame, form),
         Mode::Stats(st) => draw_stats(frame, st, None),
         Mode::Procs(_) => draw_procs(frame, app),
         Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l)),
@@ -223,12 +224,7 @@ fn draw_found(frame: &mut Frame, f: &Found) {
     let area = frame.area();
     let h = usize::from(area.height.saturating_sub(2)).max(1);
     let start = f.sel / h * h; // page-wise, so only visible rows are built
-    let items = f
-        .list
-        .iter()
-        .skip(start)
-        .take(h)
-        .map(|e| e.name.to_string_lossy());
+    let items = f.list.iter().skip(start).take(h).map(fmt::found_row);
     let title = found_title(f);
     let list = List::new(items)
         .style(PANEL)
@@ -237,6 +233,42 @@ fn draw_found(frame: &mut Frame, f: &Found) {
     let mut st = ListState::default().with_selected(Some(f.sel.saturating_sub(start)));
     frame.render_widget(Clear, area);
     frame.render_stateful_widget(list, area, &mut st);
+}
+
+/// Find files form popup over the panels: fields, checkboxes, the error and the keys.
+fn draw_find_form(frame: &mut Frame, form: &FindForm) {
+    let mut lines: Vec<Line> = fmt::find_form_lines(form)
+        .into_iter()
+        .map(|(text, focus)| Line::raw(text).style(if focus { BAR } else { PANEL }))
+        .collect();
+    if let Some(e) = &form.error {
+        lines.push(Line::raw(e.clone()).style(PANEL.fg(Color::LightRed)));
+    }
+    lines.push(Line::raw(""));
+    lines.extend(
+        fmt::FIND_FORM_KEYS
+            .lines()
+            .map(|k| Line::raw(k).style(PANEL)),
+    );
+    let area = frame.area();
+    let w = area.width.min(76);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let [col] = Layout::horizontal([Constraint::Length(w)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [popup] = Layout::vertical([Constraint::Length(h)])
+        .flex(Flex::Center)
+        .areas(col);
+    // short terminals: scroll so the focused row stays visible
+    let inner = usize::from(h.saturating_sub(2));
+    let off = u16::try_from((form.focus + 1).saturating_sub(inner)).unwrap_or(0);
+    frame.render_widget(Clear, popup);
+    let block = themed_block().title(" Find files ");
+    let text = Paragraph::new(lines)
+        .style(PANEL)
+        .block(block)
+        .scroll((off, 0));
+    frame.render_widget(text, popup);
 }
 
 /// File Stats: entries of the browsed directory, largest first, with share and bar.
@@ -317,8 +349,9 @@ fn draw_procs(frame: &mut Frame, app: &mut App) {
 
 fn draw_input(frame: &mut Frame, app: &mut App) {
     if app.help {
-        let (title, text) = help(&app.mode);
-        let lines = text.lines().count();
+        let title = help(&app.mode).0;
+        let text = app.help_entries();
+        let lines = text.len();
         let [h] = Layout::horizontal([Constraint::Length(frame.area().width.min(72))])
             .flex(Flex::Center)
             .areas(frame.area());
@@ -328,17 +361,32 @@ fn draw_input(frame: &mut Frame, app: &mut App) {
         .flex(Flex::Center)
         .areas(h);
         let rows = usize::from(area.height.saturating_sub(2));
+        app.help_rows = rows;
         app.help_scroll = app.help_scroll.min(lines.saturating_sub(rows));
         frame.render_widget(Clear, area);
         app.help_area = Block::bordered().inner(area);
         let block = Block::bordered()
             .border_type(BorderType::Double)
             .title(title)
-            .title_bottom(" Up/Down scroll  other key closes ");
+            .title_bottom(format!(
+                " Find: {}_  Up/Down select  Enter run  Esc close ",
+                app.help_filter
+            ));
+        let shown: Vec<Line> = text
+            .into_iter()
+            .enumerate()
+            .map(|(i, (l, action))| {
+                let sel = i == app.help_sel && action.is_some();
+                Line::raw(l).style(if sel {
+                    BAR.add_modifier(Modifier::REVERSED)
+                } else {
+                    BAR
+                })
+            })
+            .collect();
         frame.render_widget(
-            Paragraph::new(text)
+            Paragraph::new(shown)
                 .scroll((app.help_scroll as u16, 0))
-                .style(BAR)
                 .block(block),
             area,
         );
