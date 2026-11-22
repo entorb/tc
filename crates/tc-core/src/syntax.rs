@@ -17,6 +17,8 @@ pub enum Kind {
 pub struct Lang {
     /// Markdown: `#` headings, `**bold**`, `*italic*`, ``` fences with `#` comments, no numbers.
     pub markdown: bool,
+    /// Line comments only at the line start (after spaces), like `.properties`.
+    comment_at_start: bool,
     line: &'static [&'static str],
     block: Option<(&'static str, &'static str)>,
     quotes: &'static str,
@@ -86,6 +88,7 @@ const C_LIKE: &[&str] = &[
 const RUST: Lang = Lang {
     line: &["//"],
     markdown: false,
+    comment_at_start: false,
     block: Some(("/*", "*/")),
     quotes: "\"",
     keywords: &[
@@ -99,6 +102,7 @@ const RUST: Lang = Lang {
 const C: Lang = Lang {
     line: &["//"],
     markdown: false,
+    comment_at_start: false,
     block: Some(("/*", "*/")),
     quotes: "\"'",
     keywords: C_LIKE,
@@ -107,6 +111,7 @@ const C: Lang = Lang {
 const JS: Lang = Lang {
     line: &["//"],
     markdown: false,
+    comment_at_start: false,
     block: Some(("/*", "*/")),
     quotes: "\"'`",
     keywords: &[
@@ -164,6 +169,7 @@ const JS: Lang = Lang {
 const JAVA: Lang = Lang {
     line: &["//"],
     markdown: false,
+    comment_at_start: false,
     block: Some(("/*", "*/")),
     quotes: "\"'",
     keywords: &[
@@ -228,6 +234,7 @@ const JAVA: Lang = Lang {
 const GO: Lang = Lang {
     line: &["//"],
     markdown: false,
+    comment_at_start: false,
     block: Some(("/*", "*/")),
     quotes: "\"'`",
     keywords: &[
@@ -265,6 +272,7 @@ const GO: Lang = Lang {
 const PYTHON: Lang = Lang {
     line: &["#"],
     markdown: false,
+    comment_at_start: false,
     block: None,
     quotes: "\"'",
     keywords: &[
@@ -278,6 +286,7 @@ const PYTHON: Lang = Lang {
 const SHELL: Lang = Lang {
     line: &["#"],
     markdown: false,
+    comment_at_start: false,
     block: None,
     quotes: "\"'",
     keywords: &[
@@ -289,6 +298,7 @@ const SHELL: Lang = Lang {
 const RUBY: Lang = Lang {
     line: &["#"],
     markdown: false,
+    comment_at_start: false,
     block: None,
     quotes: "\"'",
     keywords: &[
@@ -301,6 +311,7 @@ const RUBY: Lang = Lang {
 const LUA: Lang = Lang {
     line: &["--"],
     markdown: false,
+    comment_at_start: false,
     block: None,
     quotes: "\"'",
     keywords: &[
@@ -312,6 +323,7 @@ const LUA: Lang = Lang {
 const PHP: Lang = Lang {
     line: &["//", "#"],
     markdown: false,
+    comment_at_start: false,
     block: Some(("/*", "*/")),
     quotes: "\"'",
     keywords: &[
@@ -359,6 +371,7 @@ const PHP: Lang = Lang {
 const SQL: Lang = Lang {
     line: &["--"],
     markdown: false,
+    comment_at_start: false,
     block: Some(("/*", "*/")),
     quotes: "'\"",
     keywords: &[
@@ -375,14 +388,25 @@ const SQL: Lang = Lang {
 const CONF: Lang = Lang {
     line: &["#", ";"],
     markdown: false,
+    comment_at_start: false,
     block: None,
     quotes: "\"'",
     keywords: &["true", "false", "yes", "no", "on", "off", "null"],
 };
 
+const PROPERTIES: Lang = Lang {
+    line: &["#", "!"],
+    markdown: false,
+    comment_at_start: true,
+    block: None,
+    quotes: "",
+    keywords: &["true", "false"],
+};
+
 const JSON: Lang = Lang {
     line: &[],
     markdown: false,
+    comment_at_start: false,
     block: None,
     quotes: "\"",
     keywords: &["true", "false", "null"],
@@ -391,6 +415,7 @@ const JSON: Lang = Lang {
 const MARKUP: Lang = Lang {
     line: &[],
     markdown: false,
+    comment_at_start: false,
     block: Some(("<!--", "-->")),
     quotes: "\"'",
     keywords: &[],
@@ -399,6 +424,7 @@ const MARKUP: Lang = Lang {
 const MARKDOWN: Lang = Lang {
     line: &[],
     markdown: true,
+    comment_at_start: false,
     block: Some(("<!--", "-->")),
     quotes: "`",
     keywords: &[],
@@ -420,6 +446,7 @@ pub fn lang(path: &Path) -> Option<&'static Lang> {
         "php" => &PHP,
         "sql" => &SQL,
         "toml" | "ini" | "cfg" | "conf" | "yaml" | "yml" => &CONF,
+        "properties" => &PROPERTIES,
         "json" => &JSON,
         "html" | "htm" | "xml" | "svg" => &MARKUP,
         "md" | "markdown" => &MARKDOWN,
@@ -430,6 +457,66 @@ pub fn lang(path: &Path) -> Option<&'static Lang> {
 /// Markdown: `line` opens or closes a code fence.
 pub fn is_fence(line: &str) -> bool {
     line.trim_start().starts_with("```")
+}
+
+/// Markdown block a line belongs to, for [`md_blank_lines`].
+#[derive(Clone, Copy, PartialEq)]
+enum MdBlock {
+    Blank,
+    Heading,
+    List,
+    /// Lines of the n-th code fence, both fence lines included.
+    Code(usize),
+    Text,
+}
+
+fn md_list_item(line: &str) -> bool {
+    let t = line.trim_start();
+    let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    ["- ", "* ", "+ "].iter().any(|p| t.starts_with(p))
+        || (digits > 0 && (t[digits..].starts_with(". ") || t[digits..].starts_with(") ")))
+}
+
+/// Lines (0-based) a blank line belongs before, so headings, lists and ``` blocks are
+/// surrounded by blank lines. Insert-only: nothing inside a code block changes, no blank is doubled.
+pub fn md_blank_lines(lines: &[&str]) -> Vec<usize> {
+    let (mut fences, mut open) = (0, false);
+    let mut prev = MdBlock::Blank;
+    let mut out = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        let line = raw.trim_end();
+        let block = if is_fence(line) {
+            if !open {
+                fences += 1;
+            }
+            open = !open;
+            MdBlock::Code(fences)
+        } else if open {
+            MdBlock::Code(fences)
+        } else if line.is_empty() {
+            MdBlock::Blank
+        } else if line.starts_with('#')
+            && matches!(
+                line.trim_start_matches('#').chars().next(),
+                None | Some(' ')
+            )
+        {
+            MdBlock::Heading
+        } else if md_list_item(line) || (prev == MdBlock::List && line.starts_with(' ')) {
+            MdBlock::List
+        } else {
+            MdBlock::Text
+        };
+        let apart = block != prev || block == MdBlock::Heading;
+        let framed = [prev, block]
+            .iter()
+            .any(|b| !matches!(b, MdBlock::Text | MdBlock::Blank));
+        if i > 0 && apart && framed && prev != MdBlock::Blank && block != MdBlock::Blank {
+            out.push(i);
+        }
+        prev = block;
+    }
+    out
 }
 
 /// Highlighted byte ranges of `line`, in order. `fence` is the markdown code-fence
@@ -445,7 +532,8 @@ pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, K
     let mut prev_word = false;
     while let Some((i, c)) = it.next() {
         let rest = &line[i..];
-        if lang.line.iter().any(|p| rest.starts_with(p)) {
+        let at_start = !lang.comment_at_start || line[..i].trim().is_empty();
+        if at_start && lang.line.iter().any(|p| rest.starts_with(p)) {
             out.push((i..line.len(), Kind::Comment));
             break;
         }
@@ -604,6 +692,43 @@ mod tests {
                 ("*i*", Kind::Italic),
                 ("_u_", Kind::Italic)
             ]
+        );
+    }
+
+    #[test]
+    fn markdown_blank_lines_around_blocks() {
+        let md = [
+            "# Title",         // 0
+            "text",            // 1: blank before
+            "- a",             // 2: blank before
+            "  more",          // 3: list continuation
+            "- b",             // 4
+            "after",           // 5: blank before
+            "```sh",           // 6: blank before
+            "# not a heading", // 7: code, untouched
+            "- not a list",    // 8
+            "```",             // 9
+            "```",             // 10: next fence, blank before
+            "```",             // 11
+            "## Next",         // 12: blank before
+            "#hashtag",        // 13: not a heading, blank before (after heading)
+            "",                // 14
+            "1. one",          // 15
+        ];
+        assert_eq!(md_blank_lines(&md), [1, 2, 5, 6, 10, 12, 13]);
+        assert!(md_blank_lines(&["# A", "", "b"]).is_empty());
+    }
+
+    #[test]
+    fn properties_comments_only_at_line_start() {
+        assert_eq!(
+            kinds("a.properties", "  ! note"),
+            [("! note", Kind::Comment)]
+        );
+        assert_eq!(kinds("a.properties", "# x"), [("# x", Kind::Comment)]);
+        assert_eq!(
+            kinds("a.properties", "msg=Hi! #1 on=true"),
+            [("1", Kind::Number), ("true", Kind::Keyword)]
         );
     }
 

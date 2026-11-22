@@ -1604,11 +1604,12 @@ const VIEW_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
     CLOSE,
 ];
 
-const EDIT_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
+const EDIT_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
     HELP,
     f("F2 Save", 2),
     f("F3 Next", 3),
     f("F4 Replace", 4),
+    f("F5 Format", 5),
     f("F7 Search", 7),
     f("F8 Del line", 8),
     CLOSE,
@@ -2883,9 +2884,11 @@ impl App {
                 return;
             }
             _ if save => {
+                editor.format_markdown();
                 self.next_save_prompt(editor, false, false, Step::Encoding);
                 return;
             }
+            KeyCode::F(5) => self.format_markdown(&mut editor),
             _ if prompt => {
                 self.mode = Mode::Edit {
                     editor,
@@ -2962,6 +2965,13 @@ impl App {
             editor,
             error: None,
         };
+    }
+
+    /// F5 in the editor: blank lines around Markdown blocks (one undo step).
+    fn format_markdown(&mut self, editor: &mut Editor) {
+        if !editor.format_markdown() {
+            self.note = "format: Markdown files, nothing to change".into();
+        }
     }
 
     /// Alt+C in the viewer and editor: searches match case exactly, or ignore it without capitals.
@@ -5512,7 +5522,7 @@ mod tests {
         for (n, size) in [("a", 30), ("b", 20), ("c", 10)] {
             std::fs::write(tmp.path().join(n), "x".repeat(size)).unwrap();
         }
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")] // macOS APFS rejects non-UTF-8 names (EILSEQ)
         let odd = {
             use std::os::unix::ffi::OsStrExt;
             let odd = OsStr::from_bytes(b"f\xff");
@@ -5534,9 +5544,12 @@ mod tests {
         assert!(!tmp.path().join("a").exists() && !tmp.path().join("b").exists());
         assert!(tmp.path().join("c").exists());
         let Mode::Stats(st) = &app.mode else { panic!() };
-        assert_eq!(st.root.size, if cfg!(unix) { 11 } else { 10 });
+        assert_eq!(
+            st.root.size,
+            if cfg!(target_os = "linux") { 11 } else { 10 }
+        );
         assert!(st.marked.is_empty());
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             assert!(tmp.path().join(odd).exists());
             assert_eq!(st.root.files, 2);
@@ -6298,14 +6311,14 @@ mod tests {
 
     #[test]
     fn shift_arrows_and_clicks_select() {
-        let dir = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // subdir: ".." then loads the small tempdir at once, not the slow-to-read $TMPDIR (macOS)
+        let dir = tmp.path().join("sub");
+        std::fs::create_dir(&dir).unwrap();
         for n in ["a", "b", "c", "d"] {
-            std::fs::write(dir.path().join(n), "").unwrap();
+            std::fs::write(dir.join(n), "").unwrap();
         }
-        let mut app = App::new(
-            Panel::open(dir.path()).unwrap(),
-            Panel::open(dir.path()).unwrap(),
-        );
+        let mut app = App::new(Panel::open(&dir).unwrap(), Panel::open(&dir).unwrap());
         app.areas = [Rect::new(0, 0, 40, 10), Rect::new(40, 0, 40, 10)];
         let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
         app.on_key(shift(KeyCode::Down)); // ".." is not selectable
@@ -6998,7 +7011,7 @@ mod tests {
         assert!(matches!(&app.mode, Mode::Found(f) if f.sel == 1));
         // Enter: one panel row per file, shown below the search root; F3 there at the first hit
         key(&mut app, KeyCode::Enter);
-        let file = d.join("sub/b.txt");
+        let file = d.join("sub").join("b.txt");
         assert_eq!(app.panels[0].entries().len(), 1);
         assert_eq!(app.panels[0].hit_line(file.as_os_str()), Some(2));
         let today = jiff::ZonedDateTime::now().date();

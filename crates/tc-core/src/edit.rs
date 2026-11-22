@@ -12,7 +12,7 @@ use encoding_rs::{Encoder, EncoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use regex::Regex;
 use ropey::{Rope, RopeBuilder};
 
-use crate::{Error, Result, io_err};
+use crate::{Error, Result, io_err, syntax};
 
 /// Above this the user is asked to use the viewer instead.
 const LARGE: u64 = 1 << 30;
@@ -632,6 +632,30 @@ impl Editor {
         count
     }
 
+    /// Markdown files: blank lines around headings, lists and ``` blocks, as one undo step.
+    /// False when the file is not Markdown or nothing changed.
+    pub fn format_markdown(&mut self) -> bool {
+        if !syntax::lang(&self.path).is_some_and(|l| l.markdown) {
+            return false;
+        }
+        let text: Vec<String> = (0..self.line_count()).map(|l| self.line_text(l)).collect();
+        let lines: Vec<&str> = text.iter().map(String::as_str).collect();
+        let at = syntax::md_blank_lines(&lines);
+        // bottom up, so earlier char indices stay valid; the rope holds `\n`, save restores CRLF
+        let step: Vec<Change> = (at.iter().rev())
+            .map(|&l| {
+                let idx = self.rope.line_to_char(l);
+                self.splice(idx, 0, "\n")
+            })
+            .collect();
+        let changed = !step.is_empty();
+        self.cursor.0 += at.iter().filter(|&&l| l <= self.cursor.0).count();
+        self.record_step(step);
+        self.sel = None;
+        self.move_v(0);
+        changed
+    }
+
     /// Left/right across line ends.
     pub fn move_h(&mut self, delta: isize) {
         let idx = self.idx() as isize + delta;
@@ -945,6 +969,22 @@ mod tests {
 
     fn open(p: &Path) -> Result<Editor> {
         Editor::open(p, &AtomicU64::new(0), &AtomicBool::new(false))
+    }
+
+    #[test]
+    fn format_markdown_adds_blank_lines_as_one_undo_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.md");
+        fs::write(&p, "# T\r\ntext\r\n- a\r\n").unwrap();
+        let mut e = open(&p).unwrap();
+        assert!(e.format_markdown());
+        assert_eq!(text(&e), "# T||text||- a|");
+        assert!(!e.format_markdown()); // already formatted
+        e.undo();
+        assert_eq!(text(&e), "# T|text|- a|");
+        let txt = dir.path().join("a.txt");
+        fs::write(&txt, "# T\ntext\n").unwrap();
+        assert!(!open(&txt).unwrap().format_markdown());
     }
 
     fn save(e: &mut Editor, to_utf8: bool, to_lf: bool) -> Result<()> {
