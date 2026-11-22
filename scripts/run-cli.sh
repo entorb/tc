@@ -7,5 +7,6 @@ if [ -d "$root/target" ]; then
   find "$root/target" -type f -mmin +60 -delete
   find "$root/target" -mindepth 1 -type d -empty -delete
 fi
-exec cargo run --release --quiet --manifest-path "$root/Cargo.toml" --bin tc-cli -- "$@"
+cargo build --release --quiet --manifest-path "$root/Cargo.toml" --bin tc-cli
 cp "$root/target/release/tc-cli" ~/bin/
+exec "$root/target/release/tc-cli" "$@"
