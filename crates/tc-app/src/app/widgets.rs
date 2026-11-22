@@ -107,6 +107,21 @@ impl App {
         }
     }
 
+    /// Pick option `k` of choice row `row` (GUI dropdown); cycles with Space so the form reacts as to keys.
+    pub fn form_choose(&mut self, row: usize, k: usize) {
+        let Some((rows, focus)) = self.mode.form_mut() else {
+            return;
+        };
+        let Some(FormRow::Choice(_, opts, i)) = rows.get(row) else {
+            return;
+        };
+        let steps = (k % opts.len() + opts.len() - i) % opts.len();
+        *focus = row;
+        for _ in 0..steps {
+            self.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        }
+    }
+
     /// Terminal click inside the form rows drawn at `form_area` (first row shown: `form_scroll`).
     pub(super) fn form_mouse(&mut self, col: u16, row: u16) -> bool {
         if self.mode.form_mut().is_none() || !self.form_area.contains((col, row).into()) {

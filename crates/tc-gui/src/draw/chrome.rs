@@ -1,5 +1,5 @@
-use super::{ACCENT, MUTED, icons, mono};
-use eframe::egui::{self, Button, Color32, Id, RichText, Sense, Stroke, Ui, vec2};
+use super::{MUTED, icons, mono};
+use eframe::egui::{self, Button, Id, RichText, Sense, Stroke, Ui, vec2};
 use tc_app::app::{App, MENUS, Mode, TOOLBAR, ToolItem};
 use tc_app::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
@@ -144,31 +144,46 @@ pub(super) fn cmdline(ui: &mut Ui, app: &mut App) {
 
 /// Single-line text of `l` with a caret at its cursor.
 pub(super) fn line_edit(ui: &mut Ui, l: &LineEdit) {
+    text_box(ui, l, true);
+}
+
+/// `l` drawn like an egui text field (theme colors); keys stay with the app, so egui never
+/// focuses it. `focused`: accent border and the caret; else clickable.
+pub(super) fn text_box(ui: &mut Ui, l: &LineEdit, focused: bool) -> egui::Response {
+    let v = ui.visuals();
+    let (text_color, bg, radius) = (
+        v.strong_text_color(),
+        v.text_edit_bg_color(),
+        v.widgets.inactive.corner_radius,
+    );
+    let (border, caret_stroke) = if focused {
+        (v.selection.stroke, v.text_cursor.stroke)
+    } else {
+        (v.widgets.inactive.bg_stroke, Stroke::NONE)
+    };
     let galley = ui
         .painter()
-        .layout_no_wrap(l.text.clone(), mono(), Color32::WHITE);
+        .layout_no_wrap(l.text.clone(), mono(), text_color);
     let pad = vec2(6.0, 3.0);
     let width = ui.available_width().max(galley.size().x + 2.0 * pad.x);
-    let (rect, _) =
-        ui.allocate_exact_size(vec2(width, galley.size().y + 2.0 * pad.y), Sense::hover());
+    let sense = if focused {
+        Sense::hover()
+    } else {
+        Sense::CLICK
+    };
+    let (rect, r) = ui.allocate_exact_size(vec2(width, galley.size().y + 2.0 * pad.y), sense);
     let caret = galley
         .pos_from_cursor(egui::text::CCursor::new(l.text[..l.cur].chars().count()))
         .min
         .x;
     let p = ui.painter();
-    p.rect_filled(rect, 4.0, Color32::from_gray(25));
-    p.rect_stroke(
-        rect,
-        4.0,
-        Stroke::new(1.0, ACCENT),
-        egui::StrokeKind::Inside,
-    );
+    p.rect_filled(rect, radius, bg);
+    p.rect_stroke(rect, radius, border, egui::StrokeKind::Inside);
     let origin = rect.min + pad;
-    p.galley(origin, galley, Color32::WHITE);
-    let x = origin.x + caret;
-    p.vline(
-        x,
-        (origin.y)..=(rect.max.y - pad.y),
-        Stroke::new(1.5, ACCENT),
-    );
+    p.galley(origin, galley, text_color);
+    if focused {
+        let x = origin.x + caret;
+        p.vline(x, (origin.y)..=(rect.max.y - pad.y), caret_stroke);
+    }
+    r.on_hover_cursor(egui::CursorIcon::Text)
 }
