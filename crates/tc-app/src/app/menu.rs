@@ -177,8 +177,6 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Other panel here    Alt+=", KeyCode::Char('='), A),
             ("New tab             Ctrl+T", KeyCode::Char('t'), C),
             ("Close tab           Ctrl+W", KeyCode::Char('w'), C),
-            ("Font size +         Ctrl+=", KeyCode::Char('='), C),
-            ("Font size -         Ctrl+-", KeyCode::Char('-'), C),
         ],
     ),
 ];

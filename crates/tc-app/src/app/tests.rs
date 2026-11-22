@@ -87,11 +87,14 @@ fn space_on_dir_calculates_size() {
 }
 
 #[test]
-fn quit_asks_first() {
+fn f10_quits_at_once_q_asks_first() {
     let tmp = tempfile::tempdir().unwrap();
     let p = || Panel::open(tmp.path()).unwrap();
     let mut app = App::new(p(), p());
     key(&mut app, KeyCode::F(10));
+    assert!(app.quit);
+    app.quit = false;
+    key(&mut app, KeyCode::Char('q'));
     assert!(matches!(app.mode, Mode::AskQuit) && !app.quit);
     key(&mut app, KeyCode::Esc);
     assert!(matches!(app.mode, Mode::Normal) && !app.quit);

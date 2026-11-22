@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, FormRow, Mode, form_checked};
+use super::{App, FormRow, Mode, form_checked, zoom_step};
 
 /// Release tag CI builds into release binaries; `None` in dev builds, which never check.
 pub const VERSION: Option<&str> = match option_env!("TC_VERSION") {
@@ -15,12 +15,23 @@ pub const VERSION: Option<&str> = match option_env!("TC_VERSION") {
 
 const RELEASES: &str = "https://github.com/entorb/tc/releases/latest";
 const CHECK_DAILY: &str = "Check for updates daily";
+const FONT_SIZE: &str = "Font size (tc-gui)";
+/// Font scales 50 %..300 % in 10 % steps, index = `zoom * 10 - 5` (see `zoom_step`).
+const ZOOMS: [&str; 26] = [
+    "50%", "60%", "70%", "80%", "90%", "100%", "110%", "120%", "130%", "140%", "150%", "160%",
+    "170%", "180%", "190%", "200%", "210%", "220%", "230%", "240%", "250%", "260%", "270%",
+    "280%", "290%", "300%",
+];
 
 /// Settings form (F9 Tools > Settings); Enter applies and saves.
 #[derive(Clone)]
 pub struct SettingsForm {
     pub rows: Vec<FormRow>,
     pub focus: usize,
+}
+
+fn zoom_index(zoom: f32) -> usize {
+    ((zoom * 10.0).round() as usize).clamp(5, 30) - 5
 }
 
 /// `v1.2.3` as numbers; shortcut: a `-rc1` suffix is ignored, so rc and final of one number are equal.
@@ -101,9 +112,21 @@ impl App {
         self.set_update_check(check);
     }
 
-    /// Save the choice now: the settings file is otherwise only written on quit.
     fn set_update_check(&mut self, on: bool) {
         self.update_check = on;
+        self.save_or_message();
+    }
+
+    /// Apply and save now: the settings file is otherwise only written on quit.
+    fn apply_settings(&mut self, rows: &[FormRow]) {
+        self.update_check = form_checked(rows, CHECK_DAILY);
+        if let Some(FormRow::Choice(_, _, i)) = rows.iter().find(|r| r.label() == FONT_SIZE) {
+            self.zoom = zoom_step((*i + 5) as f32 / 10.0, 0);
+        }
+        self.save_or_message();
+    }
+
+    fn save_or_message(&mut self) {
         if let Err(e) = self.save_session() {
             self.mode = Mode::Message(format!("{e:#}"));
         }
@@ -111,7 +134,10 @@ impl App {
 
     pub(super) fn open_settings(&mut self) {
         self.mode = Mode::Settings(SettingsForm {
-            rows: vec![FormRow::Check(CHECK_DAILY, self.update_check)],
+            rows: vec![
+                FormRow::Check(CHECK_DAILY, self.update_check),
+                FormRow::Choice(FONT_SIZE, &ZOOMS, zoom_index(self.zoom)),
+            ],
             focus: 0,
         });
     }
@@ -120,7 +146,7 @@ impl App {
         let last = form.rows.len() - 1;
         match key.code {
             KeyCode::Esc | KeyCode::F(10) => return,
-            KeyCode::Enter => return self.set_update_check(form_checked(&form.rows, CHECK_DAILY)),
+            KeyCode::Enter => return self.apply_settings(&form.rows),
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
             code => {
@@ -207,6 +233,19 @@ mod tests {
         a.on_mouse(click(5));
         assert!(matches!(&a.mode, Mode::Settings(f) if form_checked(&f.rows, CHECK_DAILY)));
         a.on_mouse(click(9)); // outside
+        // GUI dropdown picks an option, forwards and backwards
+        let choice = |a: &App| match &a.mode {
+            Mode::Settings(f) => match f.rows[1] {
+                FormRow::Choice(_, _, k) => (k, f.focus),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let start = choice(&a).0;
+        a.form_choose(1, start + 2);
+        assert_eq!(choice(&a), (start + 2, 1));
+        a.form_choose(1, 0);
+        assert_eq!(choice(&a).0, 0);
         key(&mut a, KeyCode::Enter);
         assert!(a.update_check);
     }

@@ -103,7 +103,7 @@ Delete config files
                 connections, histories, searches, session
 
 == Quit ==
-F10             quit (asks first), also q";
+F10             quit at once; q quits after asking";
 pub const HELP_STATS: &str = "\
 == About ==
 Scan runs in up to 8 threads; a popup shows files and
@@ -208,6 +208,8 @@ Click           focus a field; toggles a checkbox, cycles a choice
 == Options ==
 Check for updates daily: release builds ask GitHub for a
 newer release on the first start of a day and show it.
+Font size (tc-gui): Left/Right/Space change it; also Ctrl+=
+and Ctrl+-.
 
 == Run ==
 Enter           save

@@ -824,7 +824,8 @@ impl App {
             c => c,
         };
         match code {
-            KeyCode::Char('q') | KeyCode::F(10) => self.mode = Mode::AskQuit,
+            KeyCode::Char('q') => self.mode = Mode::AskQuit,
+            KeyCode::F(10) => self.quit = true,
             KeyCode::Null => self.ask_reset_config(),
             KeyCode::F(9) => self.mode = Mode::Menu(0, 0),
             KeyCode::Tab => self.active = 1 - self.active,
