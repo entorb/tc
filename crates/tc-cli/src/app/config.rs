@@ -28,6 +28,7 @@ impl App {
         self.rename_presets = lines("rename-presets")?;
         self.history = lines("history")?;
         self.finds = lines("find-forms")?;
+        self.syncs = lines("sync-forms")?;
         self.find_history = lines("find-history")?;
         self.rename_history = lines("rename-history")?;
         let paths = |name: &str| {
@@ -51,6 +52,7 @@ impl App {
         let hist = match name {
             "find-forms" => &mut self.finds,
             "find-history" => &mut self.find_history,
+            "sync-forms" => &mut self.syncs,
             _ => &mut self.rename_history,
         };
         cmdline::push_history(hist, line);
@@ -187,7 +189,9 @@ mod tests {
     use tc_core::panel::Panel;
     use tc_core::settings;
 
-    use super::super::{App, Ask, F_NAME, Mode, rename_rows, rows_from_line, rows_to_line};
+    use super::super::{
+        App, Ask, F_NAME, Mode, form_checked, form_text, rename_rows, rows_from_line, rows_to_line,
+    };
 
     fn app(dir: &std::path::Path) -> App {
         let mut app = App::new(Panel::open(dir).unwrap(), Panel::open(dir).unwrap());
@@ -303,5 +307,33 @@ mod tests {
         a.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
         let Mode::FindForm(f) = &a.mode else { panic!() };
         assert_eq!(f.text(F_NAME), "*.rs");
+    }
+
+    #[test]
+    fn sync_form_history_persists_and_recalls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut a = app(tmp.path());
+        a.remember("sync-forms", "File mask=*.rs\tSubdirectories=0");
+        let alt = |a: &mut App, code| a.on_key(KeyEvent::new(code, KeyModifiers::ALT));
+        let mask = |a: &App| match &a.mode {
+            Mode::SyncForm(f) => (
+                form_text(&f.rows, "File mask").to_owned(),
+                form_checked(&f.rows, "Subdirectories"),
+            ),
+            _ => panic!("no sync form"),
+        };
+        a.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(mask(&a), ("*.rs".into(), false));
+        alt(&mut a, KeyCode::Down);
+        assert_eq!(mask(&a), ("*".into(), true));
+        alt(&mut a, KeyCode::Up);
+        assert_eq!(mask(&a).0, "*.rs");
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let saved = tc_core::cmdline::load_history(&tmp.path().join("cfg/sync-forms")).unwrap();
+        assert!(
+            saved
+                .last()
+                .is_some_and(|l| l.starts_with("File mask=*.rs\t"))
+        );
     }
 }

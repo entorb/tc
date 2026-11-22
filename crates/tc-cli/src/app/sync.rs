@@ -1,7 +1,7 @@
 //! Synchronize directories (Ctrl+E, like Total Commander): options form, compare worker,
 //! result list with per-file direction, then copy / delete in a transfer worker.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread::{self, JoinHandle};
@@ -12,7 +12,10 @@ use tc_core::sync::{Action, Item};
 use tc_core::vfs::Side;
 use tc_core::{Error, ops, sync};
 
-use super::{App, Filter, FormRow, Mode, form_checked, form_text, paste_line};
+use super::{
+    App, Filter, FormRow, Mode, form_checked, form_text, paste_line, rows_from_line, rows_to_line,
+};
+use crate::fmt;
 use tc_core::edit::human;
 
 const S_MASK: &str = "File mask";
@@ -27,6 +30,8 @@ pub struct SyncForm {
     pub rows: Vec<FormRow>,
     pub focus: usize,
     pub error: Option<String>,
+    /// History entry shown (`App::syncs.len()` = fresh).
+    hist: usize,
 }
 
 impl SyncForm {
@@ -41,6 +46,7 @@ impl SyncForm {
             ],
             focus: 0,
             error: None,
+            hist: 0,
         }
     }
 
@@ -71,6 +77,8 @@ impl Default for SyncForm {
 /// What a finished sync compares again: options, sides and roots.
 pub type SyncSetup = (SyncForm, [Side; 2], [PathBuf; 2]);
 
+type DiffJob = JoinHandle<tc_core::Result<Option<(u64, u64)>>>;
+
 /// Compare result screen.
 pub struct Sync {
     pub sides: [Side; 2],
@@ -85,6 +93,8 @@ pub struct Sync {
     /// `/` filter on the relative path.
     pub filter: Filter,
     job: Option<JoinHandle<tc_core::Result<Vec<Item>>>>,
+    /// `c`: first difference of one file pair (path below the roots).
+    diff: Option<(PathBuf, DiffJob)>,
     pub progress: Arc<ops::Progress>,
     /// Sync question, shown while set.
     pub confirm: Option<String>,
@@ -96,12 +106,31 @@ fn group(a: Action) -> usize {
         Action::ToRight => 0,
         Action::Equal => 1,
         Action::NotEqual | Action::Skip => 2,
-        Action::ToLeft | Action::DeleteRight => 3,
+        Action::ToLeft | Action::DeleteRight | Action::DeleteLeft | Action::DeleteBoth => 3,
     }
 }
 
 fn acts(a: Action) -> bool {
-    matches!(a, Action::ToRight | Action::ToLeft | Action::DeleteRight)
+    matches!(
+        a,
+        Action::ToRight
+            | Action::ToLeft
+            | Action::DeleteRight
+            | Action::DeleteLeft
+            | Action::DeleteBoth
+    )
+}
+
+/// Planned deletes on side `i` (a both-delete counts on each side).
+fn deletes(plan: &[Item], i: usize) -> usize {
+    let (one, both) = if i == 0 {
+        (Action::DeleteLeft, Action::DeleteBoth)
+    } else {
+        (Action::DeleteRight, Action::DeleteBoth)
+    };
+    plan.iter()
+        .filter(|it| it.action == one || it.action == both)
+        .count()
 }
 
 impl Sync {
@@ -109,9 +138,19 @@ impl Sync {
         self.job.is_some()
     }
 
-    /// Takes F1 and footer clicks: no compare running, no question open.
+    /// The file pair being compared with `c`.
+    pub fn diffing(&self) -> Option<&Path> {
+        self.diff.as_ref().map(|(rel, _)| rel.as_path())
+    }
+
+    /// A tree compare or a file compare runs.
+    fn busy(&self) -> bool {
+        self.comparing() || self.diff.is_some()
+    }
+
+    /// Takes F1 and footer clicks: nothing running, no question open.
     pub fn idle(&self) -> bool {
-        !self.comparing() && self.confirm.is_none()
+        !self.busy() && self.confirm.is_none()
     }
 
     pub fn shown(&self) -> impl Iterator<Item = &Item> {
@@ -137,7 +176,7 @@ impl Sync {
     fn confirm_text(&self) -> String {
         let plan = self.plan();
         if plan.is_empty() {
-            return "Nothing to do: no shown row has ->, <- or del.\n\nany key".into();
+            return "Nothing to do: no shown row copies or deletes.\n\nany key".into();
         }
         let sum = |a: Action| {
             let it = plan.iter().filter(|it| it.action == a);
@@ -154,10 +193,6 @@ impl Sync {
         };
         let (right, rb) = sum(Action::ToRight);
         let (left, lb) = sum(Action::ToLeft);
-        let del = plan
-            .iter()
-            .filter(|it| it.action == Action::DeleteRight)
-            .count();
         let over = (plan.iter())
             .filter(|it| match it.action {
                 Action::ToRight => it.right.is_some(),
@@ -165,16 +200,22 @@ impl Sync {
                 _ => false,
             })
             .count();
-        let trash = if self.sides[1].remote().is_some() {
-            "permanently"
-        } else {
-            "to trash"
+        let trash = |i: usize| {
+            if self.sides[i].remote().is_some() {
+                "permanently"
+            } else {
+                "to trash"
+            }
         };
         format!(
             "Synchronize?\n\nCopy left -> right: {right} ({})\nCopy right -> left: {left} ({})\n\
-             Overwrite existing: {over}\nDelete on right ({trash}): {del}\n\n[y] Start   [Esc] Cancel",
+             Overwrite existing: {over}\nDelete on left ({}): {}\nDelete on right ({}): {}\n\n[y] Start   [Esc] Cancel",
             human(rb),
-            human(lb)
+            human(lb),
+            trash(0),
+            deletes(&plan, 0),
+            trash(1),
+            deletes(&plan, 1)
         )
     }
 
@@ -191,7 +232,7 @@ impl Sync {
         };
     }
 
-    /// Left / Right set the copy direction (needs the source), Space drops or restores the action.
+    /// Left / Right set the copy direction (needs the source), `l` `r` `b` delete left / right / both, Space drops or restores the action.
     fn set_action(&mut self, code: KeyCode) {
         let Some(it) = self.view.get(self.sel).map(|&i| &mut self.items[i]) else {
             return;
@@ -199,10 +240,49 @@ impl Sync {
         it.action = match code {
             KeyCode::Right if it.left.is_some() => Action::ToRight,
             KeyCode::Left if it.right.is_some() => Action::ToLeft,
+            KeyCode::Char('l') if it.left.is_some() => Action::DeleteLeft,
+            KeyCode::Char('r') if it.right.is_some() => Action::DeleteRight,
+            KeyCode::Char('b') if it.left.is_some() && it.right.is_some() => Action::DeleteBoth,
             KeyCode::Char(' ') if it.action == Action::Skip => it.default,
             KeyCode::Char(' ') if acts(it.action) => Action::Skip,
             _ => it.action,
         };
+    }
+
+    /// `*`: flip `->` and `<-` of the shown rows that exist on both sides.
+    fn reverse(&mut self) {
+        for &i in &self.view {
+            let it = &mut self.items[i];
+            if it.left.is_none() || it.right.is_none() {
+                continue;
+            }
+            it.action = match it.action {
+                Action::ToRight => Action::ToLeft,
+                Action::ToLeft => Action::ToRight,
+                a => a,
+            };
+        }
+    }
+
+    /// `c`: compare the two files of the cursor row in a worker.
+    fn diff_spawn(&mut self) {
+        let Some(it) = self.view.get(self.sel).map(|&i| &self.items[i]) else {
+            return;
+        };
+        let (Some(l), Some(r)) = (&it.left, &it.right) else {
+            return;
+        };
+        if l.is_dir || r.is_dir {
+            return;
+        }
+        let paths = [0, 1].map(|i| self.roots[i].join(&it.rel));
+        let (rel, total, sides) = (it.rel.clone(), l.size, self.sides.clone());
+        // fresh progress: the finished tree compare may have its cancel flag set
+        let p = Arc::new(ops::Progress::default());
+        p.total.store(total, Ordering::Relaxed);
+        self.progress = p.clone();
+        let job = thread::spawn(move || sync::first_diff(&sides, &paths, &p));
+        self.diff = Some((rel, job));
     }
 
     fn toggle_show(&mut self, c: char) {
@@ -214,7 +294,7 @@ impl Sync {
 }
 
 impl App {
-    /// Ctrl+E: options form for the two panel directories, opened with the last settings.
+    /// Ctrl+E: options form for the two panel directories, opened with the last settings (also after a restart).
     pub(super) fn sync_open(&mut self) {
         if self
             .panels
@@ -226,8 +306,21 @@ impl App {
             );
             return;
         }
-        let form = self.last_sync.clone().unwrap_or_default();
+        let len = self.syncs.len();
+        let form = match self.last_sync.take() {
+            Some(f) => SyncForm { hist: len, ..f },
+            None => self.sync_hist(len.saturating_sub(1)),
+        };
         self.mode = Mode::SyncForm(form);
+    }
+
+    /// Sync form of history entry `i` (past the end: the defaults), positioned there.
+    fn sync_hist(&self, i: usize) -> SyncForm {
+        let mut form = SyncForm::new();
+        if let Some(line) = self.syncs.get(i) {
+            rows_from_line(&mut form.rows, line);
+        }
+        SyncForm { hist: i, ..form }
     }
 
     pub(super) fn sync_form_key(&mut self, key: KeyEvent, mut form: SyncForm) {
@@ -238,10 +331,22 @@ impl App {
                 return;
             }
             KeyCode::Enter => {
+                self.note = self.remember("sync-forms", &rows_to_line(&form.rows, ""));
                 self.last_sync = Some(form.clone());
                 let sides = [self.panels[0].side(), self.panels[1].side()];
                 let roots = [0, 1].map(|i| self.panels[i].path().to_owned());
                 return self.sync_spawn((form, sides, roots));
+            }
+            KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                let i = match key.code {
+                    KeyCode::Up => form.hist.saturating_sub(1),
+                    _ => (form.hist + 1).min(self.syncs.len()),
+                };
+                let focus = form.focus;
+                form = SyncForm {
+                    focus,
+                    ..self.sync_hist(i)
+                };
             }
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
@@ -274,6 +379,7 @@ impl App {
             sel: 0,
             filter: Filter::default(),
             job: Some(thread::spawn(move || sync::compare(&s, &r, &o, &p))),
+            diff: None,
             progress,
             confirm: None,
         }));
@@ -284,22 +390,26 @@ impl App {
             return self.sync_confirm_key(s, key.code);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if !s.comparing() && s.filter.key(key) {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if !s.busy() && s.filter.key(key) {
             s.rebuild();
             self.mode = Mode::Sync(s);
             return;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') if s.comparing() => {
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') if s.busy() => {
                 s.progress.cancel.store(true, Ordering::Relaxed)
             }
-            _ if s.comparing() => {}
+            _ if s.busy() => {}
             KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => return,
             KeyCode::Char('r') if ctrl => return self.sync_spawn((s.form, s.sides, s.roots)),
             KeyCode::F(3 | 4) => return self.sync_row_open(s, key.code == KeyCode::F(4)),
             KeyCode::Enter => s.confirm = Some(s.confirm_text()),
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => s.set_action(key.code),
-            KeyCode::Char(c) => s.toggle_show(c),
+            KeyCode::Left | KeyCode::Right => s.set_action(key.code),
+            KeyCode::Char(' ' | 'l' | 'r' | 'b') if !ctrl && !alt => s.set_action(key.code),
+            KeyCode::Char('*') if !ctrl && !alt => s.reverse(),
+            KeyCode::Char('c') if !ctrl && !alt => s.diff_spawn(),
+            KeyCode::Char(c) if !ctrl && !alt => s.toggle_show(c),
             code => s.nav(code, self.page),
         }
         self.mode = Mode::Sync(s);
@@ -326,7 +436,7 @@ impl App {
     fn sync_confirm_key(&mut self, mut s: Box<Sync>, code: KeyCode) {
         let plan = s.plan();
         s.confirm = None;
-        if plan.is_empty() || !matches!(code, KeyCode::Char('y') | KeyCode::Enter) {
+        if plan.is_empty() || code != KeyCode::Char('y') {
             self.mode = Mode::Sync(s);
             return;
         }
@@ -336,14 +446,22 @@ impl App {
         self.spawn_xfer(pair, move |p, _| sync::run(&sides, &roots, &plan, p));
     }
 
-    /// Collect a finished compare.
+    /// Collect a finished tree compare or file compare.
     pub(super) fn sync_tick(&mut self) {
+        let Mode::Sync(s) = &self.mode else {
+            return;
+        };
+        if s.job.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.compare_tick();
+        } else if s.diff.as_ref().is_some_and(|(_, j)| j.is_finished()) {
+            self.diff_tick();
+        }
+    }
+
+    fn compare_tick(&mut self) {
         let Mode::Sync(s) = &mut self.mode else {
             return;
         };
-        if !s.job.as_ref().is_some_and(JoinHandle::is_finished) {
-            return;
-        }
         let Some(job) = s.job.take() else {
             return;
         };
@@ -355,6 +473,27 @@ impl App {
             Ok(Err(Error::Cancelled)) => self.mode = Mode::Normal,
             Ok(Err(e)) => self.mode = Mode::Message(format!("Synchronize: {e}")),
             Err(_) => self.mode = Mode::Message("Synchronize: compare failed.".into()),
+        }
+    }
+
+    /// Show the result of `c` as a message over the rows (cancelled: back to the rows).
+    fn diff_tick(&mut self) {
+        let Mode::Sync(s) = &mut self.mode else {
+            return;
+        };
+        let Some((rel, job)) = s.diff.take() else {
+            return;
+        };
+        let size = |e: &Option<tc_core::panel::Entry>| e.as_ref().map_or(0, |e| e.size);
+        let item = s.items.iter().find(|it| it.rel == rel);
+        let sizes = item.map_or([0, 0], |it| [size(&it.left), size(&it.right)]);
+        let text = match job.join() {
+            Ok(Err(Error::Cancelled)) => return,
+            Ok(res) => fmt::sync_diff_text(&rel, sizes, &res),
+            Err(_) => "Compare: failed.".into(),
+        };
+        if let Mode::Sync(s) = std::mem::replace(&mut self.mode, Mode::Message(text)) {
+            self.sync_back = Some(s);
         }
     }
 }
@@ -474,5 +613,125 @@ mod tests {
         assert_eq!(after[0], ("a.txt".into(), Action::Equal));
         key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn l_r_b_set_deletes_and_confirm_counts_them() {
+        let t = tempfile::tempdir().unwrap();
+        let (l, r) = (t.path().join("l"), t.path().join("r"));
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&r).unwrap();
+        fs::write(l.join("a.txt"), "same").unwrap();
+        fs::write(r.join("a.txt"), "same").unwrap();
+        fs::write(l.join("b.txt"), "b").unwrap();
+        let mut app = App::new(Panel::open(&l).unwrap(), Panel::open(&r).unwrap());
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        compared(&mut app);
+        key(&mut app, KeyCode::Char('b'), KeyModifiers::NONE); // a.txt: both sides
+        key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE); // b.txt: no right entry, no change
+        key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let Mode::Sync(s) = &app.mode else {
+            panic!("no sync");
+        };
+        let text = s.confirm.as_deref().unwrap();
+        assert!(text.contains("left (to trash): 2") && text.contains("right (to trash): 1"));
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE); // Enter does not start
+        assert!(matches!(app.mode, Mode::Sync(_)));
+        assert!(l.join("a.txt").exists() && l.join("b.txt").exists() && r.join("a.txt").exists());
+    }
+
+    #[test]
+    fn modified_letters_do_not_mark_deletes() {
+        let t = tempfile::tempdir().unwrap();
+        let (l, r) = (t.path().join("l"), t.path().join("r"));
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&r).unwrap();
+        fs::write(l.join("a.txt"), "same").unwrap();
+        fs::write(r.join("a.txt"), "same").unwrap();
+        let mut app = App::new(Panel::open(&l).unwrap(), Panel::open(&r).unwrap());
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        compared(&mut app);
+        for m in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for c in ['l', 'b', 'r', '*'] {
+                key(&mut app, KeyCode::Char(c), m);
+            }
+        }
+        let Mode::Sync(s) = &app.mode else {
+            panic!("no sync");
+        };
+        assert!(s.items.iter().all(|it| it.action == Action::Equal));
+    }
+
+    #[test]
+    fn star_reverses_only_shown_two_sided_rows() {
+        let t = tempfile::tempdir().unwrap();
+        let (l, r) = (t.path().join("l"), t.path().join("r"));
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&r).unwrap();
+        for (d, name, text, age) in [
+            (&l, "a.txt", "new", 10),
+            (&r, "a.txt", "old", 100),
+            (&l, "z.txt", "new", 10),
+            (&r, "z.txt", "old", 100),
+        ] {
+            let f = d.join(name);
+            fs::write(&f, text).unwrap();
+            let t = std::time::SystemTime::now() - Duration::from_secs(age);
+            fs::File::options()
+                .write(true)
+                .open(f)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        }
+        fs::write(r.join("ba.txt"), "only right").unwrap();
+        let mut app = App::new(Panel::open(&l).unwrap(), Panel::open(&r).unwrap());
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        compared(&mut app);
+        for c in ['/', 'a'] {
+            key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE); // shows a.txt, ba.txt; z.txt hidden
+        compared(&mut app);
+        key(&mut app, KeyCode::Char('*'), KeyModifiers::NONE);
+        let Mode::Sync(s) = &app.mode else {
+            panic!("no sync");
+        };
+        let acts: Vec<_> = s.items.iter().map(|i| i.action).collect();
+        assert_eq!(acts, [Action::ToLeft, Action::ToLeft, Action::ToRight]);
+    }
+
+    #[test]
+    fn c_compares_pair_and_returns_to_rows() {
+        let t = tempfile::tempdir().unwrap();
+        let (l, r) = (t.path().join("l"), t.path().join("r"));
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&r).unwrap();
+        fs::write(l.join("a.txt"), "ab\ncd").unwrap();
+        fs::write(r.join("a.txt"), "ab\ncX!").unwrap();
+        let mut app = App::new(Panel::open(&l).unwrap(), Panel::open(&r).unwrap());
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        compared(&mut app);
+        key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+        for _ in 0..5000 {
+            app.tick();
+            if matches!(app.mode, Mode::Message(_)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let Mode::Message(text) = &app.mode else {
+            panic!("no result");
+        };
+        assert!(text.contains("First difference at byte 4 (line 2)"));
+        key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        app.tick();
+        assert!(matches!(&app.mode, Mode::Sync(s) if s.sel == 0 && s.idle()));
     }
 }

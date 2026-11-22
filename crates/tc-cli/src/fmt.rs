@@ -244,13 +244,14 @@ pub const HELP_SYNC: &str = "\
 == About ==
 -> left is newer or only left, <- right is newer or only
 right, = equal, != differs without direction (same date,
-date ignored, file vs directory), del only right
-(asymmetric), -- skip. A directory on one side only is one
-row, copied or deleted whole.
+date ignored, file vs directory), del> delete right
+(asymmetric or r), <del delete left, <del> delete both,
+-- skip. A directory on one side only is one row,
+copied or deleted whole.
 Copies keep the date on local disks; remote targets get
 the copy time, so use Ignore date against SFTP / FTP.
 Hidden and filtered-out rows are not synchronized. Local
-deletes go to the trash.
+deletes go to the trash, remote ones are permanent.
 
 == Move ==
 Up/Down         move cursor
@@ -262,10 +263,15 @@ F3 / F4         view / edit the left file (the right one when
 == Actions ==
 Right           copy left -> right (overwrites the right file)
 Left            copy right -> left (overwrites the left file)
+l / r / b       delete left / right / both (Space undoes)
+c               compare the two files of the row: equal or
+                first differing byte / line
+*               reverse -> and <- of all shown rows
+                (only rows on both sides)
 Space           no action / restore the compare result
 > = ! <         show / hide rows compared ->, =, !=, <- (and del)
 /               filter the rows by path: Enter keeps, Esc clears
-Enter           synchronize the shown rows: y / Enter starts,
+Enter           synchronize the shown rows: y starts,
                 n / Esc goes back
 Ctrl+R          compare again
 Esc / q / F10   close (while comparing: cancel)";
@@ -276,6 +282,8 @@ Shift+Tab       previous field
 Up/Down         previous / next field
 Space           toggle checkbox
 Left/Right      move in text
+Alt+Up/Down     previous / next used settings (saved in
+                tc/sync-forms)
 
 == Options ==
 File mask: names to compare, `*` and `?`, comma or space
@@ -851,7 +859,8 @@ pub fn found_row(h: &Hit) -> String {
 }
 
 /// Keys shown under the sync form.
-pub const SYNC_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter compare  Esc cancel";
+pub const SYNC_FORM_KEYS: &str =
+    "Tab/Up/Down field  Alt+Up/Down history  Space checkbox  Enter compare  Esc cancel";
 
 /// Sync screen title: both directories and the options.
 pub fn sync_title(s: &Sync) -> String {
@@ -891,7 +900,7 @@ pub fn sync_row(it: &Item, today: jiff::civil::Date) -> String {
     };
     let slash = if it.is_dir() { "/" } else { "" };
     format!(
-        "{} {:^4} {}  {}{slash}",
+        "{} {:^5} {}  {}{slash}",
         side(&it.left),
         it.action.symbol(),
         side(&it.right),
@@ -899,8 +908,40 @@ pub fn sync_row(it: &Item, today: jiff::civil::Date) -> String {
     )
 }
 
+/// Message of `c` on a sync row: equal, first difference, or the error.
+pub fn sync_diff_text(
+    rel: &Path,
+    sizes: [u64; 2],
+    res: &tc_core::Result<Option<(u64, u64)>>,
+) -> String {
+    let rel = rel.display();
+    match res {
+        Ok(None) => format!("Equal content: {rel} ({})", human(sizes[0])),
+        Ok(Some((at, line))) => {
+            let mut text = format!(
+                "Different: {rel}\nFirst difference at byte {} (line {line}).",
+                thousands(*at)
+            );
+            if sizes[0] != sizes[1] {
+                text += &format!("\nLeft {}, right {}.", human(sizes[0]), human(sizes[1]));
+            }
+            text
+        }
+        Err(e) => format!("Compare: {e}"),
+    }
+}
+
 /// Sync status line: compare progress, else counts and keys.
 pub fn sync_footer(s: &Sync) -> String {
+    if let Some(rel) = s.diffing() {
+        let p = &s.progress;
+        return format!(
+            "comparing {}: {} of {}  [Esc] Cancel",
+            rel.display(),
+            human(p.done.load(Ordering::Relaxed)),
+            human(p.total.load(Ordering::Relaxed))
+        );
+    }
     if s.comparing() {
         return format!(
             "comparing: {} names, {} dirs  [Esc] Cancel",
@@ -908,19 +949,19 @@ pub fn sync_footer(s: &Sync) -> String {
             thousands(s.progress.dirs_done.load(Ordering::Relaxed))
         );
     }
-    let mut n = [0; 6];
+    let mut n = [0; 8];
     for it in s.shown() {
         n[it.action as usize] += 1;
     }
     format!(
-        "{} shown of {}: = {}  != {}  -> {}  <- {}  del {}  -- {}   Left/Right direction  > = ! < show",
+        "{} shown of {}: = {}  != {}  -> {}  <- {}  del {}  -- {}   Left/Right direction  l/r/b delete  c compare file  > = ! < show",
         s.view.len(),
         s.items.len(),
         n[0],
         n[1],
         n[2],
         n[3],
-        n[4],
+        n[4] + n[6] + n[7],
         n[5]
     )
 }

@@ -41,6 +41,8 @@ pub enum Action {
     DeleteRight,
     /// The user dropped the action.
     Skip,
+    DeleteLeft,
+    DeleteBoth,
 }
 
 impl Action {
@@ -50,8 +52,10 @@ impl Action {
             Action::NotEqual => "!=",
             Action::ToRight => "->",
             Action::ToLeft => "<-",
-            Action::DeleteRight => "del",
+            Action::DeleteRight => "del>",
             Action::Skip => "--",
+            Action::DeleteLeft => "<del",
+            Action::DeleteBoth => "<del>",
         }
     }
 }
@@ -86,11 +90,8 @@ pub fn compare(
     o: &Options,
     p: &Progress,
 ) -> Result<Vec<Item>> {
-    let same_remote = sides[0].remote().is_some() && sides[0].same(&sides[1]);
-    if o.by_content && same_remote {
-        return Err(Error::Remote(
-            "compare by content needs two different connections or a local side".into(),
-        ));
+    if o.by_content {
+        check_pair(sides)?;
     }
     let masks = Masks::new(&o.mask);
     let mut items = Vec::new();
@@ -196,25 +197,48 @@ fn file_action(
     })
 }
 
+/// Content compare reads both files at once: not on one connection.
+fn check_pair(sides: &[Side; 2]) -> Result<()> {
+    if sides[0].remote().is_some() && sides[0].same(&sides[1]) {
+        return Err(Error::Remote(
+            "compare by content needs two different connections or a local side".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Streams both files chunk by chunk; stops at the first difference.
 fn same_content(sides: &[Side; 2], paths: &[PathBuf; 2], p: &Progress) -> Result<bool> {
-    let mut same = false;
+    Ok(first_diff(sides, paths, p)?.is_none())
+}
+
+/// First differing byte (0-based offset) and its line (1-based) of two files, `None` if equal;
+/// a file that is a prefix of the other differs at its end. `p.done` counts compared bytes.
+pub fn first_diff(
+    sides: &[Side; 2],
+    paths: &[PathBuf; 2],
+    p: &Progress,
+) -> Result<Option<(u64, u64)>> {
+    check_pair(sides)?;
+    let mut diff = None;
     sides[0].read(&paths[0], &mut |a| {
         sides[1].read(&paths[1], &mut |b| {
-            same = equal_streams(a, b, paths, p)?;
+            diff = diff_streams(a, b, paths, p)?;
             Ok(())
         })
     })?;
-    Ok(same)
+    Ok(diff)
 }
 
-fn equal_streams(
+fn diff_streams(
     a: &mut dyn Read,
     b: &mut dyn Read,
     paths: &[PathBuf; 2],
     p: &Progress,
-) -> Result<bool> {
+) -> Result<Option<(u64, u64)>> {
     let (mut x, mut y) = (vec![0; CHUNK], vec![0; CHUNK]);
+    let (mut offset, mut line) = (0u64, 1u64);
+    let lines = |s: &[u8]| s.iter().filter(|&&c| c == b'\n').count() as u64;
     loop {
         if p.cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
@@ -222,11 +246,16 @@ fn equal_streams(
         let n = fill(a, &mut x, &paths[0])?;
         let m = fill(b, &mut y, &paths[1])?;
         if x[..n] != y[..m] {
-            return Ok(false);
+            let at = (x.iter().zip(&y).take(n.min(m))).position(|(u, v)| u != v);
+            let at = at.unwrap_or(n.min(m));
+            return Ok(Some((offset + at as u64, line + lines(&x[..at]))));
         }
         if n == 0 {
-            return Ok(true);
+            return Ok(None);
         }
+        offset += n as u64;
+        line += lines(&x[..n]);
+        p.done.fetch_add(n as u64, Ordering::Relaxed);
     }
 }
 
@@ -258,7 +287,7 @@ fn list(side: &Side, dir: &Path) -> Result<Vec<Entry>> {
 }
 
 /// Run the actions of `items`: copies (overwriting the older file, the user confirmed them)
-/// first, then deletes on the right (local: trash, remote: permanently). Stops at the first error.
+/// first, then deletes on the right and on the left (local: trash, remote: permanently). Stops at the first error.
 pub fn run(sides: &[Side; 2], roots: &[PathBuf; 2], items: &[Item], p: &Progress) -> Result<()> {
     let srcs = |a: Action, i: usize| -> Vec<PathBuf> {
         let it = items.iter().filter(|it| it.action == a);
@@ -285,14 +314,20 @@ pub fn run(sides: &[Side; 2], roots: &[PathBuf; 2], items: &[Item], p: &Progress
             }
         }
     }
-    for it in items.iter().filter(|it| it.action == Action::DeleteRight) {
-        if p.cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
-        }
-        let t = roots[1].join(&it.rel);
-        match &sides[1] {
-            Side::Local => ops::trash(&t)?,
-            side => side.delete(&t)?,
+    let deletes = [
+        (1, [Action::DeleteRight, Action::DeleteBoth]),
+        (0, [Action::DeleteLeft, Action::DeleteBoth]),
+    ];
+    for (i, acts) in deletes {
+        for it in items.iter().filter(|it| acts.contains(&it.action)) {
+            if p.cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            let t = roots[i].join(&it.rel);
+            match &sides[i] {
+                Side::Local => ops::trash(&t)?,
+                side => side.delete(&t)?,
+            }
         }
     }
     Ok(())
@@ -300,7 +335,8 @@ pub fn run(sides: &[Side; 2], roots: &[PathBuf; 2], items: &[Item], p: &Progress
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Item, Options, Progress, Side, compare, run};
+    use super::{Action, CHUNK, Item, Options, Progress, Side, compare, first_diff, run};
+    use crate::vfs::mem::Mem;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
@@ -447,5 +483,56 @@ mod tests {
                 ("sub/deep.txt".into(), Action::NotEqual)
             ]
         );
+    }
+
+    #[test]
+    fn run_deletes_left_right_and_both() {
+        let (ml, mr) = (Mem::new(), Mem::new());
+        let sides = [Side::Remote(ml.clone()), Side::Remote(mr.clone())];
+        for n in ["dl", "dr", "db", "sk"] {
+            ml.put(&format!("/{n}"), b"x");
+            mr.put(&format!("/{n}"), b"x");
+        }
+        let item = |n: &str, action| Item {
+            rel: n.into(),
+            left: None,
+            right: None,
+            default: action,
+            action,
+        };
+        let items = [
+            item("dl", Action::DeleteLeft),
+            item("dr", Action::DeleteRight),
+            item("db", Action::DeleteBoth),
+            item("sk", Action::Skip),
+        ];
+        let roots = [PathBuf::from("/"), PathBuf::from("/")];
+        run(&sides, &roots, &items, &Progress::default()).unwrap();
+        assert_eq!(ml.paths(), ["/", "/dr", "/sk"]);
+        assert_eq!(mr.paths(), ["/", "/dl", "/sk"]);
+    }
+
+    #[test]
+    fn first_diff_offset_line_and_prefix() {
+        let t = tempfile::tempdir().unwrap();
+        let sides = [Side::Local, Side::Local];
+        let diff = |a: &[u8], b: &[u8], p: &Progress| {
+            let paths = [t.path().join("a"), t.path().join("b")];
+            fs::write(&paths[0], a).unwrap();
+            fs::write(&paths[1], b).unwrap();
+            first_diff(&sides, &paths, p)
+        };
+        let p = Progress::default();
+        assert_eq!(diff(b"ab\ncd", b"ab\ncd", &p).unwrap(), None);
+        assert_eq!(diff(b"ab\ncd", b"ab\ncX", &p).unwrap(), Some((4, 2)));
+        assert_eq!(diff(b"abc", b"abcd", &p).unwrap(), Some((3, 1)));
+        let (mut big, mut other) = ("x\n".repeat(CHUNK).into_bytes(), Vec::new());
+        other.extend_from_slice(&big);
+        big.extend_from_slice(b"ab");
+        other.extend_from_slice(b"aZ");
+        let want = Some((2 * CHUNK as u64 + 1, CHUNK as u64 + 1));
+        assert_eq!(diff(&big, &other, &p).unwrap(), want);
+        p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(diff(b"a", b"a", &p), Err(crate::Error::Cancelled)));
     }
 }

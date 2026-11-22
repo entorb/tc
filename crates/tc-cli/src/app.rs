@@ -1786,6 +1786,7 @@ pub struct App {
     rename_history: Vec<String>,
     /// Find files forms of past searches ([`FindForm::to_line`]), oldest first.
     finds: Vec<String>,
+    syncs: Vec<String>,
     /// Patterns of the viewer / editor Find and Replace prompts, oldest first.
     find_history: Vec<String>,
     /// Directory of the settings and history files (none: not persisted).
@@ -1875,6 +1876,7 @@ impl App {
             last_find: None,
             rename_history: Vec::new(),
             finds: Vec::new(),
+            syncs: Vec::new(),
             find_history: Vec::new(),
             config_dir: None,
             last_sync: None,

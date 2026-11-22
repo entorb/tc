@@ -39,7 +39,7 @@ pub fn save(file: &Path, kv: &[(String, OsString)]) -> Result<()> {
 }
 
 /// Every file tc keeps in its config directory.
-pub const FILES: [&str; 9] = [
+pub const FILES: [&str; 10] = [
     "hotlist",
     "connections",
     "searches",
@@ -47,6 +47,7 @@ pub const FILES: [&str; 9] = [
     "settings",
     "find-forms",
     "find-history",
+    "sync-forms",
     "rename-history",
     "rename-presets",
 ];
