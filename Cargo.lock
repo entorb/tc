@@ -4647,6 +4647,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "eframe",
+ "egui",
  "egui_extras",
  "jiff",
  "tc-cli",

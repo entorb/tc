@@ -1222,26 +1222,42 @@ pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 5] = [
     ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
 ];
 
-/// tc-gui toolbar: icon, tooltip and key sent when clicked; the rest stays in the F9 menu.
-pub const TOOLBAR: [(&str, &str, KeyCode, KeyModifiers); 8] = [
-    ("★", "Bookmarks (Ctrl+B)", KeyCode::Char('b'), C),
-    (":", "Run command (:)", KeyCode::Char(':'), N),
-    ("+", "New tab (Ctrl+T)", KeyCode::Char('t'), C),
-    ("🖧", "Connect to server (Ctrl+N)", KeyCode::Char('n'), C),
-    (
-        "du",
-        "Space usage, ncdu (Ctrl+Space)",
-        KeyCode::Char(' '),
-        C,
-    ),
-    ("top", "Process monitor (Ctrl+P)", KeyCode::Char('p'), C),
-    ("🔍", "Find files (Ctrl+F)", KeyCode::Char('f'), C),
-    (
-        "⇄",
-        "Synchronize directories (Ctrl+E)",
-        KeyCode::Char('e'),
-        C,
-    ),
+/// Toolbar button: icon, tooltip, key sent when clicked.
+pub type ToolItem = (&'static str, &'static str, KeyCode, KeyModifiers);
+
+/// tc-gui toolbar groups (navigation, tools).
+/// Icons must exist in egui's `emoji-icon-font`; the rest stays in the F9 menu.
+pub const TOOLBAR: [&[ToolItem]; 2] = [
+    &[
+        ("⏴", "History back (Alt+Left)", KeyCode::Left, A),
+        ("⏵", "History forward (Alt+Right)", KeyCode::Right, A),
+        ("⏶", "Parent directory (Backspace)", KeyCode::Backspace, N),
+        ("🏠", "Home directory (~)", KeyCode::Char('~'), N),
+        ("⟳", "Refresh (Ctrl+R)", KeyCode::Char('r'), C),
+        ("👁", "Hidden files (Alt+.)", KeyCode::Char('.'), A),
+        ("★", "Bookmarks (Ctrl+B)", KeyCode::Char('b'), C),
+        ("✚", "New tab (Ctrl+T)", KeyCode::Char('t'), C),
+        ("🖧", "Connect to server (Ctrl+N)", KeyCode::Char('n'), C),
+    ],
+    &[
+        ("⌨", "Run command (:)", KeyCode::Char(':'), N),
+        ("🗠", "File stats, ncdu (Ctrl+Space)", KeyCode::Char(' '), C),
+        ("🖥", "Process monitor (Ctrl+P)", KeyCode::Char('p'), C),
+        ("🔍", "Find files (Ctrl+F)", KeyCode::Char('f'), C),
+        (
+            "⬌",
+            "Synchronize directories (Ctrl+E)",
+            KeyCode::Char('e'),
+            C,
+        ),
+        ("🖊", "Multi-rename (Ctrl+M)", KeyCode::Char('m'), C),
+        (
+            "⚖",
+            "Compare panels, select differences (Ctrl+Y)",
+            KeyCode::Char('y'),
+            C,
+        ),
+    ],
 ];
 
 pub struct App {

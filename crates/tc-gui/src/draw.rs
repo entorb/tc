@@ -3,11 +3,13 @@
 use std::path::Path;
 
 use eframe::egui::{
-    self, Align, Button, Color32, Context, FontId, Id, Label, Layout, Modal, Response, RichText,
-    ScrollArea, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob, vec2,
+    self, Align, Button, Color32, Context, FontFamily, FontId, Id, Label, Layout, Modal, Response,
+    RichText, ScrollArea, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob, vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{App, FindForm, FormRow, MENUS, Mode, RenameForm, Stats, SyncForm, TOOLBAR};
+use tc::app::{
+    App, FindForm, FormRow, MENUS, Mode, RenameForm, Stats, SyncForm, TOOLBAR, ToolItem,
+};
 use tc::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
     panel_title, stats_footer, stats_row, sync_footer, sync_row, sync_title,
@@ -29,6 +31,21 @@ const SELECT_BG: Color32 = Color32::from_rgb(40, 70, 120);
 
 fn mono() -> FontId {
     FontId::monospace(14.0)
+}
+
+/// Font family that draws every icon from `emoji-icon-font`, so toolbar glyphs share one style.
+fn icons() -> FontId {
+    FontId::new(16.0, FontFamily::Name("icons".into()))
+}
+
+/// Registers the `icons` family: emoji-icon-font first, the default fonts as fallback.
+pub fn setup_fonts(ctx: &Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let family = ["emoji-icon-font", "Hack", "Ubuntu-Light"].map(String::from);
+    fonts
+        .families
+        .insert(FontFamily::Name("icons".into()), family.into());
+    ctx.set_fonts(fonts);
 }
 
 /// Frontend state that `App` does not keep: last drawn cursor per panel (scroll only when it moved).
@@ -129,6 +146,11 @@ fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff
                         ("Size", SortKey::Size),
                         ("Date", SortKey::Date),
                     ] {
+                        let label = match panel.sort() {
+                            (k, false) if k == key => format!("{label} ⏶"),
+                            (k, true) if k == key => format!("{label} ⏷"),
+                            _ => label.to_owned(),
+                        };
                         h.col(|ui| {
                             let l = Label::new(RichText::new(label).strong()).sense(Sense::CLICK);
                             if ui.add(l).clicked() {
@@ -239,14 +261,31 @@ fn menu_bar(ui: &mut Ui, app: &mut App) {
 
 /// Icon toolbar under the menu bar; clicks send the key the menu lists.
 fn toolbar(ui: &mut Ui, app: &mut App) {
+    // toolbar keys only act on the panels; greyed out on sub-screens, dialogs and prompts
+    let enabled = matches!(app.mode, Mode::Normal) && app.idle();
     ui.horizontal(|ui| {
-        for &(icon, tip, code, mods) in &TOOLBAR {
-            let clicked = ui.add(Button::new(icon)).on_hover_text(tip).clicked();
-            if clicked && app.idle() {
-                app.on_key(KeyEvent::new(code, mods));
+        if !enabled {
+            ui.disable();
+        }
+        for (g, group) in TOOLBAR.iter().enumerate() {
+            if g > 0 {
+                ui.separator();
             }
+            toolbar_group(ui, app, group);
         }
     });
+}
+
+fn toolbar_group(ui: &mut Ui, app: &mut App, group: &[ToolItem]) {
+    for &(icon, tip, code, mods) in group {
+        let clicked = ui
+            .add(Button::new(RichText::new(icon).font(icons())))
+            .on_hover_text(tip)
+            .clicked();
+        if clicked && app.idle() {
+            app.on_key(KeyEvent::new(code, mods));
+        }
+    }
 }
 
 /// F-key bar; buttons are not focusable, so Tab and Space stay with the app.

@@ -54,8 +54,15 @@ fn main() -> anyhow::Result<()> {
         running: None,
         output: None,
     };
-    eframe::run_native("tc", options, Box::new(|_| Ok(Box::new(gui))))
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    eframe::run_native(
+        "tc",
+        options,
+        Box::new(|cc| {
+            draw::setup_fonts(&cc.egui_ctx);
+            Ok(Box::new(gui))
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 impl eframe::App for Gui {
