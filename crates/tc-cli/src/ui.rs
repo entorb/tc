@@ -24,8 +24,8 @@ mod monitor;
 use self::monitor::{draw_procs, draw_stats};
 mod forms;
 use self::forms::{
-    draw_find_form, draw_found, draw_multi_rename, draw_search_form, draw_settings, draw_sync,
-    draw_sync_form,
+    draw_find_form, draw_found, draw_multi_rename, draw_props, draw_search_form, draw_settings,
+    draw_sync, draw_sync_form,
 };
 
 // Norton Commander look: blue panels, light-cyan files, white dirs, cyan cursor bar.
@@ -144,6 +144,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         Mode::SyncForm(form) => (app.form_area, app.form_scroll) = draw_sync_form(frame, form),
         Mode::Settings(form) => (app.form_area, app.form_scroll) = draw_settings(frame, form),
+        Mode::Props(form) => (app.form_area, app.form_scroll) = draw_props(frame, form),
         Mode::Sync(s) => draw_sync(frame, s, body),
         Mode::Stats(_) => {}
         Mode::Procs(_) => draw_procs(frame, app, body),

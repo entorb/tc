@@ -5,7 +5,7 @@ use eframe::egui::{
     self, Button, Color32, ComboBox, Context, Label, Response, RichText, ScrollArea, Sense,
     TextStyle, Ui, vec2,
 };
-use tc_app::app::{App, FindForm, FormRow, Mode, RenameForm, SettingsForm, SyncForm};
+use tc_app::app::{App, FindForm, FormRow, Mode, PropsForm, RenameForm, SettingsForm, SyncForm};
 use tc_app::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
 use tc_app::fmt::{ProcInfo, procs_confirm, procs_info};
 use tc_app::{KeyCode, KeyEvent, KeyModifiers};
@@ -37,6 +37,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         (None, Mode::MultiRename(form)) => show_multi_rename(ctx, form),
         (None, Mode::SyncForm(form)) => show_sync_form(ctx, form),
         (None, Mode::Settings(form)) => show_settings(ctx, form),
+        (None, Mode::Props(form)) => show_props(ctx, form),
         (None, Mode::Procs(p)) => match (&p.draft, procs_info(p)) {
             (Some(d), _) => show_form(
                 ctx,
@@ -323,6 +324,22 @@ fn ok_cancel_buttons(ui: &mut Ui, ok: &str) -> Option<FormAct> {
 }
 
 /// Multi-rename over the whole window: form, then as many old -> new rows as fit; keys go through the app.
+/// Properties: the fields, then the mode preview and file info, OK / Cancel.
+fn show_props(ctx: &Context, form: &PropsForm) -> Option<FormAct> {
+    let lines = form.lines().join("\n");
+    modal("props")
+        .show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.heading("Properties");
+            ui.separator();
+            let act = form_rows(ui, &form.rows, form.focus, form.error.as_deref());
+            ui.separator();
+            ui.label(RichText::new(lines).monospace());
+            act.or(ok_cancel(ui, "Apply"))
+        })
+        .inner
+}
+
 fn show_multi_rename(ctx: &Context, form: &RenameForm) -> Option<FormAct> {
     let size = ctx.content_rect().shrink(24.0).size();
     modal("multi-rename")

@@ -14,6 +14,7 @@ pub mod ops;
 pub mod panel;
 pub mod popular;
 pub mod procs;
+pub mod props;
 pub mod rename;
 pub mod search;
 pub mod settings;

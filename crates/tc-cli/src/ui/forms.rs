@@ -7,7 +7,9 @@ use ratatui::widgets::{Clear, List, Paragraph};
 use super::popup::popup;
 use super::{BAR, PANEL, themed_block};
 use ratatui::widgets::ListState;
-use tc_app::app::{FindForm, Found, RenameForm, SearchForm, SettingsForm, Sync, SyncForm};
+use tc_app::app::{
+    FindForm, Found, PropsForm, RenameForm, SearchForm, SettingsForm, Sync, SyncForm,
+};
 use tc_app::fmt::{self, found_title, sync_footer, sync_row, sync_title};
 /// Search dialog over the viewer or editor.
 pub(super) fn draw_search_form(frame: &mut Frame, form: &SearchForm) -> (Rect, usize) {
@@ -46,6 +48,14 @@ pub(super) fn draw_sync_form(frame: &mut Frame, form: &SyncForm) -> (Rect, usize
 pub(super) fn draw_settings(frame: &mut Frame, form: &SettingsForm) -> (Rect, usize) {
     let lines = form_lines(&form.rows, form.focus, None);
     draw_form(frame, " Settings ", lines, form.focus)
+}
+
+/// Properties popup: the fields, then the mode preview and file info.
+pub(super) fn draw_props(frame: &mut Frame, form: &PropsForm) -> (Rect, usize) {
+    let mut lines = form_lines(&form.rows, form.focus, form.error.as_deref());
+    lines.push(Line::raw(""));
+    lines.extend(form.lines().into_iter().map(|l| Line::raw(l).style(PANEL)));
+    draw_form(frame, " Properties ", lines, form.focus)
 }
 
 /// Synchronize directories: page of compared rows holding the cursor, status line, question.

@@ -126,6 +126,14 @@ impl Job {
     pub fn percent(&self) -> u64 {
         (self.progress.load(Ordering::Relaxed) * 100 / self.total.max(1)).min(100)
     }
+
+    /// "42%", or the count done when the total is unknown (`u64::MAX`).
+    pub fn done_text(&self) -> String {
+        match self.total {
+            u64::MAX => format!("{} done", self.progress.load(Ordering::Relaxed)),
+            _ => format!("{}%", self.percent()),
+        }
+    }
 }
 
 /// Delete question with its answers; remote panels have no trash.

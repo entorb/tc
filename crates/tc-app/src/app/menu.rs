@@ -117,6 +117,7 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             // no shortcut: `Null` is never typed, only sent by these entries and F1 help
             ("Symlink", KeyCode::Null, C),
             ("Hard link", KeyCode::Null, C.union(A)),
+            ("Properties          Alt+Enter", KeyCode::Enter, A),
             ("Copy paths          Ctrl+Insert", KeyCode::Insert, C),
             ("Copy files          Ctrl+C", KeyCode::Char('c'), C),
             ("Cut files           Ctrl+X", KeyCode::Char('x'), C),
@@ -286,6 +287,7 @@ impl App {
                         | Mode::MultiRename(_)
                         | Mode::SyncForm(_)
                         | Mode::Settings(_)
+                        | Mode::Props(_)
                 ))
     }
 
@@ -314,7 +316,7 @@ impl App {
             Mode::Found(_) => &FOUND_FOOTER,
             Mode::Sync(_) => &SYNC_FOOTER,
             Mode::FindForm(_) => &FIND_FORM_FOOTER,
-            Mode::MultiRename(_) | Mode::SyncForm(_) => &FORM_FOOTER,
+            Mode::MultiRename(_) | Mode::SyncForm(_) | Mode::Props(_) => &FORM_FOOTER,
             Mode::Settings(_) => &SETTINGS_FOOTER,
             Mode::Stats(_) => &STATS_FOOTER,
             Mode::Cmd(_) if self.stats.is_some() => &STATS_FOOTER,

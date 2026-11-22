@@ -36,6 +36,7 @@ mod menu;
 mod multi_rename;
 mod popular;
 mod proc_mon;
+mod props;
 mod sync;
 mod tabs;
 mod update;
@@ -52,6 +53,7 @@ pub use menu::{
 pub use multi_rename::RenameForm;
 use multi_rename::{RenameBatch, rename_rows};
 pub use proc_mon::Procs;
+pub use props::PropsForm;
 pub use sync::{Sync, SyncForm};
 pub use update::{SettingsForm, VERSION};
 pub use widgets::{Filter, FormRow, ListRow, list_rows};
@@ -167,6 +169,8 @@ pub enum Mode {
     },
     /// Settings form (F9 Tools).
     Settings(SettingsForm),
+    /// File properties form (Alt+Enter): mode, owner, group.
+    Props(Box<PropsForm>),
 }
 
 enum Done {
@@ -182,6 +186,8 @@ enum Done {
     Saved(Editor, tc_core::Result<()>),
     /// Files on the host clipboard for Ctrl+V; `None` when the read was cancelled.
     HostFiles(Option<Vec<PathBuf>>),
+    /// File properties applied (what was done before an error stays done).
+    Props(tc_core::Result<()>),
 }
 
 pub struct App {
@@ -463,6 +469,7 @@ impl App {
             Mode::AskQuit => self.ask_quit_key(key.code),
             Mode::Update { tag, check } => self.update_key(key.code, tag, check),
             Mode::Settings(form) => self.settings_key(key, form),
+            Mode::Props(form) => self.props_key(key, form),
             Mode::Transfer(op, targets, mut text) => match key.code {
                 KeyCode::Enter => self.run(op, &targets, &text.text),
                 KeyCode::Esc => {}
@@ -635,6 +642,7 @@ impl App {
             KeyCode::Null if shift => self.disconnect_all(),
             KeyCode::Null if alt => self.open_settings(),
             KeyCode::F(6) if shift => self.rename(),
+            KeyCode::Enter if alt => self.props_open(),
             KeyCode::Enter if self.default_open().is_some() => {
                 if let Some(path) = self.default_open() {
                     self.open_default(path);
@@ -1357,6 +1365,10 @@ impl App {
             Done::Loaded(Err(e)) => self.mode = Mode::Message(e.to_string()),
             Done::HostFiles(Some(host)) => self.paste_with(host),
             Done::HostFiles(None) => {}
+            Done::Props(result) => {
+                let error = result.err().filter(|e| !matches!(e, Error::Cancelled));
+                self.finish(error.map(|e| e.to_string()));
+            }
             Done::Saved(_, Ok(())) if exit => self.leave_editor(),
             Done::Saved(editor, result) => {
                 let error = result.err().filter(|e| !matches!(e, Error::Cancelled));

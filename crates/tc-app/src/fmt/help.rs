@@ -111,6 +111,9 @@ Symlink         (F9 File) link to the cursor entry in the other
                 panel's directory; asks the target, then the link
                 path; never replaces; local panels only
 Hard link       (F9 File) same for a hard link; files only
+Alt+Enter       properties of marked entries, else the cursor
+                entry (F9 File): Unix mode, owner, group;
+                elsewhere read-only; local panels only
 
 == Tools ==
 Settings        (F9 Tools) daily update check on / off
@@ -226,6 +229,31 @@ and Ctrl+-.
 
 == Run ==
 Every change is saved at once.
+Esc / F10       close";
+pub const HELP_PROPS: &str = "\
+== Fields ==
+Up/Down / Tab   previous / next field
+Space           toggle checkbox
+Click           focus a field; toggles a checkbox, cycles a choice
+Left/Right      move in text
+
+== Options ==
+One file: the fields show its values; only changed fields are
+applied. Several entries or a directory: the fields start empty
+(the first entry's values are shown below them); every filled
+field is applied to all, inside directories too if Recursive.
+An empty field is left alone.
+Mode: octal, 1 to 4 digits (4755 = setuid); the line under the
+fields previews it as rwxr-xr-x. Symlinks keep their mode
+(chmod would change the target).
+Owner / Group: name or number; the link itself, not its target.
+Read-only (not Unix): the file attribute.
+Recursive (directories): also everything inside; symlinked
+directories are not entered.
+
+== Run ==
+Enter           apply; stops at the first error, what was done
+                stays done; Esc cancels while it runs
 Esc / F10       close";
 pub const HELP_FIND_FORM: &str = "\
 == Fields ==
@@ -542,6 +570,7 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::SyncForm(_) => ("Help: synchronize form", HELP_SYNC_FORM),
         Mode::FindForm(_) => ("Help: find files", HELP_FIND_FORM),
         Mode::Settings(_) => ("Help: settings", HELP_SETTINGS),
+        Mode::Props(_) => ("Help: properties", HELP_PROPS),
         Mode::Found(_) => ("Help: found files", HELP_FOUND),
         Mode::MultiRename(_) => ("Help: multi-rename", HELP_RENAME),
         Mode::Hotlist(_)

@@ -112,7 +112,10 @@ fn footer_keys_are_documented_in_their_help() {
         (&FOUND_FOOTER, &[fmt::HELP_FOUND]),
         (&SYNC_FOOTER, &[fmt::HELP_SYNC]),
         (&FIND_FORM_FOOTER, &[fmt::HELP_FIND_FORM]),
-        (&FORM_FOOTER, &[fmt::HELP_RENAME, fmt::HELP_SYNC_FORM]),
+        (
+            &FORM_FOOTER,
+            &[fmt::HELP_RENAME, fmt::HELP_SYNC_FORM, fmt::HELP_PROPS],
+        ),
         (&SETTINGS_FOOTER, &[fmt::HELP_SETTINGS]),
         (&STATS_FOOTER, &[fmt::HELP_STATS]),
         (&PROCS_FOOTER, &[fmt::HELP_PROCS]),
