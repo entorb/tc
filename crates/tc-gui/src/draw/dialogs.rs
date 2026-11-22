@@ -143,7 +143,7 @@ fn show_find_form(ctx: &Context, form: &FindForm) -> Option<FormAct> {
         ("find-form", "Find files"),
         (rows, form.focus, err),
         keys,
-        "Search",
+        Some("Search"),
     )
 }
 
@@ -156,7 +156,7 @@ fn show_sync_form(ctx: &Context, form: &SyncForm) -> Option<FormAct> {
         ("sync-form", title),
         (rows, form.focus, err),
         keys,
-        "Compare",
+        Some("Compare"),
     )
 }
 
@@ -167,17 +167,17 @@ fn show_settings(ctx: &Context, form: &SettingsForm) -> Option<FormAct> {
         ("settings", "Settings"),
         (&form.rows, form.focus, None),
         keys,
-        "Save",
+        None,
     )
 }
 
-/// Modal form: (id, title), (rows, focus, error), key help, then OK / Cancel.
+/// Modal form: (id, title), (rows, focus, error), key help, then OK / Cancel (none when `ok` is None).
 fn show_form(
     ctx: &Context,
     (id, title): (&str, &str),
     (rows, focus, error): (&[FormRow], usize, Option<&str>),
     keys: &str,
-    ok: &str,
+    ok: Option<&str>,
 ) -> Option<FormAct> {
     modal(id)
         .show(ctx, |ui| {
@@ -186,7 +186,7 @@ fn show_form(
             ui.separator();
             let act = form_rows(ui, rows, focus, error);
             ui.label(RichText::new(keys).color(MUTED));
-            act.or(ok_cancel(ui, ok))
+            act.or(ok.and_then(|ok| ok_cancel(ui, ok)))
         })
         .inner
 }

@@ -23,7 +23,7 @@ const ZOOMS: [&str; 26] = [
     "290%", "300%",
 ];
 
-/// Settings form (F9 Tools > Settings); Enter applies and saves.
+/// Settings form (F9 Tools > Settings); each change applies and saves at once.
 #[derive(Clone)]
 pub struct SettingsForm {
     pub rows: Vec<FormRow>,
@@ -145,8 +145,7 @@ impl App {
     pub(super) fn settings_key(&mut self, key: KeyEvent, mut form: SettingsForm) {
         let last = form.rows.len() - 1;
         match key.code {
-            KeyCode::Esc | KeyCode::F(10) => return,
-            KeyCode::Enter => return self.apply_settings(&form.rows),
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Enter => return,
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
             code => {
@@ -154,6 +153,9 @@ impl App {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
                 form.rows[form.focus].key(code, ctrl);
+                let rows = form.rows.clone();
+                self.mode = Mode::Settings(form);
+                return self.apply_settings(&rows);
             }
         }
         self.mode = Mode::Settings(form);
@@ -251,16 +253,16 @@ mod tests {
     }
 
     #[test]
-    fn settings_enter_applies_esc_discards() {
+    fn settings_saves_on_change_esc_and_enter_close() {
         let mut a = app();
         a.open_settings();
         key(&mut a, KeyCode::Char(' '));
+        assert!(!a.update_check);
         key(&mut a, KeyCode::Esc);
-        assert!(a.update_check);
-        a.open_settings();
-        key(&mut a, KeyCode::Char(' '));
-        key(&mut a, KeyCode::Enter);
         assert!(matches!(a.mode, Mode::Normal));
         assert!(!a.update_check);
+        a.open_settings();
+        key(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::Normal));
     }
 }

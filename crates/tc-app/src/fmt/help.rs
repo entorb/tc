@@ -212,8 +212,8 @@ Font size (tc-gui): Left/Right/Space change it; also Ctrl+=
 and Ctrl+-.
 
 == Run ==
-Enter           save
-Esc / F10       close without saving";
+Every change is saved at once.
+Esc / F10       close";
 pub const HELP_FIND_FORM: &str = "\
 == Fields ==
 Tab             next field

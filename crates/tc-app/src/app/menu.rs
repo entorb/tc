@@ -71,11 +71,7 @@ pub(super) const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
     CLOSE,
 ];
 
-pub(super) const SETTINGS_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
-    HELP,
-    ("Enter Save", KeyCode::Enter, KeyModifiers::NONE),
-    CLOSE,
-];
+pub(super) const SETTINGS_FOOTER: [(&str, KeyCode, KeyModifiers); 2] = [HELP, CLOSE];
 
 /// Footer bar items: label, key sent when clicked.
 pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [

@@ -467,7 +467,7 @@ pub fn found_row(h: &Hit) -> String {
 }
 
 /// Keys shown under the settings form.
-pub const SETTINGS_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter save  Esc cancel";
+pub const SETTINGS_FORM_KEYS: &str = "Space checkbox  Esc close";
 
 /// Keys shown under the sync form.
 pub const SYNC_FORM_KEYS: &str =
