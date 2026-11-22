@@ -1,7 +1,9 @@
+use super::chrome::text_box;
 use super::{ACCENT, MUTED, SELECT_BG, TEXT, modal};
 use eframe::egui::{self, Color32, Context, FontId, RichText, ScrollArea, Sense};
 use tc_app::app::App;
 use tc_app::fmt::{self};
+use tc_core::cmdline::LineEdit;
 /// Help as a table: section titles, then key | info rows (continuation lines join the info).
 pub(super) fn show_help(ctx: &Context, app: &mut App) {
     let title = app.help_text().0;
@@ -16,7 +18,10 @@ pub(super) fn show_help(ctx: &Context, app: &mut App) {
     modal("help").show(ctx, |ui| {
         ui.set_width(640.0);
         ui.heading(title);
-        ui.label(RichText::new(format!("Find: {}_", app.help_filter)).color(ACCENT));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Find").strong());
+            text_box(ui, &LineEdit::from(app.help_filter.clone()), true);
+        });
         ui.separator();
         ScrollArea::vertical()
             .max_height(max_h)
@@ -45,10 +50,6 @@ pub(super) fn show_help(ctx: &Context, app: &mut App) {
                     }
                 }
             });
-        ui.label(
-            RichText::new("Up/Down select  Enter or click runs  type to filter  Esc closes")
-                .color(MUTED),
-        );
     });
     if let Some(i) = clicked {
         app.help_click(i);

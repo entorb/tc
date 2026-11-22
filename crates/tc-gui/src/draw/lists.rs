@@ -1,6 +1,6 @@
-use super::chrome::line_edit;
+use super::chrome::{line_edit, list_button};
 use super::viewer::cell;
-use super::{ACCENT, MUTED, SELECT_BG, TEXT, mono};
+use super::{ACCENT, MUTED, TEXT};
 use eframe::egui::{
     Align, Align2, Color32, FontId, Label, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
     TextStyle, Ui, vec2,
@@ -18,11 +18,7 @@ use tc_core::procs::ProcSort;
 use tc_core::stats::treemap::Tile;
 /// One clickable list row; `Some(double)` when clicked.
 fn list_row(ui: &mut Ui, text: String, selected: bool) -> Option<bool> {
-    let mut t = RichText::new(text).font(mono());
-    if selected {
-        t = t.background_color(SELECT_BG).color(Color32::WHITE);
-    }
-    let r = ui.add(Label::new(t).sense(Sense::CLICK).truncate());
+    let r = list_button(ui, text, selected, true);
     if r.double_clicked() {
         Some(true)
     } else {
@@ -104,7 +100,7 @@ pub(super) fn status_line(ui: &mut Ui, app: &App) {
 /// `label` and the line being typed.
 pub(super) fn prompt(ui: &mut Ui, label: &str, l: &LineEdit) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).font(mono()));
+        ui.label(RichText::new(label).strong());
         line_edit(ui, l);
     });
 }

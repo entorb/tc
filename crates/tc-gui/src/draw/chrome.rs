@@ -1,5 +1,5 @@
 use super::{MUTED, icons, mono};
-use eframe::egui::{self, Button, Id, RichText, Sense, Stroke, Ui, vec2};
+use eframe::egui::{self, Align, Button, Id, Layout, RichText, Sense, Stroke, Ui, vec2};
 use tc_app::app::{App, MENUS, Mode, TOOLBAR, ToolItem};
 use tc_app::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
@@ -186,4 +186,25 @@ pub(super) fn text_box(ui: &mut Ui, l: &LineEdit, focused: bool) -> egui::Respon
         p.vline(x, (origin.y)..=(rect.max.y - pad.y), caret_stroke);
     }
     r.on_hover_cursor(egui::CursorIcon::Text)
+}
+
+/// Full-width selectable list row (egui look); not focusable, so keys stay with the app.
+pub(super) fn list_button(
+    ui: &mut Ui,
+    text: impl Into<String>,
+    selected: bool,
+    mono_font: bool,
+) -> egui::Response {
+    let mut t = RichText::new(text);
+    if mono_font {
+        t = t.font(mono());
+    }
+    ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+        ui.add(
+            Button::selectable(selected, t)
+                .sense(Sense::CLICK)
+                .truncate(),
+        )
+    })
+    .inner
 }
