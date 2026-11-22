@@ -133,6 +133,7 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("History forward     Alt+Right", KeyCode::Right, A),
             ("Bookmarks           Ctrl+B", KeyCode::Char('b'), C),
             ("Add bookmark        Ctrl+D", KeyCode::Char('d'), C),
+            ("Popular dirs        Ctrl+Z", KeyCode::Char('z'), C),
             ("Connections         Ctrl+N", KeyCode::Char('n'), C),
             // no shortcut: Shift+`Null` is never typed, only sent by this entry and F1 help
             ("Disconnect all", KeyCode::Null, S),

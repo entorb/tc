@@ -144,6 +144,8 @@ pub struct Panel {
     /// Visited directories, oldest first, `pos` is the current one.
     history: Vec<PathBuf>,
     pos: usize,
+    /// Local directory just shown by a visit, for [`Panel::take_visited`].
+    visited: Option<PathBuf>,
     /// Panelized result list: entry names are absolute paths, `path` is where Backspace/Esc returns to.
     virt: bool,
     /// Line of the first content match per found entry (by name), for F3/F4 at the match.
@@ -170,6 +172,7 @@ impl Panel {
         Ok(Self {
             history: vec![path.clone()],
             pos: 0,
+            visited: None,
             local: path.clone(),
             path,
             entries,
@@ -186,6 +189,12 @@ impl Panel {
             dir_sizes: HashMap::new(),
             pending: None,
         })
+    }
+
+    /// The local directory a user navigation just showed (once); none for history steps,
+    /// remote, archive and found lists.
+    pub fn take_visited(&mut self) -> Option<PathBuf> {
+        self.visited.take()
     }
 
     pub fn sort(&self) -> (SortKey, bool) {

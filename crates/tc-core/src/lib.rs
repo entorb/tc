@@ -12,6 +12,7 @@ pub mod hostclip;
 pub mod hotlist;
 pub mod ops;
 pub mod panel;
+pub mod popular;
 pub mod procs;
 pub mod rename;
 pub mod search;

@@ -214,6 +214,11 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             &app.list_filter,
             "(empty, Insert or Ctrl+D adds the current directory)",
         ),
+        Mode::Popular(sel) => list_dialog(
+            ("Popular directories", &app.popular, *sel),
+            &app.list_filter,
+            "(empty, directories you visit are listed here)",
+        ),
         Mode::Compare(sel) => list_dialog(
             ("Compare panels, select", &CompareKind::ALL, *sel),
             &Filter::default(),

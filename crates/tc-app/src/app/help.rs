@@ -13,6 +13,7 @@ impl App {
                 && !self.help
                 && match &self.mode {
                     Mode::Hotlist(_)
+                    | Mode::Popular(_)
                     | Mode::Connections(_)
                     | Mode::Drives(..)
                     | Mode::Compare(_) => true,

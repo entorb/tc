@@ -115,6 +115,7 @@ impl Panel {
                     // remote directories are not in the (local) history
                     if visit && self.remote.is_none() {
                         self.visit(&self.path.clone());
+                        self.visited = Some(self.path.clone());
                     }
                     if let Some(name) = focus {
                         self.focus(&name);

@@ -303,6 +303,12 @@ impl ListRow for tc_core::panel::CompareKind {
     }
 }
 
+impl ListRow for tc_core::popular::Popular {
+    fn label(&self) -> Cow<'_, str> {
+        self.path.to_string_lossy()
+    }
+}
+
 impl ListRow for hotlist::Bookmark {
     fn label(&self) -> Cow<'_, str> {
         if self.alias.is_empty() {

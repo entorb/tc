@@ -9,7 +9,7 @@ use anyhow::Context;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::widgets::ListState;
 use tc_core::panel::Panel;
-use tc_core::{cmdline, hotlist, settings};
+use tc_core::{cmdline, hotlist, popular, settings};
 
 use super::{App, FindForm, Mode, rename_rows, rows_from_line};
 
@@ -36,10 +36,12 @@ impl App {
         };
         self.hotlist =
             hotlist::load_bookmarks(&dir.join("hotlist")).context("cannot read hotlist")?;
+        self.popular = popular::load(&dir.join("popular")).context("cannot read popular")?;
         self.connections = paths("connections")?;
         let kv = settings::load(&dir.join("settings")).context("cannot read settings")?;
         self.restore_session(&kv);
         self.hotlist_file = Some(dir.join("hotlist"));
+        self.popular_file = Some(dir.join("popular"));
         self.connections_file = Some(dir.join("connections"));
         self.searches_file = Some(dir.join("searches"));
         self.rename_presets_file = Some(dir.join("rename-presets"));
@@ -188,7 +190,7 @@ impl App {
         self.mode = Mode::Message(match settings::remove_all(&dir) {
             Ok(n) => {
                 (self.hotlist_file, self.connections_file) = (None, None);
-                self.rename_presets_file = None;
+                (self.rename_presets_file, self.popular_file) = (None, None);
                 (self.searches_file, self.history_file, self.config_dir) = (None, None, None);
                 format!(
                     "Deleted {n} file(s) in {}. Nothing is saved until tc restarts.",

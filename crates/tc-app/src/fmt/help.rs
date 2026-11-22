@@ -8,6 +8,7 @@ Type to filter this help, Up/Down select, Enter runs the key.
 == Highlights ==
 F9              menu with all features (when keys are eaten)
 Ctrl+B          bookmarks (hotlist)
+Ctrl+Z          popular directories (most visited and recent)
 Ctrl+Space      FILE STATS (like ncdu): biggest files and dirs
                 of the current tree, with % and bar
 Ctrl+N          SFTP / FTP / FTPS connections
@@ -108,7 +109,7 @@ Ctrl+V          paste copied / cut files here
 Settings        (F9 Tools) daily update check on / off
 Delete config files
                 (F9 Tools) delete tc's saved files: hotlist,
-                connections, histories, searches, session
+                popular dirs, connections, histories, searches, session
 
 == Quit ==
 F10             quit at once; q quits after asking";
@@ -337,6 +338,13 @@ Delete/Bksp     remove the bookmark
 /               filter: Enter keeps, Esc clears
 Esc / q / F10   close
 
+== Popular directories (Ctrl+Z) ==
+Up/Down         move, best ranked (visits, recent first) on top
+Enter           go to the directory in the active panel
+Delete/Bksp     forget the directory
+/               filter: Enter keeps, Esc clears
+Esc / q / F10   close
+
 == Connections (Ctrl+N) ==
 Up/Down         move
 Enter           connect
@@ -520,9 +528,11 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Settings(_) => ("Help: settings", HELP_SETTINGS),
         Mode::Found(_) => ("Help: found files", HELP_FOUND),
         Mode::MultiRename(_) => ("Help: multi-rename", HELP_RENAME),
-        Mode::Hotlist(_) | Mode::Connections(_) | Mode::Drives(..) | Mode::Compare(_) => {
-            ("Help: lists", HELP_LISTS)
-        }
+        Mode::Hotlist(_)
+        | Mode::Popular(_)
+        | Mode::Connections(_)
+        | Mode::Drives(..)
+        | Mode::Compare(_) => ("Help: lists", HELP_LISTS),
         Mode::Xfer(_) => ("Help: file exists", HELP_CONFLICT),
         _ => ("Help", HELP_MAIN),
     }

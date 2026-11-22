@@ -32,6 +32,7 @@ mod find_files;
 mod help;
 mod menu;
 mod multi_rename;
+mod popular;
 mod proc_mon;
 mod sync;
 mod tabs;
@@ -95,6 +96,8 @@ pub enum Mode {
     Cmd(LineEdit),
     /// Bookmark list with the selected row.
     Hotlist(usize),
+    /// Ctrl+Z popular directories with the selected row.
+    Popular(usize),
     /// F9 menu bar: open group and selected entry.
     Menu(usize, usize),
     /// Ctrl+Y: what to select, selected row.
@@ -280,6 +283,9 @@ pub struct App {
     /// `/` filter of the open bookmark or connection list.
     pub list_filter: Filter,
     pub hotlist_file: Option<PathBuf>,
+    /// Visited directories (frecency) and the file they are saved to.
+    pub popular: Vec<tc_core::popular::Popular>,
+    pub popular_file: Option<PathBuf>,
     /// Time and cell of the last left click, to detect double clicks (terminals send none).
     last_click: Option<(Instant, u16, u16)>,
     /// Command history (oldest first) and the file it is saved to.
@@ -368,6 +374,8 @@ impl App {
             hotlist: Vec::new(),
             list_filter: Filter::default(),
             hotlist_file: None,
+            popular: Vec::new(),
+            popular_file: None,
             last_click: None,
             history: Vec::new(),
             history_file: None,
@@ -471,6 +479,7 @@ impl App {
             },
             Mode::Cmd(l) => self.cmd_key(l, key),
             Mode::Hotlist(sel) => self.hotlist_key(key, sel),
+            Mode::Popular(sel) => self.popular_key(key, sel),
             Mode::Compare(sel) => self.compare_key(key.code, sel),
             Mode::Menu(group, sel) => self.menu_key(key.code, group, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
@@ -695,6 +704,7 @@ impl App {
             KeyCode::Char('e') => self.sync_open(),
             KeyCode::Char('n') => self.open_list(Mode::Connections(0)),
             KeyCode::Char('b') => self.open_list(Mode::Hotlist(0)),
+            KeyCode::Char('z') => self.popular_open(),
             KeyCode::Char(' ') => self.spawn_stats(),
             KeyCode::Char('p') => {
                 let r = self.panels[self.active].remote().cloned();
@@ -1241,6 +1251,7 @@ impl App {
         {
             self.mode = Mode::Found(f);
         }
+        self.popular_tick();
         self.restore_sync_back();
         self.restore_rename_back();
         self.update_tick();
