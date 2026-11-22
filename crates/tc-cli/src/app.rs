@@ -1,6 +1,7 @@
 //! App state and key handling, independent of the terminal.
 
 use std::borrow::Cow;
+use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -207,12 +208,49 @@ pub struct FileClip {
     pub side: Side,
 }
 
+/// What Ctrl+F3..F6 order the find results by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FoundSort {
+    Path,
+    Name,
+    Date,
+    Size,
+}
+
+/// Case-insensitive comparison of two names (no allocation for UTF-8 ones).
+fn cmp_lower(a: &OsStr, b: &OsStr) -> cmp::Ordering {
+    let (a, b) = (a.to_string_lossy(), b.to_string_lossy());
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+}
+
+/// Order of two hits by `key`, ties by path.
+fn cmp_hits(a: &Hit, b: &Hit, key: FoundSort) -> cmp::Ordering {
+    let (a, b) = (&a.entry, &b.entry);
+    let by = match key {
+        FoundSort::Path => cmp::Ordering::Equal,
+        FoundSort::Name => cmp_lower(
+            Path::new(&a.name).file_name().unwrap_or_default(),
+            Path::new(&b.name).file_name().unwrap_or_default(),
+        ),
+        FoundSort::Date => a.modified.cmp(&b.modified),
+        FoundSort::Size => {
+            let size = |e: &Entry| if e.is_dir { 0 } else { e.size };
+            size(a).cmp(&size(b))
+        }
+    };
+    by.then_with(|| cmp_lower(&a.name, &b.name))
+}
+
 /// Results of a running or finished file search.
 pub struct Found {
     pub list: Vec<Hit>,
     /// Indices into `list` of the shown results (all, or those matching `filter`).
     view: Vec<usize>,
     pub filter: Filter,
+    /// Order of `view` and whether reversed; `None` keeps the arrival order.
+    pub sort: Option<(FoundSort, bool)>,
     /// Row in `view`.
     pub sel: usize,
     pub running: bool,
@@ -790,24 +828,54 @@ impl Found {
         self.view = (0..self.list.len())
             .filter(|&i| self.matches(&self.list[i]))
             .collect();
+        self.sort_view();
         self.sel = self.sel.min(self.view.len().saturating_sub(1));
     }
 
+    /// Orders `view` by `sort`, the cursor stays on the same hit.
+    fn resort(&mut self) {
+        let cur = self.view.get(self.sel).copied();
+        self.sort_view();
+        if let Some(i) = cur.and_then(|c| self.view.iter().position(|&v| v == c)) {
+            self.sel = i;
+        }
+    }
+
+    fn sort_view(&mut self) {
+        let Some((key, rev)) = self.sort else { return };
+        let list = &self.list;
+        self.view.sort_by(|&a, &b| {
+            let o = cmp_hits(&list[a], &list[b], key);
+            if rev { o.reverse() } else { o }
+        });
+    }
+
+    /// Sorts by `key`; the same key again reverses.
+    fn set_sort(&mut self, key: FoundSort) {
+        self.sort = Some((key, self.sort == Some((key, false))));
+        self.resort();
+    }
+
     fn pump(&mut self) {
+        let mut pushed = false;
         for _ in 0..5000 {
             match self.rx.try_recv() {
                 Ok(e) => {
                     if self.matches(&e) {
                         self.view.push(self.list.len());
+                        pushed = true;
                     }
                     self.list.push(e);
                 }
-                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.running = false;
-                    return;
+                    break;
                 }
             }
+        }
+        if pushed {
+            self.resort();
         }
     }
 }
@@ -3086,6 +3154,7 @@ impl App {
             list: Vec::new(),
             view: Vec::new(),
             filter: Filter::default(),
+            sort: None,
             query,
             sel: 0,
             running: true,
@@ -3468,6 +3537,16 @@ impl App {
                 f.cancel.store(true, Ordering::Relaxed);
                 return self.spawn_find(f.query);
             }
+            KeyCode::F(n @ 3..=6) if ctrl => {
+                f.set_sort(
+                    [
+                        FoundSort::Path,
+                        FoundSort::Name,
+                        FoundSort::Date,
+                        FoundSort::Size,
+                    ][usize::from(n) - 3],
+                );
+            }
             KeyCode::Enter | KeyCode::F(3 | 4) if f.remote => {
                 self.found = Some(f);
                 self.mode = Mode::Message("Remote results are only listed.".into());
@@ -3512,7 +3591,7 @@ impl App {
         self.mode = Mode::Found(f);
     }
 
-    /// Enter in the results: the found files (once each, in search order) become a virtual
+    /// Enter in the results: the found files (once each, in the shown order) become a virtual
     /// panel; their first matching line stays for F3/F4 there.
     fn panelize_found(&mut self, f: Found) {
         f.cancel.store(true, Ordering::Relaxed);
@@ -6310,6 +6389,95 @@ mod tests {
         }
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn found_sorts_by_size_name_and_reverses() {
+        let dir = tempfile::tempdir().unwrap();
+        for (n, len) in [("b.txt", 3), ("a.txt", 10), ("c.txt", 1)] {
+            std::fs::write(dir.path().join(n), vec![b'x'; len]).unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        find_in_form(&mut app, "*.txt", None);
+        wait_found(&mut app);
+        let shown = |app: &App| match &app.mode {
+            Mode::Found(f) => f
+                .shown()
+                .map(|h| (h.entry.size, h.entry.name.clone()))
+                .collect::<Vec<_>>(),
+            _ => panic!("no results"),
+        };
+        let names = |app: &App| {
+            shown(app)
+                .iter()
+                .map(|(_, n)| {
+                    Path::new(n)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        with(&mut app, KeyCode::F(6), KeyModifiers::CONTROL);
+        assert!(matches!(app.mode, Mode::Found(_)));
+        assert_eq!(names(&app), ["c.txt", "b.txt", "a.txt"]);
+        key(&mut app, KeyCode::Home); // on c.txt
+        with(&mut app, KeyCode::F(6), KeyModifiers::CONTROL);
+        assert_eq!(names(&app), ["a.txt", "b.txt", "c.txt"]);
+        assert!(
+            matches!(&app.mode, Mode::Found(f) if f.sel == 2 && fmt::found_title(f).contains("[size desc]"))
+        );
+        with(&mut app, KeyCode::F(4), KeyModifiers::CONTROL);
+        assert_eq!(names(&app), ["a.txt", "b.txt", "c.txt"]);
+        assert!(matches!(&app.mode, Mode::Found(f) if fmt::found_title(f).contains("[name]")));
+    }
+
+    #[test]
+    fn found_sort_keeps_streamed_hits_sorted() {
+        let (tx, rx) = mpsc::channel();
+        let mut f = Found {
+            list: Vec::new(),
+            view: Vec::new(),
+            filter: Filter::default(),
+            sort: None,
+            sel: 0,
+            running: true,
+            remote: false,
+            error: Arc::default(),
+            re: None,
+            query: find::Query::default(),
+            rx,
+            cancel: Arc::default(),
+        };
+        f.set_sort(FoundSort::Size);
+        let hit = |size| Hit {
+            entry: Entry {
+                size,
+                name: OsString::from(format!("n{size}")),
+                is_dir: false,
+                is_symlink: false,
+                modified: None,
+                link: None,
+            },
+            line: None,
+        };
+        for size in [5, 1, 9] {
+            tx.send(hit(size)).unwrap();
+        }
+        f.pump();
+        for size in [3, 7, 0] {
+            tx.send(hit(size)).unwrap();
+        }
+        f.pump();
+        let sizes: Vec<u64> = f.shown().map(|h| h.entry.size).collect();
+        assert_eq!(sizes, [0, 1, 3, 5, 7, 9]);
+        assert_eq!(f.shown_len(), 6);
+        // A filter keeps the cursor row, not an arbitrary hit of the unsorted view.
+        f.sel = 0;
+        f.filter.line = LineEdit::from("n".to_owned());
+        f.rebuild();
+        assert_eq!((f.sel, f.shown().next().map(|h| h.entry.size)), (0, Some(0)));
     }
 
     #[test]

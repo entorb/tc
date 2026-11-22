@@ -350,6 +350,10 @@ Home/End        first / last result
 F3              view file at the match
 F4              edit file at the match
 Enter           put the shown results in the panel (virtual list)
+Ctrl+F3         sort by path (again: reverse)
+Ctrl+F4         sort by file name
+Ctrl+F5         sort by date
+Ctrl+F6         sort by size
 Ctrl+R          search again
 Ctrl+G          go to the file's directory (local only)
 Esc / q / F10   stop a running search, then close";
@@ -836,8 +840,15 @@ pub fn found_title(f: &Found) -> String {
     } else {
         String::new()
     };
+    let sort = match f.sort {
+        Some((key, rev)) => {
+            let key = format!("{key:?}").to_lowercase();
+            format!(" [{key}{}]", if rev { " desc" } else { "" })
+        }
+        None => String::new(),
+    };
     format!(
-        " Find: {shown}{} found, {state}{cap}{err}{} ",
+        " Find: {shown}{} found, {state}{cap}{err}{sort}{} ",
         f.list.len(),
         f.filter.tag()
     )
