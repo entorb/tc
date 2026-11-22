@@ -26,3 +26,6 @@ opt-level = 3
 opt-level = 3
 [profile.release.package.encoding_rs]
 opt-level = 3
+
+[profile.dev]
+debug = "line-tables-only"

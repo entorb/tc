@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::fmt::{DATE_WIDTH, SIZE_WIDTH};
+use crate::fmt::{self, DATE_WIDTH, SIZE_WIDTH};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -22,6 +22,7 @@ use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::eta::Estimator;
 use tc_core::panel::{Entry, Panel, SortKey};
+use tc_core::procs::{self, Proc, ProcSort, Sampler, Snapshot};
 use tc_core::stats::{self, Node};
 use tc_core::vfs::{self, Remote, Side};
 use tc_core::{Error, find, hotlist, ops, search, view::Viewer};
@@ -63,6 +64,8 @@ pub enum Mode {
     Cmd(LineEdit),
     /// Bookmark list with the selected row.
     Hotlist(usize),
+    /// F9 menu bar: open group and selected entry.
+    Menu(usize, usize),
     /// Mount points, selected row and the panel Enter jumps.
     Drives(Vec<PathBuf>, usize, usize),
     Message(String),
@@ -70,6 +73,8 @@ pub enum Mode {
     Found(Found),
     /// File Stats (ncdu-style) tree, scanned by a worker thread.
     Stats(Stats),
+    /// Process monitor, refreshed by a worker thread.
+    Procs(Box<Procs>),
     View {
         title: String,
         view: Viewer,
@@ -294,6 +299,200 @@ impl Stats {
     }
 }
 
+/// Process monitor (Ctrl+P): latest snapshot, sorted and filtered, refreshed by a worker.
+pub struct Procs {
+    /// Connection of the remote panel it was opened on; `None`: this computer.
+    pub remote: Option<Arc<dyn Remote>>,
+    sampler: Sampler,
+    /// Time between snapshots, CPU % is averaged over it.
+    pub every: Duration,
+    /// Interval being typed (`s`), in seconds.
+    pub every_edit: Option<LineEdit>,
+    pub snap: Snapshot,
+    /// Indices into `snap.procs` matching the filter, in sort order.
+    pub rows: Vec<usize>,
+    pub sel: usize,
+    pub sort: ProcSort,
+    pub rev: bool,
+    pub filter: LineEdit,
+    /// Filter being typed.
+    pub editing: bool,
+    /// Kill question for (pid, name), shown while set.
+    pub confirm: Option<(u32, String)>,
+    kill: Option<thread::JoinHandle<tc_core::Result<()>>>,
+    /// Result of the last kill, shown in the footer until the next key.
+    pub status: String,
+}
+
+impl Procs {
+    fn new(remote: Option<Arc<dyn Remote>>) -> Self {
+        Procs {
+            sampler: procs::sample(remote.clone(), procs::INTERVAL),
+            every: procs::INTERVAL,
+            every_edit: None,
+            remote,
+            snap: Snapshot::default(),
+            rows: Vec::new(),
+            sel: 0,
+            sort: ProcSort::Cpu,
+            rev: false,
+            filter: LineEdit::default(),
+            editing: false,
+            confirm: None,
+            kill: None,
+            status: String::new(),
+        }
+    }
+
+    /// No prompt or question open.
+    pub fn idle(&self) -> bool {
+        !self.editing && self.every_edit.is_none() && self.confirm.is_none()
+    }
+
+    /// Process under the cursor.
+    pub fn current(&self) -> Option<&Proc> {
+        self.rows.get(self.sel).map(|&i| &self.snap.procs[i])
+    }
+
+    /// Re-sort and re-filter; the cursor keeps its row, so the list does not jump under it.
+    fn refresh(&mut self) {
+        procs::sort(&mut self.snap.procs, self.sort, self.rev);
+        let filter = self.filter.text.to_lowercase();
+        self.rows = (0..self.snap.procs.len())
+            .filter(|&i| procs::matches(&self.snap.procs[i], &filter))
+            .collect();
+        self.sel = self.sel.min(self.rows.len().saturating_sub(1));
+    }
+
+    /// Takes the newest snapshot and a finished kill; `Some(error)` when sampling failed.
+    fn tick(&mut self) -> Option<String> {
+        let mut new = None;
+        while let Ok(r) = self.sampler.rx.try_recv() {
+            match r {
+                Ok(s) => new = Some(s),
+                Err(e) => return Some(e.to_string()),
+            }
+        }
+        if let Some(s) = new {
+            self.snap = s;
+            self.refresh();
+        }
+        if self
+            .kill
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished)
+            && let Some(job) = self.kill.take()
+        {
+            self.status = match job.join() {
+                Ok(Ok(())) => "signal sent".into(),
+                Ok(Err(e)) => e.to_string(),
+                Err(_) => "kill failed".into(),
+            };
+        }
+        None
+    }
+
+    /// `false` closes the monitor.
+    fn key(&mut self, key: KeyEvent, page: usize) -> bool {
+        self.status.clear();
+        if self.confirm.is_some() {
+            self.confirm_key(key.code);
+            return true;
+        }
+        if self.editing {
+            self.filter_key(key);
+            return true;
+        }
+        if let Some(l) = self.every_edit.take() {
+            self.every_key(l, key);
+            return true;
+        }
+        let last = self.rows.len().saturating_sub(1);
+        let sort = |p: &mut Self, key| {
+            p.rev = p.sort == key && !p.rev;
+            p.sort = key;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(10) => return false,
+            KeyCode::Up => self.sel = self.sel.saturating_sub(1),
+            KeyCode::Down => self.sel = (self.sel + 1).min(last),
+            KeyCode::PageUp => self.sel = self.sel.saturating_sub(page),
+            KeyCode::PageDown => self.sel = (self.sel + page).min(last),
+            KeyCode::Home => self.sel = 0,
+            KeyCode::End => self.sel = last,
+            KeyCode::Char('c') => sort(self, ProcSort::Cpu),
+            KeyCode::Char('m') => sort(self, ProcSort::Mem),
+            KeyCode::Char('p') => sort(self, ProcSort::Pid),
+            KeyCode::Char('n') => sort(self, ProcSort::Name),
+            KeyCode::Char('/' | 'f') => self.editing = true,
+            KeyCode::Char('s') => {
+                self.every_edit = Some(LineEdit::from(self.every.as_secs_f64().to_string()));
+            }
+            KeyCode::F(8) | KeyCode::Char('k') => {
+                self.confirm = self.current().map(|p| (p.pid, p.name.clone()));
+            }
+            _ => {}
+        }
+        self.refresh();
+        true
+    }
+
+    /// Typing the filter: the list narrows live, Enter keeps it, Esc clears it.
+    fn filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.editing = false,
+            KeyCode::Esc => {
+                self.editing = false;
+                self.filter = LineEdit::default();
+            }
+            _ => {
+                edit_key(&mut self.filter, key);
+            }
+        }
+        self.refresh();
+    }
+
+    /// Typing the update interval: Enter sets it (0.5 to 3600 s), Esc keeps the old one.
+    fn every_key(&mut self, mut l: LineEdit, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Enter => match l.text.trim().replace(',', ".").parse::<f64>() {
+                Ok(secs) if (0.5..=3600.0).contains(&secs) => {
+                    self.every = Duration::from_secs_f64(secs);
+                    self.sampler.set_interval(self.every);
+                }
+                _ => self.status = "update interval: 0.5 to 3600 seconds".into(),
+            },
+            _ => {
+                edit_key(&mut l, key);
+                self.every_edit = Some(l);
+            }
+        }
+    }
+
+    /// Answer to the kill question: `t` SIGTERM, `k` SIGKILL, sent in a worker (slow links).
+    fn confirm_key(&mut self, code: KeyCode) {
+        let force = match code {
+            KeyCode::Char('t' | 'T') | KeyCode::Enter => false,
+            KeyCode::Char('k' | 'K') => true,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                self.confirm = None;
+                return;
+            }
+            _ => return,
+        };
+        let Some((pid, _)) = self.confirm.take() else {
+            return;
+        };
+        let r = self.remote.clone();
+        self.kill = Some(thread::spawn(move || procs::kill(r.as_deref(), pid, force)));
+        self.status = format!(
+            "sending SIG{} to {pid}",
+            if force { "KILL" } else { "TERM" }
+        );
+    }
+}
+
 enum XMsg {
     /// Conflict: (source, existing target); the worker waits for an `Answer`.
     Ask(PathBuf, PathBuf),
@@ -439,7 +638,7 @@ impl Mode {
 }
 
 /// Footer bar items: label, key sent when clicked.
-pub const FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
+pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
@@ -448,6 +647,127 @@ pub const FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
     ("F6 Move", KeyCode::F(6), KeyModifiers::NONE),
     ("F7 Mkdir", KeyCode::F(7), KeyModifiers::NONE),
     ("F8 Delete", KeyCode::F(8), KeyModifiers::NONE),
+    ("F9 Menu", KeyCode::F(9), KeyModifiers::NONE),
+    ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
+];
+
+const C: KeyModifiers = KeyModifiers::CONTROL;
+const A: KeyModifiers = KeyModifiers::ALT;
+const S: KeyModifiers = KeyModifiers::SHIFT;
+const N: KeyModifiers = KeyModifiers::NONE;
+
+/// One menu entry: label with its key, key sent when chosen.
+pub type MenuItem = (&'static str, KeyCode, KeyModifiers);
+
+/// F9 menu bar like mc, for terminals that swallow keys (macOS): group title and its entries.
+pub const MENUS: [(&str, &[MenuItem]); 5] = [
+    (
+        "File",
+        &[
+            ("View                F3", KeyCode::F(3), N),
+            ("Edit                F4", KeyCode::F(4), N),
+            ("Edit external       Shift+F4", KeyCode::F(4), S),
+            ("Copy                F5", KeyCode::F(5), N),
+            ("Move                F6", KeyCode::F(6), N),
+            ("Rename              Shift+F6", KeyCode::F(6), S),
+            ("Make directory      F7", KeyCode::F(7), N),
+            ("Delete              F8", KeyCode::F(8), N),
+            ("Copy paths          Ctrl+Insert", KeyCode::Insert, C),
+            ("Quit                F10", KeyCode::F(10), N),
+        ],
+    ),
+    (
+        "Go",
+        &[
+            ("Home directory      ~", KeyCode::Char('~'), N),
+            ("Root directory      Ctrl+\\", KeyCode::Char('\\'), C),
+            ("Refresh             Ctrl+R", KeyCode::Char('r'), C),
+            ("Drives left         Alt+F1", KeyCode::F(1), A),
+            ("Drives right        Alt+F2", KeyCode::F(2), A),
+            ("History back        Alt+Left", KeyCode::Left, A),
+            ("History forward     Alt+Right", KeyCode::Right, A),
+            ("Bookmarks           Ctrl+B", KeyCode::Char('b'), C),
+            ("Add bookmark        Ctrl+D", KeyCode::Char('d'), C),
+            ("Connections         Ctrl+N", KeyCode::Char('n'), C),
+        ],
+    ),
+    (
+        "Select",
+        &[
+            ("Select by mask      +", KeyCode::Char('+'), N),
+            ("Deselect by mask    -", KeyCode::Char('-'), N),
+            ("Invert selection    *", KeyCode::Char('*'), N),
+            ("Select differences  Ctrl+Y", KeyCode::Char('y'), C),
+        ],
+    ),
+    (
+        "Tools",
+        &[
+            ("Help                F1", KeyCode::F(1), N),
+            ("File stats (ncdu)   Ctrl+Space", KeyCode::Char(' '), C),
+            ("Processes (top)     Ctrl+P", KeyCode::Char('p'), C),
+            ("Find files          Alt+F7", KeyCode::F(7), A),
+            ("Quick search        Ctrl+S", KeyCode::Char('s'), C),
+            ("Quick filter        Ctrl+F", KeyCode::Char('f'), C),
+            ("Command line        :", KeyCode::Char(':'), N),
+        ],
+    ),
+    (
+        "Panel",
+        &[
+            ("Swap panels         Ctrl+U", KeyCode::Char('u'), C),
+            ("Other panel here    Alt+=", KeyCode::Char('='), A),
+            ("Hidden files        Alt+.", KeyCode::Char('.'), A),
+            ("New tab             Ctrl+T", KeyCode::Char('t'), C),
+            ("Close tab           Ctrl+W", KeyCode::Char('w'), C),
+        ],
+    ),
+];
+
+fn menu_title_width(group: usize) -> u16 {
+    MENUS[group].0.len() as u16 + 2
+}
+
+/// Column of a menu title in the bar (shared by the UI and mouse clicks).
+pub fn menu_x(group: usize) -> u16 {
+    (0..group).map(menu_title_width).sum()
+}
+
+/// Screen area of an open menu group (below the bar, with border).
+pub fn menu_drop(group: usize) -> Rect {
+    let items = MENUS[group].1;
+    let w = items.iter().map(|i| i.0.len()).max().unwrap_or(0) as u16 + 4;
+    Rect::new(menu_x(group), 1, w, items.len() as u16 + 2)
+}
+
+/// Key a main-help line describes (its first column equals a [`MENUS`] key), if any.
+pub fn help_action(line: &str) -> Option<(KeyCode, KeyModifiers)> {
+    let col = line.split("  ").next()?.trim();
+    MENUS
+        .iter()
+        .flat_map(|g| g.1)
+        .find(|m| m.0.rsplit("  ").next().is_some_and(|k| k.trim() == col))
+        .map(|m| (m.1, m.2))
+}
+
+/// F-key bar of File Stats (labels and the keys they send).
+pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
+    ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
+    ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
+    ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
+    ("S-F4 Ext", KeyCode::F(4), KeyModifiers::SHIFT),
+    ("F8 Delete", KeyCode::F(8), KeyModifiers::NONE),
+    ("Tab Size/Count", KeyCode::Tab, KeyModifiers::NONE),
+    (": Cmd", KeyCode::Char(':'), KeyModifiers::NONE),
+    ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
+];
+
+/// F-key bar of the process monitor.
+pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 5] = [
+    ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
+    ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
+    ("s Interval", KeyCode::Char('s'), KeyModifiers::NONE),
+    ("F8 Kill", KeyCode::F(8), KeyModifiers::NONE),
     ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
 ];
 
@@ -463,6 +783,8 @@ pub struct App {
     pub areas: [Rect; 2],
     /// Screen area of the footer bar, set by the UI, used for mouse clicks.
     pub footer: Rect,
+    /// Screen area of the help text (set by the CLI UI), for clicks.
+    pub help_area: Rect,
     pub active: usize,
     pub mode: Mode,
     pub quit: bool,
@@ -527,6 +849,7 @@ impl App {
             lists: Default::default(),
             areas: Default::default(),
             footer: Rect::default(),
+            help_area: Rect::default(),
             active: 0,
             mode: Mode::Normal,
             quit: false,
@@ -584,6 +907,15 @@ impl App {
 
     /// Wheel / touchpad scroll in viewer, editor and active file list (editor: moves the cursor, the window follows).
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        if self.help {
+            if ev.kind == MouseEventKind::Down(MouseButton::Left)
+                && self.help_area.contains((ev.column, ev.row).into())
+            {
+                let row = usize::from(ev.row - self.help_area.y);
+                self.help_click(self.help_scroll + row);
+            }
+            return;
+        }
         if let MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) =
             ev.kind
             && self.input.is_none()
@@ -607,6 +939,12 @@ impl App {
             return;
         }
         if ev.kind == MouseEventKind::Down(MouseButton::Left) {
+            if self.input.is_none()
+                && matches!(self.mode, Mode::Normal | Mode::Menu(..))
+                && self.menu_click(ev)
+            {
+                return;
+            }
             return self.click(ev);
         }
         let lines = match ev.kind {
@@ -627,6 +965,10 @@ impl App {
                 editor,
                 error: None,
             } => editor.move_v(lines),
+            Mode::Procs(p) if p.idle() => {
+                let last = p.rows.len().saturating_sub(1);
+                p.sel = p.sel.saturating_add_signed(lines).min(last);
+            }
             _ => {}
         }
     }
@@ -717,15 +1059,30 @@ impl App {
         }
     }
 
+    /// F-key bar of the current screen.
+    pub fn footer_keys(&self) -> &'static [(&'static str, KeyCode, KeyModifiers)] {
+        match &self.mode {
+            Mode::Stats(_) => &STATS_FOOTER,
+            Mode::Procs(_) => &PROCS_FOOTER,
+            _ => &FOOTER,
+        }
+    }
+
+    /// The screen takes F1 and footer clicks: no prompt, dialog, help or running scan.
+    pub fn idle(&self) -> bool {
+        let screen = matches!(self.mode, Mode::Normal | Mode::View { .. })
+            || matches!(&self.mode, Mode::Stats(st) if !st.scanning() && st.confirm.is_none())
+            || matches!(&self.mode, Mode::Procs(p) if p.idle())
+            || matches!(self.mode, Mode::Edit { error: None, .. });
+        screen && self.input.is_none() && !self.help
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         self.note.clear();
         if self.help {
             return self.help_key(key.code);
         }
-        let idle = matches!(self.mode, Mode::Normal | Mode::View { .. })
-            || matches!(&self.mode, Mode::Stats(st) if !st.scanning())
-            || matches!(self.mode, Mode::Edit { error: None, .. });
-        if key.code == KeyCode::F(1) && idle && self.input.is_none() {
+        if key.code == KeyCode::F(1) && self.idle() {
             self.help = true;
             self.help_scroll = 0;
             return;
@@ -782,9 +1139,15 @@ impl App {
             },
             Mode::Cmd(l) => self.cmd_key(l, key),
             Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
+            Mode::Menu(group, sel) => self.menu_key(key.code, group, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
             Mode::Found(f) => self.found_key(key.code, f),
             Mode::Stats(st) => self.stats_mode_key(st, key),
+            Mode::Procs(mut p) => {
+                if p.key(key, self.page) {
+                    self.mode = Mode::Procs(p);
+                }
+            }
             Mode::Message(_) => {}
             Mode::Xfer(mut x) => {
                 x.key(key);
@@ -914,6 +1277,18 @@ impl App {
         }
     }
 
+    /// Click on help text line `line`: close the help and run the action the line describes.
+    pub fn help_click(&mut self, line: usize) {
+        let (_, text) = fmt::help(&self.mode);
+        if text == fmt::HELP_MAIN
+            && let Some(l) = text.lines().nth(line)
+            && let Some((c, m)) = help_action(l)
+        {
+            self.help = false;
+            self.on_key(KeyEvent::new(c, m));
+        }
+    }
+
     fn help_key(&mut self, code: KeyCode) {
         let page = self.page;
         match code {
@@ -1004,6 +1379,10 @@ impl App {
             KeyCode::Char('n') => self.mode = Mode::Connections(0),
             KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
             KeyCode::Char(' ') => self.spawn_stats(),
+            KeyCode::Char('p') => {
+                let r = self.panels[self.active].remote().cloned();
+                self.mode = Mode::Procs(Box::new(Procs::new(r)));
+            }
             KeyCode::Char('y') => {
                 let [a, b] = &mut self.panels;
                 a.compare_with(b);
@@ -1096,6 +1475,34 @@ impl App {
         // the directory may have changed while the tab was hidden
         if let Err(e) = self.panels[side].reload() {
             self.mode = Mode::Message(e.to_string());
+        }
+    }
+
+    /// Directory names of one side's tabs in cycle order; `self.tab[side]` is the visible one.
+    pub fn tab_names(&self, side: usize) -> Vec<String> {
+        let (bg, p) = (&self.tabs[side], self.tab[side]);
+        let n = bg.len() + 1;
+        (0..n)
+            .map(|k| {
+                let panel = if k == p {
+                    &self.panels[side]
+                } else {
+                    &bg[(k + n - p - 1) % n]
+                };
+                panel
+                    .path()
+                    .file_name()
+                    .map_or_else(|| panel.title(), |name| name.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    /// Shows tab `k` of `side` (click on a tab button).
+    pub fn select_tab(&mut self, side: usize, k: usize) {
+        self.active = side;
+        let n = self.tabs[side].len() + 1;
+        for _ in 0..(k + n - self.tab[side]) % n {
+            self.tab_key(KeyCode::PageDown);
         }
     }
 
@@ -1382,6 +1789,62 @@ impl App {
         {
             self.mode = Mode::Message(e.to_string());
         }
+    }
+
+    fn menu_key(&mut self, code: KeyCode, group: usize, sel: usize) {
+        let n = MENUS.len();
+        let len = MENUS[group].1.len();
+        match code {
+            KeyCode::Esc | KeyCode::F(9) => {}
+            KeyCode::Enter => self.menu_run(group, sel),
+            KeyCode::Left => self.mode = Mode::Menu((group + n - 1) % n, 0),
+            KeyCode::Right => self.mode = Mode::Menu((group + 1) % n, 0),
+            KeyCode::Up => self.mode = Mode::Menu(group, (sel + len - 1) % len),
+            KeyCode::Down => self.mode = Mode::Menu(group, (sel + 1) % len),
+            KeyCode::Home => self.mode = Mode::Menu(group, 0),
+            KeyCode::End => self.mode = Mode::Menu(group, len - 1),
+            _ => self.mode = Mode::Menu(group, sel),
+        }
+    }
+
+    pub fn menu_run(&mut self, group: usize, sel: usize) {
+        self.mode = Mode::Normal;
+        let (_, c, m) = MENUS[group].1[sel];
+        self.on_key(KeyEvent::new(c, m));
+    }
+
+    /// Left click while the menu bar is shown (row 0) or open. True if the click was used.
+    fn menu_click(&mut self, ev: MouseEvent) -> bool {
+        let (col, row) = (ev.column, ev.row);
+        let open = if let Mode::Menu(g, _) = self.mode {
+            Some(g)
+        } else {
+            None
+        };
+        if row == 0
+            && let Some(g) = (0..MENUS.len()).find(|&g| {
+                let x = menu_x(g);
+                (x..x + menu_title_width(g)).contains(&col)
+            })
+        {
+            self.mode = if open == Some(g) {
+                Mode::Normal
+            } else {
+                Mode::Menu(g, 0)
+            };
+            return true;
+        }
+        let Some(g) = open else { return false };
+        let r = menu_drop(g);
+        if r.contains((col, row).into()) {
+            // rows inside the border are entries
+            if row > r.y && row + 1 < r.y + r.height && col > r.x && col + 1 < r.x + r.width {
+                self.menu_run(g, usize::from(row - r.y - 1));
+            }
+        } else {
+            self.mode = Mode::Normal;
+        }
+        true
     }
 
     fn hotlist_key(&mut self, code: KeyCode, sel: usize) {
@@ -1748,6 +2211,7 @@ impl App {
         let panel = &mut self.panels[self.active];
         match code {
             KeyCode::Char('q') | KeyCode::F(10) => self.quit = true,
+            KeyCode::F(9) => self.mode = Mode::Menu(0, 0),
             KeyCode::Tab => self.active = 1 - self.active,
             KeyCode::Up => panel.move_cursor(-1),
             KeyCode::Down => panel.move_cursor(1),
@@ -2576,6 +3040,12 @@ impl App {
         if let Mode::Found(f) = &mut self.mode {
             return f.pump();
         }
+        if let Mode::Procs(p) = &mut self.mode
+            && let Some(e) = p.tick()
+        {
+            self.mode = Mode::Message(format!("Processes: {e}"));
+            return;
+        }
         if let Mode::Stats(st) = &mut self.mode
             && st
                 .job
@@ -2872,6 +3342,52 @@ mod tests {
         assert_eq!(top(&app), "a"); // back in stats after the viewer
         key(&mut app, KeyCode::F(10));
         assert!(matches!(app.mode, Mode::Normal) && !app.quit);
+    }
+
+    #[test]
+    fn f9_menu_runs_the_chosen_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        app.on_key(KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Menu(..)));
+        let i = MENUS[0]
+            .1
+            .iter()
+            .position(|m| m.1 == KeyCode::F(7) && m.2 == N)
+            .unwrap();
+        for _ in 0..i {
+            app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Mkdir(_)));
+
+        // click the "Go" title, then its first entry (home directory)
+        app.mode = Mode::Normal;
+        let click = |col, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(click(menu_x(1), 0));
+        assert!(matches!(app.mode, Mode::Menu(1, _)));
+        app.on_mouse(click(menu_x(1) + 2, 2));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn help_line_click_runs_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        key(&mut app, KeyCode::F(1));
+        let line = fmt::HELP_MAIN
+            .lines()
+            .position(|l| l.starts_with("Ctrl+B "))
+            .unwrap();
+        app.help_click(line);
+        assert!(!app.help && matches!(app.mode, Mode::Hotlist(_)));
     }
 
     #[test]
@@ -3505,5 +4021,91 @@ mod tests {
         }
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    fn procs(app: &App) -> &Procs {
+        match &app.mode {
+            Mode::Procs(p) => p,
+            _ => panic!("not in the process monitor"),
+        }
+    }
+
+    /// Tick until the next snapshot arrives.
+    fn procs_wait(app: &mut App) {
+        let before = procs(app).snap.clone();
+        let t = std::time::Instant::now();
+        while procs(app).snap == before && t.elapsed() < std::time::Duration::from_secs(5) {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Ctrl+P: snapshot arrives, sort toggles, filter narrows and clears, Esc closes.
+    #[test]
+    fn process_monitor_sort_filter_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        while procs(&app).rows.is_empty() {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let all = procs(&app).rows.len();
+        assert!(app.idle());
+        assert_eq!(app.footer_keys(), &PROCS_FOOTER);
+        key(&mut app, KeyCode::Char('p'));
+        let p = procs(&app);
+        assert_eq!((p.sort, p.rev), (ProcSort::Pid, false));
+        let pids: Vec<u32> = p.rows.iter().map(|&i| p.snap.procs[i].pid).collect();
+        assert!(pids.is_sorted());
+        key(&mut app, KeyCode::Char('p'));
+        assert!(procs(&app).rev);
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, &std::process::id().to_string());
+        let p = procs(&app);
+        assert!(p.editing && p.rows.len() < all);
+        assert_eq!(p.current().map(|c| c.pid), Some(std::process::id()));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(procs(&app).rows.len(), all);
+        // the cursor keeps its row across refreshes
+        key(&mut app, KeyCode::Down);
+        procs_wait(&mut app);
+        assert_eq!(procs(&app).sel, 1);
+        key(&mut app, KeyCode::Char('s'));
+        assert_eq!(procs(&app).every_edit.as_ref().unwrap().text, "2");
+        with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "0,5");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(procs(&app).every, std::time::Duration::from_millis(500));
+        key(&mut app, KeyCode::Char('s'));
+        with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "0");
+        key(&mut app, KeyCode::Enter);
+        let p = procs(&app);
+        assert_eq!(p.every, std::time::Duration::from_millis(500));
+        assert!(p.status.contains("0.5 to 3600"));
+        key(&mut app, KeyCode::F(8));
+        assert!(procs(&app).confirm.is_some());
+        key(&mut app, KeyCode::Char('n'));
+        assert!(procs(&app).confirm.is_none());
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    /// A connection that cannot run commands (FTP) reports it instead of an empty list.
+    #[test]
+    fn process_monitor_needs_commands_on_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        app.panels[0]
+            .open_remote(tc_core::vfs::mem::Mem::new(), "/".into())
+            .unwrap();
+        settle(&mut app);
+        with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        while matches!(app.mode, Mode::Procs(_)) {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(&app.mode, Mode::Message(m) if m.contains("no commands")));
     }
 }

@@ -13,7 +13,8 @@ use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Found, Input, Mode, Stats, Step, Xfer};
+use crate::app::{App, Found, Input, Mode, Procs, Stats, Step, Xfer};
+use tc_core::procs::{Proc, ProcSort};
 
 /// Length of "YY-MM-DD HH:MM".
 pub const DATE_WIDTH: usize = 14;
@@ -113,13 +114,15 @@ pub fn hms(s: u64) -> String {
 
 pub const HELP_MAIN: &str = "\
 == Highlights ==
+Ctrl+B          bookmarks (hotlist), Ctrl+D adds this directory
+F9              MENU with all features (when keys are eaten)
 Ctrl+Space      FILE STATS (like ncdu): biggest files and dirs
                 of the current tree, with % and bar
 Ctrl+N          SFTP / FTP / FTPS connections
-Ctrl+B          bookmarks (hotlist), Ctrl+D adds this directory
+Ctrl+P          PROCESSES (like btop / task manager), of the
+                SSH server on an SFTP panel
 
 == Navigation ==
-Up/Down/PgUp/PgDn/Home/End   move cursor
 Tab             switch panel
 Enter           open directory, archive or file
 Backspace       parent directory
@@ -159,7 +162,6 @@ F7 / F8         make directory / delete
 F10 / q         quit";
 
 pub const HELP_STATS: &str = "\
-Up/Down/PgUp/PgDn/Home/End  move cursor
 Enter / Right  open directory
 Backspace / Left  parent directory
 Tab  toggle size / file count
@@ -172,6 +174,20 @@ Esc / q / F10  close (while scanning: cancel)
 
 Scan runs in up to 8 threads; footer shows files and
 scanned / discovered directories.";
+
+pub const HELP_PROCS: &str = "\
+c / m / p / n  sort by CPU, memory, pid, name (again: reverse)
+/ or f  filter (name, command, user, pid)
+        Enter keeps, Esc clears
+F8 / k  kill: t SIGTERM, k SIGKILL
+s  update interval in seconds (default 2)
+Esc / q / F10  close
+
+CPU% is the average over the interval, per core (can exceed
+100). Load = average number of busy processes over the last
+1 / 5 / 15 minutes; above the core count means overloaded.
+The cursor keeps its row while the list re-sorts.
+On an SFTP panel the list comes from the server's /proc and ps.";
 
 pub const HELP_VIEW: &str = "\
 == Move ==
@@ -381,6 +397,7 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::View { .. } => ("Help: viewer", HELP_VIEW),
         Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
         Mode::Stats(_) => ("Help: file stats (ncdu)", HELP_STATS),
+        Mode::Procs(_) => ("Help: processes (top)", HELP_PROCS),
         _ => ("Help", HELP_MAIN),
     }
 }
@@ -538,6 +555,106 @@ pub fn stats_footer(st: &Stats) -> String {
     )
 }
 
+/// Process monitor title: source, sort and filter.
+pub fn procs_title(p: &Procs) -> String {
+    let src = p.remote.as_ref().map_or("local", |r| r.url());
+    let key = match p.sort {
+        ProcSort::Pid => "pid",
+        ProcSort::Name => "name",
+        ProcSort::Cpu => "cpu",
+        ProcSort::Mem => "mem",
+    };
+    let mut t = format!(
+        "Processes: {src} [{key}{}] [every {}s]",
+        if p.rev { " rev" } else { "" },
+        p.every.as_secs_f64()
+    );
+    if !p.filter.text.is_empty() {
+        t += &format!(" [filter: {}]", p.filter.text);
+    }
+    t
+}
+
+/// Summary line: CPU, memory, swap, load and process count; `-` = unknown.
+pub fn procs_header(p: &Procs) -> String {
+    let s = &p.snap;
+    let mem = |used, total| match total {
+        0 => "-".to_owned(),
+        _ => format!("{} / {}", human(used), human(total)),
+    };
+    let cpu = s.cpu.map_or_else(|| "-".to_owned(), |c| format!("{c:.0}%"));
+    let cores = if s.cores > 0 {
+        format!(" of {} cores", s.cores)
+    } else {
+        String::new()
+    };
+    let load = s.load.map_or_else(
+        || "-".to_owned(),
+        |[a, b, c]| format!("{a:.2} {b:.2} {c:.2}"),
+    );
+    format!(
+        "CPU {cpu}{cores}  Mem {}  Swap {}  Load {load} (1/5/15 min)  {} processes",
+        mem(s.mem_used, s.mem_total),
+        mem(s.swap_used, s.swap_total),
+        thousands(s.procs.len() as u64)
+    )
+}
+
+/// Column titles matching [`proc_row`].
+pub const PROC_COLS: &str = "    PID USER        CPU%      MEM  COMMAND";
+
+/// Sort key ('p', 'c', 'm', 'n') of the [`PROC_COLS`] title at char column `col`; user has none.
+pub fn proc_col_key(col: usize) -> Option<char> {
+    match col {
+        0..=7 => Some('p'),
+        18..=24 => Some('c'),
+        25..=33 => Some('m'),
+        34.. => Some('n'),
+        _ => None,
+    }
+}
+
+/// Open prompt of the process monitor: label and text being typed.
+pub fn procs_prompt(p: &Procs) -> Option<(&'static str, &LineEdit)> {
+    match &p.every_edit {
+        Some(l) => Some(("update every (seconds)> ", l)),
+        None if p.editing => Some(("filter> ", &p.filter)),
+        None => None,
+    }
+}
+
+/// Process row: pid, user, CPU%, memory, name and command line.
+pub fn proc_row(p: &Proc) -> String {
+    let cmd = if p.cmd.is_empty() || p.cmd == p.name {
+        p.name.clone()
+    } else {
+        format!("{}  {}", p.name, p.cmd)
+    };
+    format!(
+        "{:>7} {} {:>5.1} {:>8}  {cmd}",
+        p.pid,
+        fit(&p.user, 10),
+        p.cpu,
+        human(p.mem)
+    )
+}
+
+/// Footer: kill result or keys; `loading` before the first snapshot.
+pub fn procs_footer(p: &Procs) -> String {
+    if !p.status.is_empty() {
+        return p.status.clone();
+    }
+    if p.snap.procs.is_empty() {
+        return "loading...  Esc/F10 close".into();
+    }
+    "c/m/p/n sort  / filter  s interval  F8 kill  F1 Help  F10 Quit".into()
+}
+
+/// Kill question for the process monitor.
+pub fn procs_confirm(pid: u32, name: &str) -> String {
+    format!("Kill {pid} {name}?\n\n[t] terminate (SIGTERM)   [k] kill (SIGKILL)   [n] no")
+}
+
 /// Editor status line: position, encoding, line ending, dirty flag, note and keys.
 pub fn editor_info(editor: &Editor, note: &str) -> String {
     let (line, col) = editor.cursor;
@@ -615,7 +732,17 @@ pub fn highlight(
 
 #[cfg(test)]
 mod tests {
-    use super::{UnicodeWidthStr, fit, fmt_date, thousands};
+    use super::{PROC_COLS, UnicodeWidthStr, fit, fmt_date, proc_col_key, thousands};
+
+    /// Every column title maps to its sort key, the user column to none.
+    #[test]
+    fn proc_title_columns_sort() {
+        let at = |t: &str| proc_col_key(PROC_COLS.find(t).unwrap());
+        assert_eq!(
+            ["PID", "USER", "CPU%", "MEM", "COMMAND"].map(at),
+            [Some('p'), None, Some('c'), Some('m'), Some('n')]
+        );
+    }
 
     #[test]
     fn date_today_shows_time_only() {

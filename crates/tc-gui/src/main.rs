@@ -85,8 +85,11 @@ impl Gui {
                 None => {}
             }
         }
-        // the panels scroll natively; viewer and editor scroll through the app like the terminal wheel
-        if !matches!(self.app.mode, Mode::View { .. } | Mode::Edit { .. }) {
+        // the panels scroll natively; viewer, editor and processes scroll through the app like the terminal wheel
+        if !matches!(
+            self.app.mode,
+            Mode::View { .. } | Mode::Edit { .. } | Mode::Procs(_)
+        ) {
             self.wheel = 0.0;
             return;
         }

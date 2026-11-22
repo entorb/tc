@@ -10,7 +10,7 @@ flate2 = "1.1.11"
 lzma-rust2 = { version = "0.25.0", features = ["xz"] }
 regex = "1.13.1"
 ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
-sysinfo = { version = "0.40.3", default-features = false, features = ["disk", "system"] }
+sysinfo = { version = "0.40.3", default-features = false, features = ["disk", "system", "user"] }
 tar = { version = "0.4.46", default-features = false }
 tempfile = "3.27.0"
 thiserror = "2.0.21"

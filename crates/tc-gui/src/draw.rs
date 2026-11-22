@@ -7,10 +7,13 @@ use eframe::egui::{
     ScrollArea, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob, vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{App, FOOTER, Mode, Stats};
+use tc::app::{App, MENUS, Mode, Stats, help_action};
 use tc::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
     panel_title, stats_footer, stats_row,
+};
+use tc::fmt::{
+    PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
 };
 use tc::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, Rect};
 use tc_core::cmdline::LineEdit;
@@ -41,11 +44,19 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
     } else if app.mode.editor_mut().is_some() {
         egui::CentralPanel::default().show(ui, |ui| draw_editor(ui, app));
     } else {
+        egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, app));
         egui::Panel::bottom("footer").show(ui, |ui| footer(ui, app));
-        egui::Panel::bottom("cmd").show(ui, |ui| cmdline(ui, app));
+        // File Stats and processes have their own status / prompt line
+        let own = app.stats.is_some() || matches!(app.mode, Mode::Stats(_) | Mode::Procs(_));
+        if own {
+            egui::Panel::bottom("status").show(ui, |ui| status_line(ui, app));
+        } else {
+            egui::Panel::bottom("cmd").show(ui, |ui| cmdline(ui, app));
+        }
         egui::CentralPanel::default().show(ui, |ui| match &app.mode {
             Mode::Found(_) => draw_found(ui, app),
             Mode::Stats(_) => draw_stats(ui, app),
+            Mode::Procs(_) => draw_procs(ui, app),
             Mode::Cmd(_) if app.stats.is_some() => draw_stats(ui, app),
             _ => ui.columns(2, |cols| {
                 for (i, c) in cols.iter_mut().enumerate() {
@@ -60,6 +71,7 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
 enum Action {
     Sort(SortKey),
     Click(usize, bool, bool),
+    Tab(usize),
 }
 
 fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff::civil::Date) {
@@ -76,6 +88,18 @@ fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff
     egui::Frame::group(ui.style())
         .stroke(stroke)
         .show(ui, |ui| {
+            if !app.tabs[i].is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for (k, name) in app.tab_names(i).into_iter().enumerate() {
+                        if ui
+                            .selectable_label(k == app.tab[i], format!("{} {name}", k + 1))
+                            .clicked()
+                        {
+                            action = Some(Action::Tab(k));
+                        }
+                    }
+                });
+            }
             let title = RichText::new(panel_title(app, i)).strong();
             ui.add(Label::new(if active { title.color(ACCENT) } else { title }).truncate());
             let height = (ui.available_height() - 2.0 * row_h - 8.0).max(row_h);
@@ -159,16 +183,63 @@ fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff
     match action {
         Some(Action::Sort(key)) => app.sort_by(i, key),
         Some(Action::Click(idx, shift, double)) => app.click_entry(i, idx, shift, double),
+        Some(Action::Tab(k)) => app.select_tab(i, k),
         None => {}
+    }
+}
+
+/// Top menu bar (F9 or click); the open group drops down below its title.
+fn menu_bar(ui: &mut Ui, app: &mut App) {
+    let open = if let Mode::Menu(g, _) = app.mode {
+        Some(g)
+    } else {
+        None
+    };
+    let mut run = None;
+    ui.horizontal(|ui| {
+        for (g, (title, items)) in MENUS.iter().enumerate() {
+            let r = ui.selectable_label(open == Some(g), *title);
+            if r.clicked() {
+                app.mode = if open == Some(g) {
+                    Mode::Normal
+                } else {
+                    Mode::Menu(g, 0)
+                };
+            }
+            if open != Some(g) {
+                continue;
+            }
+            let sel = if let Mode::Menu(_, s) = app.mode {
+                s
+            } else {
+                0
+            };
+            egui::Area::new(Id::unique("menu-drop"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(r.rect.left_bottom())
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        for (i, (label, ..)) in items.iter().enumerate() {
+                            let t = RichText::new(*label).font(mono());
+                            if ui.selectable_label(i == sel, t).clicked() {
+                                run = Some((g, i));
+                            }
+                        }
+                    });
+                });
+        }
+    });
+    if let Some((g, i)) = run {
+        app.menu_run(g, i);
     }
 }
 
 /// F-key bar; buttons are not focusable, so Tab and Space stay with the app.
 fn footer(ui: &mut Ui, app: &mut App) {
     ui.horizontal(|ui| {
-        for (label, code, mods) in FOOTER {
+        for &(label, code, mods) in app.footer_keys() {
             let clicked = ui.add(Button::new(label).sense(Sense::CLICK)).clicked();
-            if clicked && matches!(app.mode, Mode::Normal) && app.input.is_none() {
+            if clicked && app.idle() {
                 app.on_key(KeyEvent::new(code, mods));
             }
         }
@@ -422,9 +493,11 @@ fn list_row(ui: &mut Ui, text: String, selected: bool) -> Option<bool> {
 }
 
 /// Rows of a page-wise list (like the terminal): only the page holding `sel` is built.
-fn page_rows(ui: &Ui, reserve: f32) -> usize {
-    let (_, rows, _) = grid(ui, reserve);
-    rows.max(1)
+fn page_rows(ui: &Ui) -> usize {
+    // list rows are labels, spaced apart unlike the painted text grid
+    let row = cell(ui).y + ui.spacing().item_spacing.y;
+    let avail = ui.available_height() + ui.spacing().item_spacing.y;
+    ((avail / row) as usize).max(1)
 }
 
 fn draw_found(ui: &mut Ui, app: &mut App) {
@@ -432,7 +505,7 @@ fn draw_found(ui: &mut Ui, app: &mut App) {
         return;
     };
     ui.label(RichText::new(found_title(f)).strong().color(ACCENT));
-    let h = page_rows(ui, 0.0);
+    let h = page_rows(ui);
     let start = f.sel / h * h;
     let mut clicked = None;
     for (k, e) in f.list.iter().enumerate().skip(start).take(h) {
@@ -449,8 +522,32 @@ fn draw_found(ui: &mut Ui, app: &mut App) {
     }
 }
 
+/// Status line of File Stats (totals or its `:` prompt) and processes (footer or prompt).
+fn status_line(ui: &mut Ui, app: &App) {
+    match (&app.mode, &app.stats) {
+        (Mode::Procs(p), _) => match procs_prompt(p) {
+            Some((label, l)) => prompt(ui, label, l),
+            None => {
+                ui.label(RichText::new(procs_footer(p)).color(MUTED));
+            }
+        },
+        (Mode::Stats(st), _) => {
+            ui.label(RichText::new(stats_footer(st)).color(MUTED));
+        }
+        (Mode::Cmd(l), Some(st)) => prompt(ui, &format!("{}> ", st.path().display()), l),
+        _ => {}
+    }
+}
+
+/// `label` and the line being typed.
+fn prompt(ui: &mut Ui, label: &str, l: &LineEdit) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).font(mono()));
+        line_edit(ui, l);
+    });
+}
+
 fn draw_stats(ui: &mut Ui, app: &mut App) {
-    let status_h = ui.text_style_height(&TextStyle::Body) + 8.0;
     let (st, cmd): (&mut Stats, Option<&LineEdit>) = match (&mut app.mode, &mut app.stats) {
         (Mode::Stats(st), _) => (st, None),
         (Mode::Cmd(l), Some(st)) => (st, Some(&*l)),
@@ -461,7 +558,7 @@ fn draw_stats(ui: &mut Ui, app: &mut App) {
             .strong()
             .color(ACCENT),
     );
-    let h = page_rows(ui, status_h);
+    let h = page_rows(ui);
     let start = st.sel / h * h;
     let mut clicked = None;
     let rows: Vec<String> = st
@@ -477,18 +574,6 @@ fn draw_stats(ui: &mut Ui, app: &mut App) {
             clicked = Some((start + k, double));
         }
     }
-    ui.add_space(ui.available_height() - status_h);
-    match cmd {
-        Some(l) => {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{}> ", st.path().display())).font(mono()));
-                line_edit(ui, l);
-            });
-        }
-        None => {
-            ui.label(RichText::new(stats_footer(st)).color(MUTED));
-        }
-    }
     let idle = cmd.is_none() && st.confirm.is_none();
     if let Some((k, double)) = clicked.filter(|_| idle) {
         st.sel = k;
@@ -498,6 +583,46 @@ fn draw_stats(ui: &mut Ui, app: &mut App) {
         }
     } else {
         app.page = h;
+    }
+}
+
+/// Process monitor: title, summary, column titles (click sorts), page of rows (click selects).
+fn draw_procs(ui: &mut Ui, app: &mut App) {
+    let Mode::Procs(p) = &mut app.mode else {
+        return;
+    };
+    ui.label(RichText::new(procs_title(p)).strong().color(ACCENT));
+    ui.label(RichText::new(procs_header(p)).font(mono()).color(TEXT));
+    let title = RichText::new(PROC_COLS).font(mono()).strong().color(MUTED);
+    let r = ui.add(Label::new(title).sense(Sense::CLICK));
+    // the title is one monospace line: the clicked char column names the sort key
+    let sort = r
+        .clicked()
+        .then(|| r.interact_pointer_pos())
+        .flatten()
+        .and_then(|pos| fmt::proc_col_key(((pos.x - r.rect.min.x) / cell(ui).x) as usize));
+    let h = page_rows(ui);
+    let start = p.sel / h * h;
+    let rows: Vec<String> = p
+        .rows
+        .iter()
+        .skip(start)
+        .take(h)
+        .map(|&i| proc_row(&p.snap.procs[i]))
+        .collect();
+    let mut clicked = None;
+    for (k, row) in rows.into_iter().enumerate() {
+        if list_row(ui, row, start + k == p.sel).is_some() {
+            clicked = Some(start + k);
+        }
+    }
+    let idle = p.idle();
+    if let Some(k) = clicked.filter(|_| idle) {
+        p.sel = k;
+    }
+    app.page = h;
+    if let Some(c) = sort.filter(|_| idle) {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
 }
 
@@ -513,6 +638,15 @@ fn overlays(ctx: &Context, app: &mut App) {
             text: text.clone(),
         };
         show_dialog(ctx, "stats-confirm", &d);
+    }
+    if let Mode::Procs(p) = &app.mode
+        && let Some((pid, name)) = &p.confirm
+    {
+        let d = Dialog::Text {
+            title: "Kill",
+            text: procs_confirm(*pid, name),
+        };
+        show_dialog(ctx, "procs-confirm", &d);
     }
     if let Some(input) = &app.input {
         show_dialog(ctx, "input", &input_dialog(input));
@@ -584,13 +718,138 @@ fn show_help(ctx: &Context, app: &mut App) {
     let rows = (max_h / row_h) as usize;
     app.help_scroll = app.help_scroll.min(lines.saturating_sub(rows));
     let offset = app.help_scroll as f32 * row_h;
+    let mut clicked = None;
     Modal::new(Id::unique("help")).show(ctx, |ui| {
         ui.heading(title);
         ui.separator();
         ScrollArea::vertical()
             .max_height(max_h)
             .vertical_scroll_offset(offset)
-            .show(ui, |ui| ui.label(RichText::new(text).font(mono())));
-        ui.label(RichText::new("Up/Down scroll  other key closes").color(MUTED));
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (i, line) in text.lines().enumerate() {
+                    let mut t = RichText::new(line).font(mono());
+                    let clickable = text == fmt::HELP_MAIN && help_action(line).is_some();
+                    if clickable {
+                        t = t.color(ACCENT);
+                    }
+                    let l = Label::new(t).sense(if clickable {
+                        Sense::CLICK
+                    } else {
+                        Sense::hover()
+                    });
+                    if ui
+                        .add(l)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        clicked = Some(i);
+                    }
+                }
+            });
+        ui.label(
+            RichText::new("Up/Down scroll  click a key to run it  other key closes").color(MUTED),
+        );
     });
+    if let Some(i) = clicked {
+        app.help_click(i);
+    }
+}
+
+#[cfg(test)]
+mod sim {
+    use super::{App, Look, Mode, draw};
+    use crate::keys;
+    use eframe::egui::{self, Event, Key, Modifiers, RawInput};
+    use tc_core::panel::Panel;
+
+    const SCREEN: egui::Rect =
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(900.0, 500.0));
+
+    /// One frame with `events`; returns the texts painted inside the screen.
+    fn frame(ctx: &egui::Context, app: &mut App, look: &mut Look, events: Vec<Event>) -> String {
+        let input = RawInput {
+            events: events.clone(),
+            screen_rect: Some(SCREEN),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            for ev in &events {
+                if let Some(keys::Input::Key(k)) = keys::translate(ev, false) {
+                    app.on_key(k);
+                }
+            }
+            app.tick();
+            draw(ui, app, look);
+        });
+        out.textures_delta.clear();
+        let mut texts = String::new();
+        for c in out.shapes {
+            if let egui::Shape::Text(t) = c.shape
+                && SCREEN.contains_rect(t.visual_bounding_rect())
+                && c.clip_rect.contains_rect(t.visual_bounding_rect())
+            {
+                texts += t.galley.text();
+                texts.push('\n');
+            }
+        }
+        texts
+    }
+
+    fn press(k: Key, m: Modifiers) -> Event {
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: m,
+        }
+    }
+
+    #[test]
+    /// The process monitor gets keys through the egui event path; its footer replaces the main one.
+    fn procs_keys_in_gui() {
+        let tmp = tempfile::tempdir().unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        frame(
+            &ctx,
+            &mut app,
+            &mut look,
+            vec![press(Key::P, Modifiers::CTRL)],
+        );
+        for _ in 0..30 {
+            frame(&ctx, &mut app, &mut look, vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        frame(
+            &ctx,
+            &mut app,
+            &mut look,
+            vec![Event::Text("s".into()), press(Key::S, Modifiers::NONE)],
+        );
+        assert!(
+            matches!(&app.mode, Mode::Procs(p) if p.every_edit.is_some()),
+            "s"
+        );
+        // the prompt and the monitor's own buttons are on screen, not clipped below the rows
+        let shown = frame(&ctx, &mut app, &mut look, vec![]);
+        assert!(shown.contains("update every (seconds)> "), "{shown}");
+        assert!(shown.contains("s Interval"), "{shown}");
+        frame(
+            &ctx,
+            &mut app,
+            &mut look,
+            vec![press(Key::Escape, Modifiers::NONE)],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            &mut look,
+            vec![press(Key::F1, Modifiers::NONE)],
+        );
+        assert!(app.help, "F1");
+        assert_eq!(app.footer_keys()[2].0, "s Interval");
+    }
 }

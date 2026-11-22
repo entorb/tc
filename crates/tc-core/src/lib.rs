@@ -11,6 +11,7 @@ pub mod find;
 pub mod hotlist;
 pub mod ops;
 pub mod panel;
+pub mod procs;
 pub mod search;
 pub mod stats;
 pub mod syntax;
@@ -39,6 +40,8 @@ pub enum Error {
     Archive(String),
     #[error("{0}")]
     Remote(String),
+    #[error("{0}")]
+    Process(String),
     #[error("cancelled")]
     Cancelled,
     #[error("text not representable in {0}, convert to UTF-8")]
