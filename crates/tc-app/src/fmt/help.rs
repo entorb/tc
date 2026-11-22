@@ -121,7 +121,8 @@ Enter           open directory
 Right           open directory
 Backspace       parent directory
 Left            parent directory
-Tab             show size / file count
+Tab             show size / file count; count mode treemap:
+                dirs only by file count, 2 levels
 n               sort by name (again: reverse)
 s               sort by size (again: reverse)
 C               sort by file count (again: reverse)
@@ -182,6 +183,7 @@ Tab             next field
 Shift+Tab       previous field
 Up/Down         previous / next field
 Space           toggle checkbox
+Click           focus a field; toggles a checkbox, cycles a choice
 Left/Right      move in text
 Alt+Up/Down     previous / next used settings (saved in
                 tc/sync-forms)
@@ -201,6 +203,7 @@ pub const HELP_SETTINGS: &str = "\
 == Fields ==
 Up/Down / Tab   previous / next field
 Space           toggle checkbox
+Click           focus a field; toggles a checkbox, cycles a choice
 
 == Options ==
 Check for updates daily: release builds ask GitHub for a
@@ -215,6 +218,7 @@ Tab             next field
 Shift+Tab       previous field
 Up/Down         previous / next field
 Space           toggle checkbox
+Click           focus a field; toggles a checkbox, cycles a choice
 Left/Right      move in text
 Alt+Up/Down     earlier / later searches (history)
 
@@ -276,6 +280,7 @@ Tab             next field
 Shift+Tab       previous field
 Up/Down         previous / next field
 Space           toggle checkbox, cycle choice
+Click           focus a field; toggles a checkbox, cycles a choice
 Left/Right      move in text, cycle choice
 Alt+Up/Down     earlier / later settings (history)
 PgUp/PgDn       scroll the preview

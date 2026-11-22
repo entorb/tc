@@ -151,7 +151,10 @@ impl Stats {
     pub fn treemap(&mut self, w: f32, h: f32, depth: u8, min_side: f32, inset: f32) -> &[Tile] {
         let key = (w.to_bits(), h.to_bits());
         if self.map.as_ref().is_none_or(|(k, _)| *k != key) {
-            let tiles = treemap::layout(self.current(), w, h, depth, min_side, inset);
+            // count mode: dirs only, 2 levels
+            let depth = if self.by_files { depth.min(1) } else { depth };
+            let tiles =
+                treemap::layout(self.current(), w, h, depth, min_side, inset, self.by_files);
             self.map = Some((key, tiles));
         }
         self.tiles()
@@ -236,7 +239,10 @@ impl Stats {
                         .unwrap_or(0);
                 }
             }
-            KeyCode::Tab => self.by_files = !self.by_files,
+            KeyCode::Tab => {
+                self.by_files = !self.by_files;
+                self.map = None;
+            }
             KeyCode::Insert | KeyCode::Char(' ') => self.toggle_mark(last),
             KeyCode::Char('n') => self.set_order(stats::Order::Name),
             KeyCode::Char('s') => self.set_order(stats::Order::Size),
@@ -681,6 +687,33 @@ mod tests {
         };
         assert!(st.map.is_none());
         assert_eq!(st.treemap(10.0, 10.0, 0, 0.0, 0.0).len(), 2);
+    }
+
+    #[test]
+    fn stats_treemap_tab_counts_dirs_two_levels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = tmp.path().join("d").join("e").join("f");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("x"), "x").unwrap();
+        std::fs::write(tmp.path().join("loose"), "x").unwrap();
+        let mut app = stats_app(tmp.path());
+        let Mode::Stats(st) = &mut app.mode else {
+            panic!()
+        };
+        assert_eq!(st.treemap(100.0, 100.0, u8::MAX, 0.0, 0.0).len(), 5);
+        key(&mut app, KeyCode::Tab);
+        let Mode::Stats(st) = &mut app.mode else {
+            panic!()
+        };
+        assert!(st.map.is_none());
+        let tiles = st.treemap(100.0, 100.0, u8::MAX, 0.0, 0.0);
+        // d and d/e; no loose file, no d/e/f
+        assert_eq!(tiles.len(), 2);
+        assert!(
+            tiles
+                .iter()
+                .all(|t| t.kind == tc_core::stats::treemap::Kind::Dir && t.depth <= 1)
+        );
     }
 
     #[test]
