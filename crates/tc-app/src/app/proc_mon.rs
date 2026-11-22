@@ -250,6 +250,10 @@ mod tests {
         assert_eq!(procs(&app).rows.len(), all);
         // the cursor keeps its row across refreshes
         key(&mut app, KeyCode::Down);
+        // a new interval wakes the worker at once, no 2 s wait for the next snapshot
+        procs(&app)
+            .sampler
+            .set_interval(std::time::Duration::from_millis(50));
         procs_wait(&mut app);
         assert_eq!(procs(&app).sel, 1);
         key(&mut app, KeyCode::Char('s'));

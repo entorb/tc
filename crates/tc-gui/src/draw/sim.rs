@@ -91,9 +91,10 @@ fn procs_keys_in_gui() {
         &mut look,
         vec![press(Key::P, Modifiers::CTRL)],
     );
-    for _ in 0..30 {
+    // first snapshot takes ~0.2 s (CPU % needs two samples)
+    while matches!(&app.mode, Mode::Procs(p) if p.rows.is_empty()) {
         frame(&ctx, &mut app, &mut look, vec![]);
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     frame(
         &ctx,
