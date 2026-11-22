@@ -1,9 +1,12 @@
+abce
 achown
 addrs
 apfs
 arboard
+asym
 autotools
 axäb
+bcdefg
 bksp
 btop
 bufread
@@ -25,6 +28,7 @@ copysign
 corasick
 cpio
 cpus
+creds
 crossterm
 customisable
 dalek
@@ -38,6 +42,7 @@ editmacros
 editsearch
 eframe
 egui
+eilseq
 entorb
 errorlevel
 esac
@@ -114,8 +119,10 @@ fsymlink
 fsyncdirsdlg
 ftpfs
 ftreeviewmenu
+fullwindow
 fviewer
 fviewoperations
+harminisations
 hjkl
 hostclip
 hostport
@@ -125,6 +132,7 @@ keepalive
 kernfs
 keymap
 keymaps
+krusader
 kthread
 libxkbcommon
 libzstd
@@ -135,6 +143,7 @@ mcdiff
 mcedit
 mcview
 memchr
+misparses
 mlsd
 mlst
 mmin
@@ -148,10 +157,13 @@ multibyte
 multilist
 natsort
 ncdu
+neighbour
 neighbourhood
 newermt
 noch
+nodate
 noext
+noreplace
 nosonar
 nroff
 nsurl
@@ -180,8 +192,10 @@ ratatui
 recyclebin
 reflinks
 reget
+renameat
 rescan
 rescanning
+rescans
 restat
 retr
 ropey
@@ -207,6 +221,7 @@ splitn
 srcs
 stime
 strftime
+subdirs
 subshell
 suppaftp
 swatinem
@@ -307,6 +322,7 @@ xfeh
 xfer
 xffrs
 xxyz
+yazi
 zstandard
 zstd
 çødé

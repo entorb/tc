@@ -3,143 +3,127 @@
 [![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=entorb_tc&metric=ncloc)](https://sonarcloud.io/summary/overall?id=entorb_tc)
 [![Security issues](https://sonarcloud.io/api/project_badges/measure?project=entorb_tc&metric=software_quality_security_issues)](https://sonarcloud.io/summary/overall?id=entorb_tc)
 
-2-panel file manager inspired by
-
-- [Norton Commander](https://en.wikipedia.org/wiki/Norton_Commander) (Wiki)
-- [Midnight Commander](https://github.com/MidnightCommander/mc) (GitHub)
-- [Total Commander](https://www.ghisler.com) (HomePage)
-- [Double Commander](https://github.com/doublecmd/doublecmd) (GitHub)
+Cross-platform (Windows, macOS, Linux) two-panel file manager in Rust, inspired by
+[Norton Commander](https://en.wikipedia.org/wiki/Norton_Commander),
+[Midnight Commander](https://github.com/MidnightCommander/mc),
+[Total Commander](https://www.ghisler.com),
+[Double Commander](https://github.com/doublecmd/doublecmd),
+[Krusader](https://github.com/kde/krusader),
+[yazi](https://github.com/sxyazi/yazi),
+[ncdu](https://dev.yorhel.nl/ncdu),
+[btop](https://github.com/aristocratos/btop) and
+[QDirStat](https://github.com/shundhammer/qdirstat).
 
 ## Highlights
 
-- **File Stats (ncdu)**: Ctrl+Space scans the current tree and shows the biggest files and directories with size / count, % and bar; browse, view, edit and delete from there
-- **SFTP / FTP / FTPS**: Ctrl+N opens saved connections, remote panels work like local ones (copy, move, view, edit, delete)
-- **Processes (btop / task manager)**: Ctrl+P lists processes with CPU, memory and user, sort, filter and kill; on an SFTP panel those of the server
-- **Favorites / bookmarks**: Ctrl+D bookmarks the directory, Ctrl+B jumps to a bookmark (hotlist)
+- **File Stats (ncdu)**: Ctrl+Space shows the biggest files and directories of a tree; browse, view, edit, delete
+- **SFTP / FTP / FTPS**: Ctrl+N, remote panels work like local ones
+- **Processes (btop)**: Ctrl+P, sort, filter, kill; on an SFTP panel those of the server
+- **Synchronize directories**: Ctrl+E, like Total Commander
+- **Multi-rename**: Ctrl+M, like Total Commander, with undo
 
-## Two front ends: `tc-cli` and `tc-gui`
+**F1** shows every key of the current screen (type to filter, Enter runs the key). **F9** opens a menu with every feature, for terminals that swallow keys. This README is the overview; F1 is the reference.
+
+## Front ends
 
 - `tc-cli`: terminal UI (ratatui)
-- `tc-gui`: desktop window (egui): dark theme, two column tables (Name / Size / Date, click header sorts), modal dialogs, F-key buttons
-- Both run the same app logic (`crates/tc-cli` library), so keys, dialogs, viewer, editor, find, File Stats, archives and remote panels behave the same; F1 help is identical
-- `tc-gui` F-key buttons follow the screen: File Stats (F1, F3, F4, S-F4, F8, Tab, `:`, F10) and Processes (F1, `/`, `s`, F8, F10) have their own; they work while no dialog or prompt is open
-- `tc-gui` mouse: click sets cursor, Shift+click selects a range, double click opens; panels scroll natively with the wheel; viewer and editor scroll 3 lines per wheel step; editor click / drag / Shift+click selects; click / double click in find results and File Stats rows
-- `tc-gui` clipboard: copy (Ctrl+Insert, Alt+Shift+C, editor Ctrl+C) uses the system clipboard; Ctrl+V / system paste goes into the editor or the open prompt
-- `tc-gui` limits: `:` commands run without a terminal: output (stdout + stderr, then `[tc] done` or the exit status) opens in the viewer when the command ends and the panels show; interactive commands (vim, `ssh` asking for a password) do not work. On Windows, Ctrl+Insert is taken by the system copy shortcut, use Alt+Shift+C
-- Run from source: `cargo run -p tc-gui` (desktop) or `cargo run -p tc-cli` (terminal). On Linux `tc-gui` needs X11 or Wayland with `libxkbcommon` and OpenGL at runtime
-- Compile release binaries for the current OS: `sh scripts/build.sh` (Linux/macOS) or `scripts\build.cmd` (Windows) builds all workspace binaries into `target/release/` and lists them
+- `tc-gui`: desktop window (egui) with mouse, toolbar, tab buttons and system clipboard
 
-## Running the macOS build
+Both share the app logic (`crates/tc-cli` library): keys, dialogs and F1 help are identical.
 
-Same for `tc-gui` (replace the name). The downloaded binary is not signed or notarized, so Gatekeeper blocks it ("Apple could not verify “tc-cli” is free of malware"). Run it from Terminal after clearing the quarantine flag:
+## Build and run
+
+Needs stable Rust (`rustup`, edition 2024). From the repo root:
 
 ```sh
-xattr -d com.apple.quarantine ./tc-cli
-chmod +x ./tc-cli   # artifact zips drop the exec bit
-./tc-cli
+scripts/run-cli.sh    # terminal UI, Windows: scripts\run-cli.cmd
+scripts/run-gui.sh    # desktop window, Windows: scripts\run-gui.cmd
+sh scripts/build.sh   # release binaries into target/release/, Windows: scripts\build.cmd
+scripts/run_checks.sh # same checks as CI
 ```
 
-## Running the Windows build
+Both open in the current directory; extra arguments are passed on. On Linux `tc-gui` needs X11 or Wayland with `libxkbcommon` and OpenGL.
 
-Same for `tc-gui.exe`, which opens a window instead of needing a terminal. The downloaded `tc-cli.exe` is not signed, so SmartScreen may show "Windows protected your PC": click **More info → Run anyway**. Or clear the download flag in PowerShell and run it from a terminal:
+Downloaded binaries are not signed:
 
-```powershell
-Unblock-File .\tc-cli.exe
-.\tc-cli.exe
-```
+- macOS: `xattr -d com.apple.quarantine ./tc-cli && chmod +x ./tc-cli` (same for `tc-gui`)
+- Windows: SmartScreen **More info → Run anyway**, or `Unblock-File .\tc-cli.exe`
 
 ## Features
 
-MVP, terminal and desktop UI, local file system. F1 shows all shortcuts of the current screen. F9 opens a menu with every feature and its key, for terminals that swallow keys (macOS); also a footer button. Enter runs the entry, Esc closes. In the F1 main help, lines whose key is in the menu (e.g. Ctrl+Space) can be clicked to run that action.
-
 ### Panels
 
-- Norton Commander look (fixed colors): blue panels, double borders, cyan cursor bar and F-key bar; viewer, editor and find list share it
-- Two panels: arrows, PgUp/PgDn, Home/End, Enter, Backspace, Tab switches panel; mouse wheel scrolls 3 entries; click sets cursor, double click opens; footer F-key labels are clickable
-- Entry list: size (`B`/`K`/`M`/`G`), date (time only for today), long names end in `…`; prefix `/` dir, `~` dir symlink, `@` file symlink; the inactive cursor is gray
-- Status line: with a selection `N selected, X bytes`, else the cursor entry in full (exact size, date, `-> target`)
-- Select: Insert/Space, Shift+Up/Down, Shift+click range; `+` / `-` select / deselect by glob mask (`*`, `?`, comma or space separated, case-insensitive), `*` inverts. Directories are never touched by masks
-- Space on a directory also calculates its total size in a worker thread (symlinks not followed, results dropped on reload)
-- Sort: Ctrl+F3 name, Ctrl+F4 extension, Ctrl+F5 date, Ctrl+F6 size, same key reverses; clicking the title row sorts too. Some terminals grab Ctrl+F-keys
-- Alt+. toggles dot-files (Windows hidden attribute ignored)
-- Tabs per panel: Ctrl+T opens a tab on the current directory, Ctrl+W closes it (last tab stays), Ctrl+PgDn/PgUp next/previous (also Ctrl+Tab/Ctrl+Shift+Tab where the terminal sends them); title shows `[2/3]` with more than one tab; the GUI also shows one button per tab (number and directory name) above the panel, click to switch; a tab refreshes when shown; Ctrl+U swaps tabs with the panels. Not saved across restarts
-- Directories are read in a worker thread: if the listing takes over 50 ms (huge dir, slow mount) the old list stays usable, the title shows `[loading <dir>, Esc cancels]`, and the new list appears when ready. A hung mount keeps its worker thread until the OS call returns
-- Navigation: Ctrl+R refresh, `~` home, Ctrl+\ root, Ctrl+U swap panels, Alt+= other panel follows, Alt+F1/F2 drives/mount points, Alt+Left/Right per-panel history (100 entries)
-- Hotlist: Ctrl+D adds the directory, Ctrl+B opens the list (Enter jumps, Delete removes). Stored in `$XDG_CONFIG_HOME/tc/hotlist` (`~/.config/tc/hotlist`, `%APPDATA%\tc\hotlist`), one path per line
-- Quick search Ctrl+S (jump to next name containing the text, Ctrl+S again for next) and quick filter Ctrl+F (only matching entries visible, Enter keeps, Esc clears; resets on directory change; hidden entries are not acted on). Both case-insensitive plain substring
-- Compare panels: Ctrl+Y selects the differences by name, size or newer mtime in both panels (non-recursive, metadata only)
-- Ctrl+Insert or Alt+Shift+C copies full paths of the selection to the system clipboard
-- Enter on a file opens it with the default application (`xdg-open`, `open`, `start`; needs a desktop)
+- Norton Commander look; two panels with tabs (Ctrl+T); local tabs are restored at start
+- tc-gui font size (Ctrl+= / Ctrl+-, F9 → Panel) is saved with the session
+- Left / Right go to the parent / into the directory under the cursor
+- Directories load in a worker; huge or slow directories stay usable, Esc cancels
+- Select by key, mouse, glob mask (`+` / `-` / `*`); Space sizes a directory
+- Sort by name, extension, date, size (Ctrl+F3..F6 or title click)
+- Quick search (Ctrl+S), quick filter (`/`); dot files are always shown
+- History (Alt+Left/Right), drives (Alt+F1/F2), bookmarks (Ctrl+D adds, Ctrl+B lists: Insert/`a` adds, Delete/Backspace removes, F4/`e` edits the alias, Ctrl+Up/Down or Shift+Up/Down reorders; file lines `alias<TAB>path` or `path`, older files load unchanged, a tab in an alias-less path of an old file misparses)
+- Compare panels (Ctrl+Y) selects differences by name, size, date
+- File clipboard (Ctrl+C / X / V), also to and from Explorer, Finder or a Linux file manager (needs `wl-copy`/`wl-paste` or `xclip`)
+- Enter opens a file in the default application; F3 on media and office files shows the OS quick preview
 
 ### File operations
 
-- F5 copy, F6 move: editable destination prefilled with the other panel (name included for a single item; several items or trailing `/` = directory). Runs in a worker thread; after 1 s a progress popup shows file, bytes, count, speed and ETA; Esc cancels and removes the partial target
-- Conflicts per file: `o` overwrite, `s` skip, `r` rename, `n` only if newer; `O`/`S`/`N` for all; Esc/Enter/`c` cancel. Overwrite copies into a fresh `.tc-tmp-*` directory next to the target (flushed to disk), then renames over it; copies keep the modification time; a move deletes the source only after success; directories merge, a file never replaces a directory or the reverse
-- Shift+F6 renames the cursor entry (ignores selection), F7 mkdir
-- F8 delete: confirm names the first 3 items; `y`/Enter trash, `p` permanent, `n`/Esc cancel. If trash fails nothing is deleted
-- Text prompts edit at the cursor (Left/Right/Home/End/Backspace/Delete, Ctrl+U clears, paste inserts without line breaks)
+- F5 copy, F6 move in a worker with progress, speed, ETA; Esc cancels and removes the partial target
+- Conflict dialog: overwrite, skip, rename, newer only (also for all). Overwrite goes through a temp file and rename; a move deletes the source only after success
+- F2 / Shift+F6 rename (F2 with several marked opens multi-rename), F7 mkdir, F8 delete (trash or permanent)
+- Multi-rename (Ctrl+M): name / extension masks with placeholders, regex find / replace, case, counter, live preview, presets, history, names from a pasted list or the editor, undo of the last batch. Duplicate or invalid names are refused before anything moves. `tc-cli`: terminals send Ctrl+M as Enter, use F9 → File
 
 ### Search and analysis
 
-- Find files: Alt+F7 asks for a name mask and an optional content regex (smart case), searches recursively in a worker thread with live results; Esc stops, second Esc closes. Content search streams text files only (NUL byte = binary skipped); symlinked dirs not followed; capped at 100000 results; no size/date filters
-- Panelize: Enter in the results shows them as a flat list (`[found]`) of real paths; F3/F4/F5/F6/F8 work; Backspace/Esc returns to the start directory
-- File Stats (ncdu-style): Ctrl+Space scans the directory recursively (Esc cancels), shows entries largest first with value, % and bar; Tab toggles size / file count, footer shows total size, file count and keys, Enter/Right in, Backspace/Left up, F3 view, F4 edit, Shift+F4 external editor on the selected file (closing them returns to the stats), F1 help, Esc/`q`/F10 close. F8/`d` deletes the selected entry (`y` trash, `p` permanent) and updates the tree without a rescan; `:` runs a command in the browsed directory. Scan uses up to 8 threads, the footer shows files and scanned / discovered directories. Apparent size, symlinks not followed, whole tree in memory, no refresh (also not after `:` or a failed delete). On remote panels the scan runs one `find` on an SFTP server (GNU find, as fast as a local scan there); without it (BusyBox/BSD find, FTP) it lists 8 directories in parallel over the connection; F3/F4 download a temp copy (F4 uploads it back), delete is permanent only (`p`, worker thread), Shift+F4 is not available, and `:` runs the command in the browsed directory via the system `ssh -t` (SFTP only, POSIX shell on the server, `ssh` may ask for the password again)
+- Find files (Ctrl+F): name masks or regex, content (plain, regex, whole words, not containing), size, date, depth, `.gitignore`, hidden; saved searches and history. Parallel walk, results capped at 100000
+- Find results: Ctrl+F3 path, Ctrl+F4 file name, Ctrl+F5 date, Ctrl+F6 size sort them (same key reverses, new results are sorted in as they stream); view / edit at the match, Enter feeds them to a virtual panel (`[found]`) for file operations
+- Remote find runs one GNU `find` (+ `grep`) on the server; no name regex, `.gitignore` or line numbers
+- File Stats (Ctrl+Space): size or file count, %, bar; mark, delete, rescan, feed to panel. Up to 8 threads; whole tree in memory. Remote: one `find` on SFTP servers, else parallel listing
+- Synchronize directories (Ctrl+E), local or remote: mask, subdirectories, by content, ignore date, asymmetric. Per row direction, delete, skip, byte compare, `*` reverse all; filter rows; settings history. Limits: remote targets get the copy time (use Ignore date), no FAT 2 s tolerance, stops at the first error
 
 ### Processes (Ctrl+P)
 
-- Process monitor like btop / Task Manager / Activity Monitor: header with total CPU % and core count, memory and swap used / total, load average and process count; list of PID, user, CPU %, resident memory, name and command line. Refreshes every 2 s in a worker thread, `s` sets the interval (0.5 to 3600 s, title shows it; a new value refreshes at once); CPU % is the average over the interval. The cursor keeps its row while the list re-sorts, so it does not jump (the process under it may change; the kill question names the pid)
-- Keys: Up/Down/PgUp/PgDn/Home/End (wheel scrolls 3 rows, GUI click selects, GUI click on a column title sorts by it, again reverses; USER does not sort), `c` CPU / `m` memory / `p` pid / `n` name sort (same key reverses; CPU and memory largest first), `/` or `f` filter (case-insensitive substring of name, command, user or pid; Enter keeps, Esc clears), F8 / `k` kill: `t`/Enter SIGTERM, `k` SIGKILL, `n`/Esc no (sent in a worker, result in the footer; on Windows both terminate), F1 help, Esc/`q`/F10 close
-- CPU % of a process is per core like `top` (can exceed 100); Linux threads are not listed as processes
-- Remote: on an SFTP panel the monitor shows the server: one `sh` command per interval over the open connection reads `/proc` (Linux: summary and every `/proc/<pid>/stat`, so CPU % is the average over the interval) and `ps -eo pid,user,pcpu,rss,args`; kill runs `kill -TERM|-KILL` there. Limits: the first sample, and servers without `/proc` (macOS, BSD), show `ps`'s CPU % averaged over the process lifetime; non-Linux servers show `-` for the header values; BusyBox `ps` without `-o pcpu` fails with a message; FTP cannot run commands (message)
-- Not included: graphs and history, per-core meters, temperatures, disks, network, GPU, battery, tree view, process details, pause, other signals, themes
+- CPU, memory, swap, load; list with PID, user, CPU %, memory, command; sort, filter, kill, interval 0.5 to 3600 s
+- On an SFTP panel: the server's `/proc` and `ps`. Non-Linux servers show lifetime CPU %; FTP not supported
+- Not included: graphs, per-core meters, temperatures, disks, network, GPU, tree view
 
 ### Command line
 
-- `:` opens the row above the F-keys (`dir> `); Enter runs it in the active panel's directory with `sh -c` (`cmd /C` on Windows) on the real terminal, waits for a key, then reloads both panels. Esc leaves, Up/Down history (500 entries, saved as `tc/history`). Limits: blocks tc while running, no `cd` tracking, no completion
+- `:` runs a command in the panel directory (`sh -c`, Windows `cmd /C`), history saved. On an SFTP panel via the system `ssh -t`
+- `tc-gui` has no terminal: output opens in the viewer, interactive commands do not work
+- Limits: blocks tc while running, no `cd` tracking, no completion
 
 ### Archives (read-only)
 
-- Enter on `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz` or `.xz` opens it as a directory (listing read in a worker thread, Esc cancels). F3/F4 extract an entry to a temp file for the viewer; F5 copies entries out to the other panel. F6/F7/F8, copying in and the command line show a read-only message
-- Zip-slip entries are skipped; symlinks and hard links listed, never extracted; entries over 1 GiB refused. Limits: tar.gz/xz decompress from the start for every access, plain `.xz` shows size 0, zip times in UTC, no encrypted zips, 7z, rar, bzip2, zstd or nested archives
+- `.zip`, `.tar`, `.tar.gz`, `.tar.xz`, `.xz` open as directories; view, edit a temp copy, copy out with F5
+- Zip-slip entries skipped, links never extracted, entries over 1 GiB refused. No encrypted zip, 7z, rar, bzip2, zstd, nested archives
 
 ### Remote (SFTP, FTP, FTPS)
 
-- Ctrl+N opens the saved connections: Enter connects in the active panel, Insert adds, F4 edits, Delete removes. One URL per line in `tc/connections` next to the hotlist: `sftp://user@host[:port]/dir`, `ftp://...`, `ftps://...` (explicit TLS, system-independent webpki roots). Passwords are never stored, they are asked on connect (masked)
-- SFTP: host key checked against `~/.ssh/known_hosts`; an unknown key shows its SHA256 fingerprint, `y` trusts and saves it, a changed key is refused. Auth: ssh-agent (Unix), unencrypted `~/.ssh/id_ed25519`, `id_ecdsa`, then password. RSA keys and RSA-only host keys are not supported (RUSTSEC-2023-0071 in the `rsa` crate). Empty user = local user name
-- FTP: empty user = anonymous; MLSD listing with LIST fallback, passive mode, binary transfers; a server reply missing for 60 s fails the operation. Uploads and renames need the target directory to be listable (FTP has no exclusive create, so tc refuses rather than risk overwriting)
-- Remote panels list like local ones (worker thread, Esc cancels); `..` at the remote root goes back to the local directory; Alt+= and Ctrl+T keep the connection, `~`, hotlist and drives go back to the local disk
-- F5/F6 between local and remote panels and within one remote: an absolute destination (the prefilled one) is on the other panel's side, a relative one in the active panel. Same conflict dialog, progress and Esc cancel as local copies; overwrite goes via an unused `.tc-tmp-[<n>-]<name>` and rename (if the final rename fails after the old file was removed, the error names the temp file holding the new content), partial targets are removed, a moved source is deleted only after its copy is complete. Moves within one server are renames; copies within one server go through a local temp file
-- F7 mkdir, Shift+F6 rename, F8 delete (no trash: only `p` permanent) run in a worker
-- F3 downloads to a temp file for the viewer; F4 downloads, edits, and uploads on every save (F2); files over 1 GiB are refused (copy them with F5)
-- `:` on an SFTP panel runs the command in the panel directory on the server via the system `ssh -t` (POSIX shell on the server, `ssh` may ask for the password again); FTP shows an error
-- Not on remote panels: Space dir size, Enter default app, Shift+F4, find, hotlist add, archives
-- Limits: SMB / Windows shares not yet (crate conflict, see Planned), no saved passwords, no passphrase prompt for encrypted keys (use the agent), no Windows ssh-agent, no reconnect after a dropped connection, symlinks are never created on remote targets: file links are copied as their content, a selected directory link is followed, directory links inside a copied tree are skipped and listed in the error (a move then keeps its source), deleting a link removes only the link, permissions and times are not copied to remote targets, FTP stat lists the parent directory (slow for many small files), no IPv6 literal hosts
+- Saved connections in `tc/connections`; passwords are asked on connect, never stored
+- F9 → Go → Disconnect all returns every remote panel and tab to its local directory; a session closes when no panel, tab or screen uses it
+- SFTP: host key checked against `~/.ssh/known_hosts`; auth via ssh-agent (Unix), unencrypted ed25519 / ecdsa keys, password. No RSA keys (RUSTSEC-2023-0071)
+- FTP: anonymous by default, passive, MLSD with LIST fallback, 60 s timeout. FTPS: explicit TLS
+- Copy, move, rename, mkdir, delete (permanent only), view, edit (uploads on save; files over 1 GiB refused)
+- Limits: no SMB, no reconnect, no passphrase prompt, no Windows ssh-agent, no IPv6 literals; symlinks never created remotely; permissions and times not copied; no dir size, default app, external editor, archives or bookmarks on remote panels
 
 ### Viewer (F3) and editor (F4)
 
-- Viewer: streams from disk, Up/Down/PgUp/PgDn/Home/End, Left/Right sideways, `w` wrap, `l` line numbers (only while the line is known), `/`, `f` or F7 find, `n`/`N` next/previous, `g` line or `N%`, wheel scrolls 3 lines, encoding detected from the first 8 KiB; Esc/`q`/F3/F10 close
-- Editor: F2 save, Esc/F10 exit (asks if unsaved); guesses encoding and offers UTF-8, trims trailing spaces, offers CRLF -> LF, loads in a worker thread, files over 1 GB or free RAM offer the viewer
-  - Ctrl-Z undo, Ctrl-Y redo (10000 steps); Shift+arrows select, Ctrl-C/X/V copy, cut, paste (also sets the clipboard via OSC 52, not supported by every terminal); Ctrl-K or F8 delete selection (else line), Ctrl-Left/Right to next/previous word start, Ctrl-Home/End, Ctrl-G go to line
-  - F7 or Ctrl-F find, F3 / Shift-F3 next / previous, F4 or Ctrl-R replace all (one undo step)
-  - Ctrl-A select all, Ctrl-D duplicate line, Ctrl-Backspace/Delete delete word, Shift-Tab unindent line or selection (Tab does not indent a selection), Enter keeps the indentation; mouse click, drag and Shift-click set cursor and selection
-  - Line numbers (Alt-L toggles) and soft wrap (Alt-W toggles, wraps at the window width; Up/Down still move by line); status bar shows line:col, encoding, EOL; the bracket next to the cursor and its partner (`()[]{}`, within 20000 chars, strings and comments not skipped) are underlined
-  - Alt-R replaces one by one from the cursor to the end of the file (`y` replace, `n`/Space skip, `a` all the rest, other key stops; patterns matching empty text are refused); Alt-C switches search between smart case and always case sensitive
-  - Saving asks to overwrite when the file changed on disk since it was opened or saved (compares modification time)
-- Search is a regex (Rust syntax, `$1` in replacements), line by line, smart case (no uppercase = ignore case), all matches highlighted yellow; empty answer repeats the last search
-- Syntax colors (keywords, strings, numbers, comments) by extension: rs, c/cpp/h, js/ts, java/kt/cs, go, py, sh, rb, lua, php, sql, toml/ini/yaml, json, html/xml, md (headings, `**bold**`, `*italic*`, inline `code`, ``` fences with `#` comments; the viewer assumes no fence open above the screen). Per screen row only: comments and strings spanning lines, and wrapped or sideways-scrolled rows, may color wrong
-- Shift+F4 asks for a file name (prefilled), creates it empty if missing, opens it in an external editor (`code`, else asks; console editors unsupported)
+- Viewer streams from disk (multi-GB files): search, go to line or %, wrap, line numbers, encoding detection; `h` hex view (offset, 16 bytes, ASCII; reads only the visible rows; `g` takes an offset `0x..`/decimal/`N%`, find jumps to the row of the matching line); Alt+Left/Right (or Alt+b/f, as macOS terminals send Option+arrows) view the previous / next file of the panel it was opened from (panel cursor follows; skips directories and media files; local and find-result panels only, no wrap at the ends)
+- Editor: undo / redo, selection, clipboard (OSC 52 in terminals), find / replace (regex, one by one), go to line, wrap, line numbers, bracket match, encoding and CRLF detection; warns when the file changed on disk. Files over 1 GB or free RAM offer the viewer
+- Markdown: save (and F5) adds blank lines around headings, lists and ``` blocks, one undo step; never removes lines
+- Syntax colors for common languages (rs, c/cpp, js/ts, java, go, py, sh, rb, lua, php, sql, toml/yaml, properties, json, html/xml, md); per row only, multi-line strings and comments may color wrong
+- Shift+F4 opens the cursor file (or a new one) in an external editor (`code`)
 
-F10 or `q` quits.
+### Config
 
-Run: `scripts/run-cli.sh` (terminal), `scripts/run-gui.sh` (desktop), Windows: `scripts\run-cli.cmd` / `scripts\run-gui.cmd`; all open in the current directory
+Plain text in `$XDG_CONFIG_HOME/tc/` (`~/.config/tc/`, `%APPDATA%\tc\`), private (0600), written atomically: bookmarks, connections (no passwords), searches, presets, form and command histories (last 500), session. F9 → Tools → Delete config files removes them.
 
-## Planned Features
+## Planned
 
-- Windows, Mac and Linux build images
-- File Stats: [qdirstat](https://github.com/shundhammer/qdirstat) display
-- Windows Shares (SMB): the `smb` crate pins pre-release crypto crates that conflict with russh; add once they release against `curve25519-dalek` 5.0.0
+- Windows, macOS and Linux build images
+- File Stats: [QDirStat](https://github.com/shundhammer/qdirstat) display
+- SMB shares: the `smb` crate pins pre-release crypto crates that conflict with russh; add once they release against `curve25519-dalek` 5.0.0
 
-## Tech Stack
+## Tech stack
 
-- Rust
-- AI coding
+Rust, AI coding.
