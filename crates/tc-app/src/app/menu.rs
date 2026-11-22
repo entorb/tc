@@ -71,6 +71,12 @@ pub(super) const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
     CLOSE,
 ];
 
+pub(super) const SETTINGS_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
+    HELP,
+    ("Enter Save", KeyCode::Enter, KeyModifiers::NONE),
+    CLOSE,
+];
+
 /// Footer bar items: label, key sent when clicked.
 pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
@@ -159,7 +165,8 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Quick search        Ctrl+S", KeyCode::Char('s'), C),
             ("Quick filter        /", KeyCode::Char('/'), N),
             ("Command line        :", KeyCode::Char(':'), N),
-            // no shortcut: `Null` is never typed, only sent by this entry and F1 help
+            // no shortcut: `Null` is never typed, only sent by these entries and F1 help
+            ("Settings", KeyCode::Null, A),
             ("Delete config files", KeyCode::Null, N),
         ],
     ),
@@ -273,7 +280,11 @@ impl App {
             || (self.input.is_none()
                 && matches!(
                     self.mode,
-                    Mode::Found(_) | Mode::FindForm(_) | Mode::MultiRename(_) | Mode::SyncForm(_)
+                    Mode::Found(_)
+                        | Mode::FindForm(_)
+                        | Mode::MultiRename(_)
+                        | Mode::SyncForm(_)
+                        | Mode::Settings(_)
                 ))
     }
 
@@ -303,6 +314,7 @@ impl App {
             Mode::Sync(_) => &SYNC_FOOTER,
             Mode::FindForm(_) => &FIND_FORM_FOOTER,
             Mode::MultiRename(_) | Mode::SyncForm(_) => &FORM_FOOTER,
+            Mode::Settings(_) => &SETTINGS_FOOTER,
             Mode::Stats(_) => &STATS_FOOTER,
             Mode::Cmd(_) if self.stats.is_some() => &STATS_FOOTER,
             Mode::Procs(_) => &PROCS_FOOTER,

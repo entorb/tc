@@ -7,7 +7,7 @@ use ratatui::widgets::{Clear, List, Paragraph};
 use super::popup::popup;
 use super::{BAR, PANEL, themed_block};
 use ratatui::widgets::ListState;
-use tc_app::app::{FindForm, Found, RenameForm, Sync, SyncForm};
+use tc_app::app::{FindForm, Found, RenameForm, SettingsForm, Sync, SyncForm};
 use tc_app::fmt::{self, found_title, sync_footer, sync_row, sync_title};
 pub(super) fn draw_found(frame: &mut Frame, f: &Found, area: Rect) {
     let h = usize::from(area.height.saturating_sub(2)).max(1);
@@ -40,6 +40,18 @@ pub(super) fn draw_sync_form(frame: &mut Frame, form: &SyncForm) {
     let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
     let title = " Synchronize directories (left <-> right panel) ";
     draw_form(frame, title, lines, form.focus, fmt::SYNC_FORM_KEYS);
+}
+
+/// Settings popup over the panels (F9 Tools).
+pub(super) fn draw_settings(frame: &mut Frame, form: &SettingsForm) {
+    let lines = form_lines(&form.rows, form.focus, None);
+    draw_form(
+        frame,
+        " Settings ",
+        lines,
+        form.focus,
+        fmt::SETTINGS_FORM_KEYS,
+    );
 }
 
 /// Synchronize directories: page of compared rows holding the cursor, status line, question.

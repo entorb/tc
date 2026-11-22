@@ -2,7 +2,7 @@ use super::chrome::line_edit;
 use super::help::show_help;
 use super::{ACCENT, MUTED, SELECT_BG, TEXT, modal, mono};
 use eframe::egui::{self, Color32, Context, RichText, ScrollArea, TextStyle, Ui, vec2};
-use tc_app::app::{App, FindForm, FormRow, Mode, RenameForm, SyncForm};
+use tc_app::app::{App, FindForm, FormRow, Mode, RenameForm, SettingsForm, SyncForm};
 use tc_app::fmt::procs_confirm;
 use tc_app::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
 pub(super) fn overlays(ctx: &Context, app: &mut App) {
@@ -17,6 +17,9 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
     }
     if let Mode::SyncForm(form) = &app.mode {
         show_sync_form(ctx, form);
+    }
+    if let Mode::Settings(form) = &app.mode {
+        show_settings(ctx, form);
     }
     if let Mode::Sync(s) = &app.mode
         && let Some(text) = &s.confirm
@@ -134,6 +137,16 @@ fn show_sync_form(ctx: &Context, form: &SyncForm) {
         ui.separator();
         form_rows(ui, &form.rows, form.focus, form.error.as_deref());
         ui.label(RichText::new(fmt::SYNC_FORM_KEYS).color(MUTED));
+    });
+}
+
+fn show_settings(ctx: &Context, form: &SettingsForm) {
+    modal("settings").show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading("Settings");
+        ui.separator();
+        form_rows(ui, &form.rows, form.focus, None);
+        ui.label(RichText::new(fmt::SETTINGS_FORM_KEYS).color(MUTED));
     });
 }
 

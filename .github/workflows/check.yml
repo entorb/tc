@@ -107,6 +107,7 @@ jobs:
         run: sh scripts/chk_rs_audit.sh
 
   build:
+    needs: core  # next_tag for TC_VERSION
     strategy:
       fail-fast: false
       matrix:
@@ -138,6 +139,8 @@ jobs:
         if: inputs.release || runner.os == 'macOS'
         run: cargo build --release --locked -p tc-cli -p tc-gui
         env:
+          # release tag built into the binary for the daily update check; empty: no check
+          TC_VERSION: ${{ inputs.release && (inputs.tag_name || needs.core.outputs.next_tag) || '' }}
           CARGO_PROFILE_RELEASE_LTO: ${{ inputs.release && 'true' || 'thin' }}
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.release && '1' || '16' }}
 

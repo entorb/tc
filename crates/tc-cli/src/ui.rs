@@ -22,7 +22,9 @@ use self::popup::draw_dialog;
 mod monitor;
 use self::monitor::{draw_procs, draw_stats};
 mod forms;
-use self::forms::{draw_find_form, draw_found, draw_multi_rename, draw_sync, draw_sync_form};
+use self::forms::{
+    draw_find_form, draw_found, draw_multi_rename, draw_settings, draw_sync, draw_sync_form,
+};
 
 // Norton Commander look: blue panels, light-cyan files, white dirs, cyan cursor bar.
 const PANEL: Style = Style::new().fg(Color::LightCyan).bg(Color::Blue);
@@ -118,6 +120,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::FindForm(form) => draw_find_form(frame, form),
         Mode::MultiRename(form) => draw_multi_rename(frame, form),
         Mode::SyncForm(form) => draw_sync_form(frame, form),
+        Mode::Settings(form) => draw_settings(frame, form),
         Mode::Sync(s) => draw_sync(frame, s, body),
         Mode::Stats(_) => {}
         Mode::Procs(_) => draw_procs(frame, app, body),

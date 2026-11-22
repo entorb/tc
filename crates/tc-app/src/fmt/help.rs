@@ -97,6 +97,7 @@ Ctrl+X          cut files
 Ctrl+V          paste copied / cut files here
 
 == Tools ==
+Settings        (F9 Tools) daily update check on / off
 Delete config files
                 (F9 Tools) delete tc's saved files: hotlist,
                 connections, histories, searches, session
@@ -196,6 +197,18 @@ Asymmetric: the right side becomes a copy of the left
 == Run ==
 Enter           compare the two panel directories
 Esc / F10       close";
+pub const HELP_SETTINGS: &str = "\
+== Fields ==
+Up/Down / Tab   previous / next field
+Space           toggle checkbox
+
+== Options ==
+Check for updates daily: release builds ask GitHub for a
+newer release on the first start of a day and show it.
+
+== Run ==
+Enter           save
+Esc / F10       close without saving";
 pub const HELP_FIND_FORM: &str = "\
 == Fields ==
 Tab             next field
@@ -443,6 +456,7 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Sync(_) => ("Help: synchronize directories", HELP_SYNC),
         Mode::SyncForm(_) => ("Help: synchronize form", HELP_SYNC_FORM),
         Mode::FindForm(_) => ("Help: find files", HELP_FIND_FORM),
+        Mode::Settings(_) => ("Help: settings", HELP_SETTINGS),
         Mode::Found(_) => ("Help: found files", HELP_FOUND),
         Mode::MultiRename(_) => ("Help: multi-rename", HELP_RENAME),
         Mode::Hotlist(_) | Mode::Connections(_) | Mode::Drives(..) => ("Help: lists", HELP_LISTS),

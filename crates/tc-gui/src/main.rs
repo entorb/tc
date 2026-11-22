@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
     let open = || Panel::open(&cwd).with_context(|| format!("cannot open {}", cwd.display()));
     let mut app = App::new(open()?, open()?);
     app.load_config()?;
+    app.start_update_check();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Torben's Commander")

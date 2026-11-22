@@ -89,6 +89,11 @@ impl App {
         let mut kv = vec![
             ("active".to_owned(), self.active.to_string().into()),
             ("zoom".to_owned(), format!("{:.1}", self.zoom).into()),
+            (
+                "update_check".to_owned(),
+                u8::from(self.update_check).to_string().into(),
+            ),
+            ("update_day".to_owned(), self.update_day.clone().into()),
         ];
         for (side, name) in SIDES.iter().enumerate() {
             // ring layout of `tab_key`: shown panel is tab `tab[side]`, `tabs[side]` follow it
@@ -156,6 +161,10 @@ impl App {
         }
         if let Some(a) = num("active").filter(|&a| a < 2) {
             self.active = a;
+        }
+        self.update_check = num("update_check") != Some(0);
+        if let Some((_, day)) = kv.iter().find(|(k, _)| k == "update_day") {
+            self.update_day = day.to_string_lossy().into_owned();
         }
     }
 
@@ -228,6 +237,7 @@ mod tests {
         src.tab[1] = 1; // shown = tmp is tab 1, ring: tmp, a, gone, b -> tabs b, tmp, a, gone
         src.active = 1;
         src.zoom = 1.3;
+        (src.update_check, src.update_day) = (false, "2026-11-22".into());
         let kv = src.session();
         let order: Vec<PathBuf> = (kv.iter().filter(|(k, _)| k == "right"))
             .map(|(_, v)| v.into())
@@ -244,6 +254,7 @@ mod tests {
             (1, 1, tmp.path())
         );
         assert!((dst.zoom - 1.3).abs() < 1e-6);
+        assert!(!dst.update_check && dst.update_day == "2026-11-22");
         assert_eq!(
             dst.tabs[1].iter().map(Panel::path).collect::<Vec<_>>(),
             [a.as_path(), b.as_path()]

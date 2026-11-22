@@ -1,6 +1,6 @@
 use super::menu::{
-    EDIT_FOOTER, FIND_FORM_FOOTER, FORM_FOOTER, FOUND_FOOTER, Footer, SHIFT_FOOTER, SYNC_FOOTER,
-    VIEW_FOOTER,
+    EDIT_FOOTER, FIND_FORM_FOOTER, FORM_FOOTER, FOUND_FOOTER, Footer, SETTINGS_FOOTER,
+    SHIFT_FOOTER, SYNC_FOOTER, VIEW_FOOTER,
 };
 use super::*;
 use crate::fmt;
@@ -102,7 +102,7 @@ fn quit_asks_first() {
 
 #[test]
 fn footer_keys_are_documented_in_their_help() {
-    let screens: [(&Footer, &[&str]); 9] = [
+    let screens: [(&Footer, &[&str]); 10] = [
         (&FOOTER, &[fmt::HELP_MAIN]),
         (&VIEW_FOOTER, &[fmt::HELP_VIEW]),
         (&EDIT_FOOTER, &[fmt::HELP_EDIT]),
@@ -110,6 +110,7 @@ fn footer_keys_are_documented_in_their_help() {
         (&SYNC_FOOTER, &[fmt::HELP_SYNC]),
         (&FIND_FORM_FOOTER, &[fmt::HELP_FIND_FORM]),
         (&FORM_FOOTER, &[fmt::HELP_RENAME, fmt::HELP_SYNC_FORM]),
+        (&SETTINGS_FOOTER, &[fmt::HELP_SETTINGS]),
         (&STATS_FOOTER, &[fmt::HELP_STATS]),
         (&PROCS_FOOTER, &[fmt::HELP_PROCS]),
     ];

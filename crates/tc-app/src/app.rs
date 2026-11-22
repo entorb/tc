@@ -34,6 +34,7 @@ mod multi_rename;
 mod proc_mon;
 mod sync;
 mod tabs;
+mod update;
 mod widgets;
 mod xfer;
 pub use connect::Connecting;
@@ -48,6 +49,7 @@ pub use multi_rename::RenameForm;
 use multi_rename::{RenameBatch, rename_rows};
 pub use proc_mon::Procs;
 pub use sync::{Sync, SyncForm};
+pub use update::{SettingsForm, VERSION};
 pub use widgets::{Filter, FormRow, ListRow, list_rows};
 use widgets::{
     PresetKind, edit_key, form_checked, form_text, list_nav, paste_line, preset_key,
@@ -148,6 +150,13 @@ pub enum Mode {
     ResetConfig(PathBuf),
     /// Asks before leaving tc (F10 / q in the main panel).
     AskQuit,
+    /// A newer release exists: its tag and the "check daily" checkbox.
+    Update {
+        tag: String,
+        check: bool,
+    },
+    /// Settings form (F9 Tools).
+    Settings(SettingsForm),
 }
 
 enum Done {
@@ -274,6 +283,10 @@ pub struct App {
     pub connections_file: Option<PathBuf>,
     /// Remote file open in the editor: saves are uploaded to it; the temp copy lives until the editor closes.
     edit_remote: Option<(Arc<dyn Remote>, PathBuf, TempDir)>,
+    /// Daily update check on (settings), the local date it last ran, and the running check.
+    update_check: bool,
+    update_day: String,
+    update_job: Option<thread::JoinHandle<Option<String>>>,
 }
 
 /// Largest archive entry F3/F4 extracts to a temp file.
@@ -344,6 +357,9 @@ impl App {
             connections: Vec::new(),
             connections_file: None,
             edit_remote: None,
+            update_check: true,
+            update_day: String::new(),
+            update_job: None,
         }
     }
 
@@ -404,6 +420,8 @@ impl App {
             Mode::Confirm(op, targets, text) => self.confirm_key(op, targets, text, key.code),
             Mode::ResetConfig(dir) => self.reset_config_key(key.code, dir),
             Mode::AskQuit => self.ask_quit_key(key.code),
+            Mode::Update { tag, check } => self.update_key(key.code, tag, check),
+            Mode::Settings(form) => self.settings_key(key, form),
             Mode::Transfer(op, targets, mut text) => match key.code {
                 KeyCode::Enter => self.run(op, &targets, &text.text),
                 KeyCode::Esc => {}
@@ -549,6 +567,7 @@ impl App {
         match key.code {
             KeyCode::F(4) if shift => self.new_file_prompt(),
             KeyCode::Null if shift => self.disconnect_all(),
+            KeyCode::Null if alt => self.open_settings(),
             KeyCode::F(6) if shift => self.rename(),
             KeyCode::Enter if self.default_open().is_some() => {
                 if let Some(path) = self.default_open() {
@@ -1152,6 +1171,7 @@ impl App {
         }
         self.restore_sync_back();
         self.restore_rename_back();
+        self.update_tick();
         if matches!(self.mode, Mode::Normal)
             && let Some(setup) = self.sync_again.take()
         {

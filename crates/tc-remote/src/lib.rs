@@ -8,6 +8,7 @@ use tc_core::{Error, Result};
 
 mod ftp;
 mod sftp;
+pub mod update;
 
 /// Question a connection needs answered by the user; `None` answer cancels.
 #[derive(Debug, Clone, PartialEq, Eq)]

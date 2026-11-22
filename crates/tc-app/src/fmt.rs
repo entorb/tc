@@ -25,8 +25,8 @@ use tc_core::sync::Item;
 
 pub use help::{
     HELP_CONFLICT, HELP_EDIT, HELP_FIND_FORM, HELP_FOUND, HELP_LISTS, HELP_MAIN, HELP_PROCS,
-    HELP_RENAME, HELP_STATS, HELP_SYNC, HELP_SYNC_FORM, HELP_VIEW, HelpLine, help, help_filter,
-    help_line, key_help,
+    HELP_RENAME, HELP_SETTINGS, HELP_STATS, HELP_SYNC, HELP_SYNC_FORM, HELP_VIEW, HelpLine, help,
+    help_filter, help_line, key_help,
 };
 
 /// Length of "YY-MM-DD HH:MM".
@@ -257,6 +257,14 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             None => text("Connecting", format!("{}\n\n[Esc] Cancel", c.url)),
         },
         Mode::Message(msg) => text("Error", format!("{msg}\n\nany key")),
+        Mode::Update { tag, check } => text(
+            "Update available",
+            format!(
+                "tc {tag} is available (running {}).\n\n{} Check for updates daily\n\n[Enter] Open release page   [Space] Toggle   [Esc] Close",
+                crate::app::VERSION.unwrap_or("?"),
+                if *check { "[x]" } else { "[ ]" }
+            ),
+        ),
         Mode::Edit {
             error: Some(msg), ..
         } => text("Error", format!("{msg}\n\nany key")),
@@ -457,6 +465,9 @@ pub fn found_row(h: &Hit) -> String {
         None => format!("{size:>9}  {name}"),
     }
 }
+
+/// Keys shown under the settings form.
+pub const SETTINGS_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter save  Esc cancel";
 
 /// Keys shown under the sync form.
 pub const SYNC_FORM_KEYS: &str =

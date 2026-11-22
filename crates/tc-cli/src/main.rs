@@ -22,6 +22,7 @@ fn main() -> anyhow::Result<()> {
     let open = || Panel::open(&cwd).with_context(|| format!("cannot open {}", cwd.display()));
     let mut app = App::new(open()?, open()?);
     app.load_config()?;
+    app.start_update_check();
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = ratatui::run(|terminal| {
         while !app.quit {
