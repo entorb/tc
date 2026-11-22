@@ -69,10 +69,13 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         egui::CentralPanel::default().show(ui, |ui| draw_editor(ui, app));
     } else {
         egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, app));
-        egui::Panel::top("toolbar").show(ui, |ui| toolbar(ui, app));
         // File Stats and processes have their own status / prompt line
         let own = app.stats.is_some()
             || matches!(app.mode, Mode::Stats(_) | Mode::Procs(_) | Mode::Sync(_));
+        // the toolbar acts on the panels: only shown with them
+        if !own && !matches!(app.mode, Mode::Found(_)) {
+            egui::Panel::top("toolbar").show(ui, |ui| toolbar(ui, app));
+        }
         if own {
             egui::Panel::bottom("status").show(ui, |ui| status_line(ui, app));
         } else {
