@@ -218,6 +218,46 @@ pub fn touch(parent: &Path, name: &OsStr) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Refuse to touch an existing `link` path, dangling symlinks included.
+fn free_link(link: &Path) -> Result<()> {
+    match fs::symlink_metadata(link) {
+        Ok(_) => Err(io_err(link)(io::Error::from(io::ErrorKind::AlreadyExists))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_err(link)(e)),
+    }
+}
+
+/// Create symlink `link` pointing to `target`, stored as given (may be relative, may dangle).
+/// Never replaces an existing path.
+pub fn symlink(target: &Path, link: &Path) -> Result<()> {
+    free_link(link)?;
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let made = {
+        // a relative target is relative to the link's directory
+        let abs = link.parent().unwrap_or(link).join(target);
+        if abs.is_dir() {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    };
+    made.map_err(io_err(link))
+}
+
+/// Create hard link `link` to the file `target`. Directories are refused. Never replaces an
+/// existing path.
+pub fn hard_link(target: &Path, link: &Path) -> Result<()> {
+    free_link(link)?;
+    let meta = fs::symlink_metadata(target).map_err(io_err(target))?;
+    if meta.is_dir() {
+        let e = io::Error::other("hard links to directories are not possible");
+        return Err(io_err(target)(e));
+    }
+    fs::hard_link(target, link).map_err(io_err(link))
+}
+
 /// Move to the system trash.
 pub fn trash(path: &Path) -> Result<()> {
     ::trash::delete(path).map_err(|e| io_err(path)(io::Error::other(e.to_string())))
@@ -345,6 +385,41 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_points_to_target_and_never_replaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (t, l) = (tmp.path().join("t"), tmp.path().join("l"));
+        fs::write(&t, "x").unwrap();
+        symlink(&t, &l).unwrap();
+        assert_eq!(fs::read_link(&l).unwrap(), t);
+        assert!(symlink(&t, &l).is_err());
+        assert_eq!(fs::read_link(&l).unwrap(), t);
+        // dangling link counts as existing
+        let d = tmp.path().join("d");
+        symlink(Path::new("nowhere"), &d).unwrap();
+        assert!(symlink(&t, &d).is_err());
+        assert_eq!(fs::read_link(&d).unwrap(), Path::new("nowhere"));
+        // existing file untouched
+        assert!(symlink(&l, &t).is_err());
+        assert_eq!(fs::read(&t).unwrap(), b"x");
+    }
+
+    #[test]
+    fn hard_link_shares_content_and_refuses_dirs_and_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (t, l) = (tmp.path().join("t"), tmp.path().join("l"));
+        fs::write(&t, "x").unwrap();
+        hard_link(&t, &l).unwrap();
+        fs::write(&t, "y").unwrap();
+        assert_eq!(fs::read(&l).unwrap(), b"y");
+        assert!(hard_link(&t, &l).is_err());
+        let dir = tmp.path().join("dir");
+        fs::create_dir(&dir).unwrap();
+        assert!(hard_link(&dir, &tmp.path().join("dl")).is_err());
+        assert!(!tmp.path().join("dl").exists());
+    }
 
     #[test]
     fn touch_never_truncates() {

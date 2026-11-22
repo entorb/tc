@@ -114,6 +114,9 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Multi-rename        Ctrl+M", KeyCode::Char('m'), C),
             ("Make directory      F7", KeyCode::F(7), N),
             ("Delete              F8", KeyCode::F(8), N),
+            // no shortcut: `Null` is never typed, only sent by these entries and F1 help
+            ("Symlink", KeyCode::Null, C),
+            ("Hard link", KeyCode::Null, C.union(A)),
             ("Copy paths          Ctrl+Insert", KeyCode::Insert, C),
             ("Copy files          Ctrl+C", KeyCode::Char('c'), C),
             ("Cut files           Ctrl+X", KeyCode::Char('x'), C),

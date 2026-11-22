@@ -202,6 +202,7 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             OK_CANCEL,
         ),
         Mode::Mkdir(l) => edit("Make directory", "", l, OK_CANCEL),
+        Mode::Link(a) => edit(a.title(), "", &a.line, OK_CANCEL),
         Mode::NewFile(l) => edit(
             "New file (created if missing, opened in editor)",
             "",

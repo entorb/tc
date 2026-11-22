@@ -107,6 +107,10 @@ Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
 Ctrl+C          copy files
 Ctrl+X          cut files
 Ctrl+V          paste copied / cut files here
+Symlink         (F9 File) link to the cursor entry in the other
+                panel's directory; asks the target, then the link
+                path; never replaces; local panels only
+Hard link       (F9 File) same for a hard link; files only
 
 == Tools ==
 Settings        (F9 Tools) daily update check on / off

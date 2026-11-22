@@ -31,6 +31,7 @@ mod editor;
 mod file_stats;
 mod find_files;
 mod help;
+mod link;
 mod menu;
 mod multi_rename;
 mod popular;
@@ -85,6 +86,8 @@ pub enum Mode {
     /// Copy/move: editable destination (a new name for a single item, or a directory).
     Transfer(Op, Vec<PathBuf>, LineEdit),
     Mkdir(LineEdit),
+    /// Symlink / hard link (F9 menu): two prompts, target then link path.
+    Link(link::LinkAsk),
     /// Shift+F4: name of the file to create (if missing) and edit externally.
     NewFile(LineEdit),
     /// Quick search text (cursor jumps to the next match).
@@ -473,6 +476,7 @@ impl App {
                     self.mode = Mode::Mkdir(name);
                 }
             },
+            Mode::Link(ask) => self.link_key(key, ask),
             Mode::NewFile(mut name) => match key.code {
                 KeyCode::Enter => self.new_file(&name.text),
                 KeyCode::Esc => {}
@@ -621,8 +625,10 @@ impl App {
     fn normal_mode_key(&mut self, key: KeyEvent) {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::F(4) if shift => self.new_file_prompt(),
+            KeyCode::Null if ctrl => self.link_open(alt),
             KeyCode::Null if shift => self.disconnect_all(),
             KeyCode::Null if alt => self.open_settings(),
             KeyCode::F(6) if shift => self.rename(),
@@ -1114,6 +1120,7 @@ impl App {
             Mode::Cmd(l)
             | Mode::Transfer(_, _, l)
             | Mode::Mkdir(l)
+            | Mode::Link(link::LinkAsk { line: l, .. })
             | Mode::NewFile(l)
             | Mode::HotlistAlias(_, l)
             | Mode::ConnEdit(_, l) => paste_line(l, &text),
