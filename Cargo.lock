@@ -4569,6 +4569,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tc-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "egui_extras",
+ "jiff",
+ "tc-cli",
+ "tc-core",
+ "tc-remote",
+ "tempfile",
+]
+
+[[package]]
 name = "tc-remote"
 version = "0.1.0"
 dependencies = [
@@ -4580,20 +4594,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "webpki-roots",
-]
-
-[[package]]
-name = "tc-ui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "eframe",
- "egui_extras",
- "jiff",
- "tc-cli",
- "tc-core",
- "tc-remote",
- "tempfile",
 ]
 
 [[package]]

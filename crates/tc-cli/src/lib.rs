@@ -1,4 +1,4 @@
-//! App state and logic shared by `tc-cli` (terminal) and `tc-ui` (desktop).
+//! App state and logic shared by `tc-cli` (terminal) and `tc-gui` (desktop).
 
 pub mod app;
 pub mod fmt;

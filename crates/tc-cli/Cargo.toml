@@ -3,7 +3,7 @@ name = "tc-cli"
 version = "0.1.0"
 edition = "2024"
 
-# lib keeps the short name: `tc::app` is shared with tc-ui
+# lib keeps the short name: `tc::app` is shared with tc-gui
 [lib]
 name = "tc"
 
