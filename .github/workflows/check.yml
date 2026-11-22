@@ -244,8 +244,53 @@ jobs:
           mv dist/tc-gui-Linux/tc-gui dist/tc-gui-linux
           mv dist/tc-gui-macOS/tc-gui dist/tc-gui-macos
           mv dist/tc-gui-Windows/tc-gui.exe dist/tc-gui.exe
+          # generated notes plus a footer on how to start the unsigned macOS and Windows binaries
+          NOTES="$RUNNER_TEMP/notes.md"
+          gh api -X POST "repos/$GH_REPO/releases/generate-notes" -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" --jq .body > "$NOTES"
+          cat >> "$NOTES" <<'EOF'
+
+          ---
+
+          ### Running the macOS build
+
+          The binaries are not signed or notarized, so Gatekeeper blocks them. Clear the quarantine flag in Terminal, then run:
+
+          The binaries are not signed or notarized, so Gatekeeper blocks them ("Apple could not verify “tc-cli” is free of malware"). Clear the quarantine flag in Terminal, then run:
+
+          Terminal UI:
+
+          ```sh
+          xattr -d com.apple.quarantine ./tc-cli-macos
+          chmod +x ./tc-cli-macos
+          ./tc-cli-macos
+          ```
+
+          Desktop window:
+
+          ```sh
+          xattr -d com.apple.quarantine ./tc-gui-macos
+          chmod +x ./tc-gui-macos
+          ./tc-gui-macos
+          ```
+
+          ### Running the Windows build
+
+          The binaries are not signed, so SmartScreen may show "Windows protected your PC": click **More info → Run anyway**. Or clear the download flag in PowerShell and run it from a terminal:
+
+          ```powershell
+          Unblock-File .\tc-cli.exe
+          .\tc-cli.exe
+          ```
+
+          Desktop window (opens a window instead of needing a terminal):
+
+          ```powershell
+          Unblock-File .\tc-gui.exe
+          .\tc-gui.exe
+          ```
+          EOF
           gh release create "$TAG" --target "$GITHUB_SHA" --title "${TAG#v}${TITLE:+ $TITLE}" \
-            --generate-notes ${PRERELEASE:+--prerelease} \
+            --notes-file "$NOTES" ${PRERELEASE:+--prerelease} \
             dist/tc-cli-linux dist/tc-cli-macos dist/tc-cli.exe dist/tc-gui-linux dist/tc-gui-macos dist/tc-gui.exe
         env:
           GH_TOKEN: ${{ github.token }}

@@ -8,3 +8,4 @@ if [ -d "$root/target" ]; then
   find "$root/target" -mindepth 1 -type d -empty -delete
 fi
 exec cargo run --release --quiet --manifest-path "$root/Cargo.toml" -p tc-gui -- "$@"
+cp "$root/target/release/tc-gui" ~/bin/

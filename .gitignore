@@ -2,6 +2,7 @@
 /.rumdl_cache/
 /.ryl_cache/
 /cspell-words-missing.txt
+/node_modules/
 /target/
 /templates/
 /tmp/
