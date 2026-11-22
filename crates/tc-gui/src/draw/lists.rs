@@ -10,7 +10,7 @@ use tc_app::app::{App, Mode, Stats};
 use tc_app::fmt::{
     self, found_title, stats_footer, stats_row, stats_title, sync_footer, sync_row, sync_title,
 };
-use tc_app::fmt::{procs_footer, procs_header, procs_prompt, procs_title};
+use tc_app::fmt::{procs_footer, procs_header, procs_prompt};
 use tc_app::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
@@ -216,7 +216,6 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
     let Mode::Procs(p) = &mut app.mode else {
         return;
     };
-    ui.label(RichText::new(procs_title(p)).strong().color(ACCENT));
     ui.label(RichText::new(procs_header(p)).color(TEXT));
     let row_h = ui.text_style_height(&TextStyle::Body) + 6.0;
     let h = ((ui.available_height() / row_h) as usize)
@@ -234,24 +233,20 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
         .column(Column::exact(110.0))
         .column(Column::exact(70.0))
         .column(Column::exact(90.0))
+        .column(Column::exact(70.0))
         .column(Column::remainder().clip(true))
         .header(row_h, |mut head| {
             let cols = [
-                ("PID", Some(('p', ProcSort::Pid))),
+                ("PID", None),
                 ("User", None),
                 ("CPU %", Some(('c', ProcSort::Cpu))),
                 ("Memory", Some(('m', ProcSort::Mem))),
-                ("Command", Some(('n', ProcSort::Name))),
+                ("Min", Some(('r', ProcSort::Run))),
+                ("Command", None),
             ];
             for (k, (title, key)) in cols.into_iter().enumerate() {
                 let arrow = match key {
-                    Some((_, s)) if s == p.sort => {
-                        if p.rev {
-                            " ⏷"
-                        } else {
-                            " ⏶"
-                        }
-                    }
+                    Some((_, s)) if s == p.sort => " ⏷",
                     _ => "",
                 };
                 head.col(|ui| {
@@ -259,7 +254,7 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
                         .strong()
                         .color(MUTED);
                     let add = |ui: &mut Ui| ui.add(Label::new(t).sense(Sense::CLICK)).clicked();
-                    let hit = if matches!(k, 0 | 2 | 3) {
+                    let hit = if matches!(k, 0 | 2 | 3 | 4) {
                         ui.with_layout(right(), add).inner
                     } else {
                         add(ui)
@@ -286,6 +281,9 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
                 });
                 row.col(|ui| {
                     ui.with_layout(right(), |ui| ui.label(human(q.mem)));
+                });
+                row.col(|ui| {
+                    ui.with_layout(right(), |ui| ui.label((q.run / 60).to_string()));
                 });
                 row.col(|ui| {
                     let cmd = if q.cmd.is_empty() || q.cmd == q.name {

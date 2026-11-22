@@ -27,7 +27,7 @@ fn renders_process_monitor() {
         .collect();
     assert!(screen.contains("Processes: local"));
     assert!(screen.contains("COMMAND"));
-    assert!(screen.contains("F8 kill"));
+    assert!(screen.contains("F8 Kill"));
     assert_eq!(app.page, 24 - 1 - 1 - 2 - 2); // status row and F-key bar
 }
 
@@ -150,6 +150,20 @@ fn screen(term: &Terminal<TestBackend>) -> String {
 }
 
 #[test]
+fn menu_bar_ends_with_title() {
+    let tmp = tempfile::tempdir().unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let row: String = term.backend().buffer().content()[..100]
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    assert!(row.trim_end().ends_with("Torben's Commander"));
+}
+
+#[test]
 fn status_line_shows_selection_and_link() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a"), "123").unwrap();
@@ -223,4 +237,13 @@ fn draws_every_screen_on_tiny_terminals() {
         }
         term.draw(|f| draw(f, &mut app)).unwrap();
     }
+}
+
+#[test]
+fn help_key_column_is_its_own_span() {
+    let line = help_line_styled("Ctrl+B        hotlist", false);
+    assert_eq!(line.spans.len(), 2);
+    assert_eq!(line.spans[0].content, "Ctrl+B        ");
+    assert_eq!(line.spans[1].content, "hotlist");
+    assert_eq!(help_line_styled("== Move ==", false).spans.len(), 1);
 }

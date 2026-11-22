@@ -4,16 +4,19 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Clear, List};
 
+use super::forms::{draw_form, form_lines};
 use super::popup::popup;
-use super::{BAR, PANEL, draw_edit, themed_block};
+use super::{BAR, PANEL, draw_edit, header_line, themed_block};
 use ratatui::widgets::ListState;
 use tc_app::app::{App, Mode, Stats};
 use tc_app::fmt::kind_rgb;
 use tc_app::fmt::{
-    PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
+    PROC_COLS, proc_col_key, proc_row, procs_confirm, procs_footer, procs_header, procs_info,
+    procs_prompt, procs_title,
 };
 use tc_app::fmt::{stats_footer, stats_progress, stats_row, stats_title};
 use tc_core::cmdline::LineEdit;
+use tc_core::procs::ProcSort;
 use tc_core::stats::treemap::Tile;
 /// File Stats: entries of the browsed directory, largest first, with share and bar.
 /// `cmd`: command line typed from the stats, shown in the footer row.
@@ -156,7 +159,13 @@ pub(super) fn draw_procs(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Clear, area);
     frame.render_widget(block.title(format!(" {} ", procs_title(p))), main);
     frame.render_widget(Line::raw(procs_header(p)).style(PANEL), head);
-    frame.render_widget(Line::raw(PROC_COLS).style(PANEL.bold()), cols);
+    let key = match p.sort {
+        ProcSort::Cpu => 'c',
+        ProcSort::Mem => 'm',
+        ProcSort::Run => 'r',
+    };
+    let header = header_line(PROC_COLS, |col| proc_col_key(col) == Some(key));
+    frame.render_widget(header, cols);
     frame.render_stateful_widget(list, rows, &mut state);
     if let Some((label, l)) = procs_prompt(p) {
         let style = Style::new().fg(Color::Gray).bg(Color::Black);
@@ -166,5 +175,17 @@ pub(super) fn draw_procs(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     if let Some((pid, name)) = &p.confirm {
         popup(frame, "Kill", &procs_confirm(*pid, name));
+    }
+    if let Some(d) = &p.draft {
+        let lines = form_lines(&d.rows, d.focus, d.error.as_deref());
+        draw_form(frame, " Process filter ", lines, d.focus);
+    }
+    if let Some(info) = procs_info(p) {
+        let text: Vec<String> = info
+            .rows
+            .iter()
+            .map(|(k, v)| format!("{k:<9} {v}"))
+            .collect();
+        app.proc_info_area = popup(frame, &info.title, &text.join("\n"));
     }
 }

@@ -11,6 +11,7 @@ use sysinfo::{
     Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, ThreadKind, UpdateKind, Users,
 };
 
+use crate::search;
 use crate::vfs::Remote;
 use crate::{Error, Result};
 
@@ -22,7 +23,7 @@ const MAX_OUT: u64 = 16 << 20;
 const SCRIPT: &str = "head -1 /proc/stat 2>/dev/null; cat /proc/loadavg /proc/uptime 2>/dev/null; \
 grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null; \
 nproc 2>/dev/null; echo ---; cat /proc/[0-9]*/stat 2>/dev/null; echo ---; \
-ps -eo pid=,user=,pcpu=,rss=,args= 2>/dev/null";
+ps -eo pid=,user=,pcpu=,rss=,etime=,args= 2>/dev/null";
 
 /// One process; strings are display-only, `pid` is the identity.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +36,8 @@ pub struct Proc {
     pub cpu: f32,
     /// Resident memory in bytes.
     pub mem: u64,
+    /// Seconds since the process started.
+    pub run: u64,
 }
 
 /// System summary and process list; `0` / `None` = unknown (e.g. a non-Linux server).
@@ -54,33 +57,67 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcSort {
-    Pid,
-    Name,
     Cpu,
     Mem,
+    Run,
 }
 
-/// Sort `procs` by `key`: pid and name ascending, CPU and memory largest first; `rev` flips.
-pub fn sort(procs: &mut [Proc], key: ProcSort, rev: bool) {
+/// Sort `procs` by `key`, largest first; pid ascending on ties.
+pub fn sort(procs: &mut [Proc], key: ProcSort) {
     procs.sort_by(|a, b| {
         let o = match key {
-            ProcSort::Pid => a.pid.cmp(&b.pid),
-            ProcSort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             ProcSort::Cpu => b.cpu.total_cmp(&a.cpu),
             ProcSort::Mem => b.mem.cmp(&a.mem),
+            ProcSort::Run => b.run.cmp(&a.run),
         };
-        let o = o.then(a.pid.cmp(&b.pid));
-        if rev { o.reverse() } else { o }
+        o.then(a.pid.cmp(&b.pid))
     });
 }
 
-/// Case-insensitive substring of name, command line, user or pid; `filter` must be lowercase.
-pub fn matches(p: &Proc, filter: &str) -> bool {
-    filter.is_empty()
-        || p.name.to_lowercase().contains(filter)
-        || p.cmd.to_lowercase().contains(filter)
-        || p.user.to_lowercase().contains(filter)
-        || p.pid.to_string().contains(filter)
+/// Process list filter: text (lowercase; `*` = glob over each whole field) and minimums, 0 = none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Criteria {
+    pub text: String,
+    /// Bytes.
+    pub min_mem: u64,
+    pub min_cpu: f32,
+    /// Seconds.
+    pub min_run: u64,
+}
+
+impl Criteria {
+    pub fn active(&self) -> bool {
+        *self != Criteria::default()
+    }
+
+    pub fn matches(&self, p: &Proc) -> bool {
+        p.mem >= self.min_mem
+            && (self.min_cpu <= 0.0 || p.cpu >= self.min_cpu)
+            && p.run >= self.min_run
+            && text_matches(p, &self.text)
+    }
+}
+
+/// Case-insensitive substring of name, command line, user or pid. With `*` the filter is a
+/// glob matched against each whole field. `filter` must be lowercase.
+fn text_matches(p: &Proc, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let fields = [
+        p.name.to_lowercase(),
+        p.cmd.to_lowercase(),
+        p.user.to_lowercase(),
+        p.pid.to_string(),
+    ];
+    if filter.contains('*') {
+        let pat: Vec<char> = filter.chars().collect();
+        fields
+            .iter()
+            .any(|f| search::glob(&pat, &f.chars().collect::<Vec<_>>()))
+    } else {
+        fields.iter().any(|f| f.contains(filter))
+    }
 }
 
 /// Snapshots from a worker thread; dropping it ends the worker.
@@ -165,6 +202,8 @@ fn local_snapshot(sys: &System, users: &Users) -> Snapshot {
                 .map_or_else(String::new, |u| u.name().to_owned()),
             cpu: p.cpu_usage(),
             mem: p.memory(),
+            // start time unknown (kernel threads): sysinfo would report time since the epoch
+            run: if p.start_time() == 0 { 0 } else { p.run_time() },
         })
         .collect();
     Snapshot {
@@ -194,7 +233,7 @@ fn remote_loop(
             let snap = parse_remote(&out, &mut prev);
             if snap.procs.is_empty() {
                 return Err(Error::Process(format!(
-                    "{}: `ps -eo pid,user,pcpu,rss,args` gave no processes",
+                    "{}: `ps -eo pid,user,pcpu,rss,etime,args` gave no processes",
                     r.url()
                 )));
             }
@@ -319,6 +358,7 @@ fn parse_ps(line: &str) -> Option<Proc> {
     let user = it.next()?.to_owned();
     let cpu = it.next()?.parse().ok()?;
     let mem = it.next()?.parse::<u64>().ok()? * 1024;
+    let run = parse_etime(it.next()?)?;
     let cmd = it.collect::<Vec<_>>().join(" ");
     let first = cmd.split(' ').next().unwrap_or_default();
     let name = first.rsplit('/').next().unwrap_or(first).to_owned();
@@ -329,7 +369,24 @@ fn parse_ps(line: &str) -> Option<Proc> {
         user,
         cpu,
         mem,
+        run,
     })
+}
+
+/// Elapsed time of `ps` (`[[dd-]hh:]mm:ss`) in seconds.
+fn parse_etime(s: &str) -> Option<u64> {
+    let (days, hms) = match s.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, s),
+    };
+    let parts: Vec<u64> = hms
+        .split(':')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    Some(days * 86_400 + parts.iter().fold(0, |acc, p| acc * 60 + p))
 }
 
 /// Send SIGTERM (`force`: SIGKILL) to `pid`, locally or on the `remote` server.
@@ -370,9 +427,7 @@ fn kill_local(pid: u32, force: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        INTERVAL, Prev, ProcSort, Snapshot, kill, matches, parse_ps, parse_remote, sample, sort,
-    };
+    use super::{INTERVAL, Prev, ProcSort, Snapshot, kill, parse_ps, parse_remote, sample, sort};
     use std::time::{Duration, Instant};
 
     fn p(pid: u32, name: &str, cpu: f32, mem: u64) -> super::Proc {
@@ -383,32 +438,82 @@ mod tests {
             user: "root".into(),
             cpu,
             mem,
+            run: 0,
         }
     }
 
+    fn m(x: &super::Proc, text: &str) -> bool {
+        super::Criteria {
+            text: text.into(),
+            ..Default::default()
+        }
+        .matches(x)
+    }
+
     #[test]
-    fn sorts_and_reverses() {
+    fn sorts_largest_first() {
         let mut v = vec![p(3, "b", 1.0, 10), p(1, "C", 5.0, 30), p(2, "a", 3.0, 20)];
         let pids = |v: &[super::Proc]| v.iter().map(|p| p.pid).collect::<Vec<_>>();
-        sort(&mut v, ProcSort::Cpu, false);
+        sort(&mut v, ProcSort::Cpu);
         assert_eq!(pids(&v), [1, 2, 3]);
-        sort(&mut v, ProcSort::Mem, true);
-        assert_eq!(pids(&v), [3, 2, 1]);
-        sort(&mut v, ProcSort::Name, false);
-        assert_eq!(pids(&v), [2, 3, 1]);
-        sort(&mut v, ProcSort::Pid, true);
-        assert_eq!(pids(&v), [3, 2, 1]);
+        sort(&mut v, ProcSort::Mem);
+        assert_eq!(pids(&v), [1, 2, 3]);
+        let mut v = vec![p(3, "b", 1.0, 10), p(2, "a", 1.0, 20)];
+        sort(&mut v, ProcSort::Mem);
+        assert_eq!(pids(&v), [2, 3]);
+        sort(&mut v, ProcSort::Cpu);
+        assert_eq!(pids(&v), [2, 3]);
+        let mut v = vec![p(3, "b", 1.0, 10), p(2, "a", 1.0, 20)];
+        v[0].run = 90;
+        v[1].run = 30;
+        sort(&mut v, ProcSort::Run);
+        assert_eq!(pids(&v), [3, 2]);
     }
 
     #[test]
     fn filter_matches_fields() {
         let x = p(42, "Firefox", 0.0, 0);
-        assert!(matches(&x, ""));
-        assert!(matches(&x, "fire"));
-        assert!(matches(&x, "--x"));
-        assert!(matches(&x, "roo"));
-        assert!(matches(&x, "42"));
-        assert!(!matches(&x, "chrome"));
+        assert!(m(&x, ""));
+        assert!(m(&x, "fire"));
+        assert!(m(&x, "--x"));
+        assert!(m(&x, "roo"));
+        assert!(m(&x, "42"));
+        assert!(!m(&x, "chrome"));
+        assert!(m(&x, "fire*"));
+        assert!(m(&x, "f*x"));
+        assert!(m(&x, "*--x"));
+        assert!(m(&x, "4*"));
+        assert!(m(&x, "*2"));
+        assert!(!m(&x, "*chrome*"));
+        assert!(!m(&x, "ire*"));
+    }
+
+    #[test]
+    fn minimums_apply_with_text() {
+        let mut x = p(42, "Firefox", 5.0, 200 << 20);
+        x.run = 600;
+        let c = |mem, cpu, run| super::Criteria {
+            text: "fire".into(),
+            min_mem: mem,
+            min_cpu: cpu,
+            min_run: run,
+        };
+        assert!(c(100 << 20, 5.0, 600).matches(&x));
+        assert!(!c(300 << 20, 0.0, 0).matches(&x));
+        assert!(!c(0, 6.0, 0).matches(&x));
+        assert!(!c(0, 0.0, 601).matches(&x));
+        assert!(!c(0, 0.0, 0).matches(&p(1, "bash", 9.0, 0)));
+        assert!(!super::Criteria::default().active());
+    }
+
+    #[test]
+    fn parses_etime() {
+        use super::parse_etime;
+        assert_eq!(parse_etime("05:07"), Some(307));
+        assert_eq!(parse_etime("01:02:03"), Some(3723));
+        assert_eq!(parse_etime("2-01:00:00"), Some(176_400));
+        assert_eq!(parse_etime("7"), None);
+        assert_eq!(parse_etime("x:01"), None);
     }
 
     #[test]
@@ -416,7 +521,7 @@ mod tests {
         let first = "cpu  100 0 100 800 0 0 0 0\n0.50 0.25 0.10 2/300 999\n1000.5 3000.1\n\
 MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 100 kB\nSwapFree: 100 kB\n4\n---\n\
 77 (my prog) S 1 77 77 0 -1 4194304 100 0 0 0 30 10 0 0 20 0 1 0\n---\n\
-    1 root      0.0  1200 /sbin/init splash\n  77 alice    12.5   800 /usr/bin/my prog -v\n";
+    1 root      0.0  1200 00:01 /sbin/init splash\n  77 alice    12.5   800 02:05 /usr/bin/my prog -v\n";
         let mut prev = Prev::default();
         let s = parse_remote(first, &mut prev);
         assert_eq!(s.cpu, None);
@@ -430,7 +535,10 @@ MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 100 kB\nSwapFree: 100 kB\n4\
         assert_eq!(s.procs.len(), 2);
         assert_eq!(s.procs[1].name, "my");
         assert_eq!(s.procs[1].cmd, "/usr/bin/my prog -v");
-        assert_eq!((s.procs[1].cpu, s.procs[1].mem), (12.5, 800 * 1024));
+        assert_eq!(
+            (s.procs[1].cpu, s.procs[1].mem, s.procs[1].run),
+            (12.5, 800 * 1024, 125)
+        );
         // 100 of 200 more jiffies busy; pid 77 used 20 of 200 / 4 cores per core
         let next = first
             .replace("cpu  100 0 100 800", "cpu  200 0 100 900")
@@ -443,7 +551,10 @@ MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 100 kB\nSwapFree: 100 kB\n4\
     #[test]
     fn parses_server_without_proc() {
         let mut prev = Prev::default();
-        let s = parse_remote("---\n---\n  5 bob 1.0 10 [kthread]\nbad line\n", &mut prev);
+        let s = parse_remote(
+            "---\n---\n  5 bob 1.0 10 00:07 [kthread]\nbad line\n",
+            &mut prev,
+        );
         assert_eq!(prev.stat, None);
         assert_eq!(
             Snapshot {
@@ -452,7 +563,10 @@ MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 100 kB\nSwapFree: 100 kB\n4\
             },
             Snapshot::default()
         );
-        assert_eq!(s.procs, vec![parse_ps("5 bob 1.0 10 [kthread]").unwrap()]);
+        assert_eq!(
+            s.procs,
+            vec![parse_ps("5 bob 1.0 10 00:07 [kthread]").unwrap()]
+        );
     }
 
     #[test]

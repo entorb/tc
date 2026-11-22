@@ -123,5 +123,5 @@ fn procs_keys_in_gui() {
         vec![press(Key::F1, Modifiers::NONE)],
     );
     assert!(app.help, "F1");
-    assert_eq!(app.footer_keys()[2].0, "s Interval");
+    assert_eq!(app.footer_keys()[3].0, "s Interval");
 }

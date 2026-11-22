@@ -2,13 +2,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph};
 
-use tc_app::app::{App, MENUS, Mode, menu_drop};
+use tc_app::app::{App, MENUS, Mode, menu_drop, menu_x};
 use tc_app::fmt::{
-    DATE_WIDTH, SIZE_WIDTH, dialog, entry_cols, fit, input_dialog, panel_info, panel_title,
+    DATE_WIDTH, HelpLine, SIZE_WIDTH, dialog, entry_cols, fit, help_line, input_dialog, panel_info,
+    panel_title,
 };
 use tc_core::cmdline::LineEdit;
 use tc_core::syntax::Kind;
@@ -32,8 +33,27 @@ const PANEL: Style = Style::new().fg(Color::LightCyan).bg(Color::Blue);
 const BAR: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
 /// Cursor bar of the inactive panel: background only, entry colors stay readable.
 const BAR_INACTIVE: Style = Style::new().bg(Color::DarkGray);
+/// Sort column of a table header: the column the list is ordered by.
+const SORT_HEAD: Style = Style::new().fg(Color::Yellow).bold();
+
+/// Table header line: the columns where `sorted` holds in `SORT_HEAD`, the others bold.
+pub(super) fn header_line(text: &str, sorted: impl Fn(usize) -> bool) -> Line<'static> {
+    let spans: Vec<Span> = text
+        .chars()
+        .enumerate()
+        .map(|(col, c)| {
+            let st = if sorted(col) { SORT_HEAD } else { PANEL.bold() };
+            Span::styled(c.to_string(), st)
+        })
+        .collect();
+    Line::from(spans).style(PANEL)
+}
+
 /// Marked files and search hits.
 const MARK: Style = Style::new().fg(Color::Rgb(255, 255, 0)).bold();
+/// F1 help: section titles, key column (body text stays `PANEL`, readable on blue).
+const HELP_SECTION: Style = Style::new().fg(Color::Yellow).bold();
+const HELP_KEY: Style = Style::new().fg(Color::White).bold();
 
 fn syntax_style(kind: Kind) -> Style {
     match kind {
@@ -163,6 +183,16 @@ fn draw_menu_bar(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!(" {title} "), st));
     }
     frame.render_widget(Line::from(spans).style(BAR), area);
+    let title = match tc_app::app::VERSION {
+        Some(version) => format!(" Torben's Commander {version} "),
+        None => " Torben's Commander ".to_owned(),
+    };
+    let width = UnicodeWidthStr::width(title.as_str()) as u16;
+    // shortcut: title is dropped when it would overlap the menu titles, not truncated
+    if area.width >= menu_x(MENUS.len()) + width {
+        let right = Rect::new(area.right() - width, area.y, width, 1);
+        frame.render_widget(Line::raw(title).style(BAR).right_aligned(), right);
+    }
 }
 
 fn draw_menu_drop(frame: &mut Frame, group: usize, sel: usize) {
@@ -218,6 +248,27 @@ fn draw_edit(frame: &mut Frame, area: Rect, prompt: &str, l: &LineEdit, style: S
     }
 }
 
+/// One F1 help line: section titles yellow, key column white, the rest light cyan; the selected
+/// line takes the cursor bar.
+fn help_line_styled(l: &str, selected: bool) -> Line<'static> {
+    if selected {
+        return Line::styled(l.to_owned(), BAR);
+    }
+    match help_line(l) {
+        HelpLine::Section(_) => Line::styled(l.to_owned(), HELP_SECTION),
+        HelpLine::Entry(..) => {
+            // the description starts after the spaces that end the key column
+            let k = l.find("  ").unwrap_or(0);
+            let d = l.len() - l[k..].trim_start().len();
+            Line::from(vec![
+                Span::styled(l[..d].to_owned(), HELP_KEY),
+                Span::styled(l[d..].to_owned(), PANEL),
+            ])
+        }
+        _ => Line::styled(l.to_owned(), PANEL),
+    }
+}
+
 fn draw_input(frame: &mut Frame, app: &mut App) {
     if app.help {
         let title = app.help_text().0;
@@ -236,21 +287,13 @@ fn draw_input(frame: &mut Frame, app: &mut App) {
         app.help_scroll = app.help_scroll.min(lines.saturating_sub(rows));
         frame.render_widget(Clear, area);
         app.help_area = Block::bordered().inner(area);
-        let block = Block::bordered()
-            .border_type(BorderType::Double)
+        let block = themed_block()
             .title(title)
             .title_bottom(format!(" Find: {}_ ", app.help_filter));
         let shown: Vec<Line> = text
             .into_iter()
             .enumerate()
-            .map(|(i, (l, action))| {
-                let sel = i == app.help_sel && action.is_some();
-                Line::raw(l).style(if sel {
-                    BAR.add_modifier(Modifier::REVERSED)
-                } else {
-                    BAR
-                })
-            })
+            .map(|(i, (l, action))| help_line_styled(l, i == app.help_sel && action.is_some()))
             .collect();
         frame.render_widget(
             Paragraph::new(shown)

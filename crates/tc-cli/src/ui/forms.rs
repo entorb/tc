@@ -95,7 +95,7 @@ pub(super) fn draw_multi_rename(frame: &mut Frame, form: &RenameForm) -> (Rect, 
 }
 
 /// Form rows (focused one highlighted) and the error under them.
-fn form_lines(
+pub(super) fn form_lines(
     rows: &[tc_app::app::FormRow],
     focus: usize,
     error: Option<&str>,
@@ -111,7 +111,12 @@ fn form_lines(
 }
 
 /// Centered form popup of `lines`; returns the inner area and its first line shown.
-fn draw_form(frame: &mut Frame, title: &str, lines: Vec<Line>, focus: usize) -> (Rect, usize) {
+pub(super) fn draw_form(
+    frame: &mut Frame,
+    title: &str,
+    lines: Vec<Line>,
+    focus: usize,
+) -> (Rect, usize) {
     let area = frame.area();
     let w = area.width.min(76);
     let h = (lines.len() as u16 + 2).min(area.height);

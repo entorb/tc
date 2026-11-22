@@ -24,6 +24,30 @@ pub fn mask_match(masks: &str, name: &str) -> bool {
     Masks::new(masks).matches(name)
 }
 
+/// Whole-text glob match of `n` against `p` (`*` any run, `?` one char); both already case-folded.
+// iterative: on a mismatch only the last `*` takes one more char, so O(p * n), not exponential
+pub(crate) fn glob(p: &[char], n: &[char]) -> bool {
+    let (mut pi, mut ni) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        match p.get(pi) {
+            Some('*') => {
+                star = Some((pi, ni));
+                pi += 1;
+            }
+            Some(&c) if c == '?' || c == n[ni] => (pi, ni) = (pi + 1, ni + 1),
+            _ => match star {
+                Some((sp, sn)) => {
+                    star = Some((sp, sn + 1));
+                    (pi, ni) = (sp + 1, sn + 1);
+                }
+                None => return false,
+            },
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
+}
+
 /// Name masks parsed once, for matching many names (find, select by mask).
 pub struct Masks {
     masks: Vec<Vec<char>>,
@@ -57,28 +81,6 @@ impl Masks {
     }
 
     pub fn matches(&self, name: &str) -> bool {
-        // iterative: on a mismatch only the last `*` takes one more char, so O(p * n), not exponential
-        fn glob(p: &[char], n: &[char]) -> bool {
-            let (mut pi, mut ni) = (0, 0);
-            let mut star: Option<(usize, usize)> = None;
-            while ni < n.len() {
-                match p.get(pi) {
-                    Some('*') => {
-                        star = Some((pi, ni));
-                        pi += 1;
-                    }
-                    Some(&c) if c == '?' || c == n[ni] => (pi, ni) = (pi + 1, ni + 1),
-                    _ => match star {
-                        Some((sp, sn)) => {
-                            star = Some((sp, sn + 1));
-                            (pi, ni) = (sp + 1, sn + 1);
-                        }
-                        None => return false,
-                    },
-                }
-            }
-            p[pi..].iter().all(|&c| c == '*')
-        }
         if self.masks.is_empty() {
             return true;
         }

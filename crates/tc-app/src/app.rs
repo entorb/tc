@@ -200,6 +200,8 @@ pub struct App {
     pub footer: Rect,
     /// Screen area of the help text (set by the CLI UI), for clicks.
     pub help_area: Rect,
+    /// Outer area of the process info popup, for clicks outside it.
+    pub proc_info_area: Rect,
     /// Form rows on screen (set by the CLI UI) and the first row shown there, for clicks.
     pub form_area: Rect,
     pub form_scroll: usize,
@@ -331,6 +333,7 @@ impl App {
             areas: Default::default(),
             footer: Rect::default(),
             help_area: Rect::default(),
+            proc_info_area: Rect::default(),
             form_area: Rect::default(),
             form_scroll: 0,
             stats_map: Rect::default(),

@@ -6,11 +6,12 @@ use unicode_width::UnicodeWidthStr;
 use super::{BAR, draw_edit};
 use tc_app::fmt::Dialog;
 use tc_core::cmdline::LineEdit;
-pub(super) fn popup(frame: &mut Frame, title: &str, text: &str) {
-    popup_area(frame, title, text);
+/// Centered text popup; returns its outer area.
+pub(super) fn popup(frame: &mut Frame, title: &str, text: &str) -> Rect {
+    popup_area(frame, title, text)
 }
 
-/// Centered popup sized to its text; returns the inner area.
+/// Centered popup sized to its text; returns the outer area.
 fn popup_area(frame: &mut Frame, title: &str, text: &str) -> Rect {
     let screen = frame.area();
     let longest = text.lines().map(UnicodeWidthStr::width).max().unwrap_or(0);
@@ -34,13 +35,12 @@ fn popup_area(frame: &mut Frame, title: &str, text: &str) -> Rect {
     let block = Block::bordered()
         .border_type(BorderType::Double)
         .title(title);
-    let inner = block.inner(area);
     let para = Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .style(BAR)
         .block(block);
     frame.render_widget(para, area);
-    inner
+    area
 }
 
 /// Popup with a text field: `head` lines, the field, then `tail`.
@@ -50,7 +50,9 @@ fn popup_edit(frame: &mut Frame, title: &str, head: &str, l: &LineEdit, tail: &s
     } else {
         format!("{head}\n\n{tail}")
     };
-    let inner = popup_area(frame, title, &text);
+    let inner = Block::bordered()
+        .border_type(BorderType::Double)
+        .inner(popup_area(frame, title, &text));
     let row = head.lines().count() as u16;
     if row < inner.height {
         let line = Rect {
@@ -81,7 +83,9 @@ fn list_popup(frame: &mut Frame, title: &str, rows: &[String], sel: usize, empty
 
 pub(super) fn draw_dialog(frame: &mut Frame, d: &Dialog) {
     match d {
-        Dialog::Text { title, text } => popup(frame, title, text),
+        Dialog::Text { title, text } => {
+            popup(frame, title, text);
+        }
         Dialog::Edit {
             title,
             head,

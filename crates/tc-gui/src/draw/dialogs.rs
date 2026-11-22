@@ -6,8 +6,8 @@ use eframe::egui::{
     TextStyle, Ui, vec2,
 };
 use tc_app::app::{App, FindForm, FormRow, Mode, RenameForm, SettingsForm, SyncForm};
-use tc_app::fmt::procs_confirm;
 use tc_app::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
+use tc_app::fmt::{ProcInfo, procs_confirm, procs_info};
 use tc_app::{KeyCode, KeyEvent, KeyModifiers};
 
 /// What a mouse did in a form; applied through the app like the matching keys.
@@ -37,6 +37,16 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         (None, Mode::MultiRename(form)) => show_multi_rename(ctx, form),
         (None, Mode::SyncForm(form)) => show_sync_form(ctx, form),
         (None, Mode::Settings(form)) => show_settings(ctx, form),
+        (None, Mode::Procs(p)) => match (&p.draft, procs_info(p)) {
+            (Some(d), _) => show_form(
+                ctx,
+                ("proc-filter", "Process filter"),
+                (&d.rows, d.focus, d.error.as_deref()),
+                Some("OK"),
+            ),
+            (None, Some(info)) => show_info(ctx, &info),
+            (None, None) => None,
+        },
         _ => None,
     };
     if let Mode::Sync(s) = &app.mode
@@ -268,6 +278,28 @@ fn show_form(
             act.or(ok.and_then(|ok| ok_cancel(ui, ok)))
         })
         .inner
+}
+
+/// Process info: label / value grid; a click outside closes it (as Esc).
+fn show_info(ctx: &Context, info: &ProcInfo) -> Option<FormAct> {
+    let r = modal("proc-info").show(ctx, |ui| {
+        ui.set_min_width(480.0);
+        ui.heading(info.title.trim());
+        ui.separator();
+        egui::Grid::new("proc-info-grid")
+            .num_columns(2)
+            .spacing(vec2(16.0, 6.0))
+            .show(ui, |ui| {
+                for (label, value) in &info.rows {
+                    ui.label(RichText::new(*label).color(MUTED));
+                    ui.add(Label::new(value.as_str()).wrap());
+                    ui.end_row();
+                }
+            });
+    });
+    r.backdrop_response
+        .clicked()
+        .then_some(FormAct::Key(KeyCode::Esc))
 }
 
 /// OK / Cancel buttons; not focusable, so Tab, Space and Enter stay with the app.

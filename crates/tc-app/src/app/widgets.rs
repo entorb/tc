@@ -88,6 +88,7 @@ impl Mode {
             Mode::SyncForm(f) => Some((&f.rows, &mut f.focus)),
             Mode::MultiRename(f) => Some((&f.rows, &mut f.focus)),
             Mode::Settings(f) => Some((&f.rows, &mut f.focus)),
+            Mode::Procs(p) => p.draft.as_mut().map(|d| (d.rows.as_slice(), &mut d.focus)),
             _ => None,
         }
     }

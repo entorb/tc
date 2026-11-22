@@ -226,10 +226,13 @@ pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
 ];
 
 /// F-key bar of the process monitor.
-pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 5] = [
+pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
+    ("Tab Sort", KeyCode::Tab, KeyModifiers::NONE),
     ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
     ("s Interval", KeyCode::Char('s'), KeyModifiers::NONE),
+    ("i Info", KeyCode::Char('i'), KeyModifiers::NONE),
+    ("F5 Sample", KeyCode::F(5), KeyModifiers::NONE),
     ("F8 Kill", KeyCode::F(8), KeyModifiers::NONE),
     ("F10 Close", KeyCode::F(10), KeyModifiers::NONE),
 ];

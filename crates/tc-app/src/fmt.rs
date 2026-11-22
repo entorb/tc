@@ -20,7 +20,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{
     App, Filter, FormRow, Found, Input, ListRow, Mode, Procs, Stats, Step, Sync, Xfer, list_rows,
 };
-use tc_core::procs::{Proc, ProcSort};
+use tc_core::procs::{Criteria, Proc, ProcSort};
 use tc_core::sync::Item;
 
 pub use help::{
@@ -736,17 +736,15 @@ pub fn stats_footer(st: &Stats) -> String {
 pub fn procs_title(p: &Procs) -> String {
     let src = p.remote.as_ref().map_or("local", |r| r.url());
     let key = match p.sort {
-        ProcSort::Pid => "pid",
-        ProcSort::Name => "name",
         ProcSort::Cpu => "cpu",
         ProcSort::Mem => "mem",
+        ProcSort::Run => "run",
     };
     let t = format!(
-        "Processes: {src} [{key}{}] [every {}s]",
-        if p.rev { " rev" } else { "" },
+        "Processes: {src} [{key}] [every {}s]",
         p.every.as_secs_f64()
     );
-    t + &p.filter.tag()
+    t + &proc_filter_tag(&p.crit)
 }
 
 /// Summary line: CPU, memory, swap, load and process count; `-` = unknown.
@@ -775,26 +773,44 @@ pub fn procs_header(p: &Procs) -> String {
 }
 
 /// Column titles matching [`proc_row`].
-pub const PROC_COLS: &str = "    PID USER        CPU%      MEM  COMMAND";
+pub const PROC_COLS: &str = "    PID USER        CPU%      MEM      Min  COMMAND";
 
-/// Sort key ('p', 'c', 'm', 'n') of the [`PROC_COLS`] title at char column `col`; user has none.
+/// Sort key ('c', 'm') of the [`PROC_COLS`] title at char column `col`; other columns do not sort.
 pub fn proc_col_key(col: usize) -> Option<char> {
     match col {
-        0..=7 => Some('p'),
         18..=24 => Some('c'),
         25..=33 => Some('m'),
-        34.. => Some('n'),
+        34..=42 => Some('r'),
         _ => None,
     }
 }
 
 /// Open prompt of the process monitor: label and text being typed.
 pub fn procs_prompt(p: &Procs) -> Option<(&'static str, &LineEdit)> {
-    match &p.every_edit {
-        Some(l) => Some(("update every (seconds)> ", l)),
-        None if p.filter.editing => Some(("filter> ", &p.filter.line)),
-        None => None,
+    p.every_edit
+        .as_ref()
+        .map(|l| ("update every (seconds)> ", l))
+}
+
+/// Filter part of the process monitor title: ` [filter: fire, mem>=100MB]`, empty if none.
+pub fn proc_filter_tag(c: &Criteria) -> String {
+    if !c.active() {
+        return String::new();
     }
+    let mut parts = Vec::new();
+    if !c.text.is_empty() {
+        parts.push(c.text.clone());
+    }
+    if c.min_mem > 0 {
+        parts.push(format!("mem>={}MB", c.min_mem as f64 / 1_048_576.0));
+    }
+    if c.min_cpu > 0.0 {
+        parts.push(format!("cpu>={}%", c.min_cpu));
+    }
+    if c.min_run > 0 {
+        parts.push(format!("run>={}min", c.min_run as f64 / 60.0));
+    }
+    format!(" [filter: {}]", parts.join(", "))
 }
 
 /// Process row: pid, user, CPU%, memory, name and command line.
@@ -805,11 +821,12 @@ pub fn proc_row(p: &Proc) -> String {
         format!("{}  {}", p.name, p.cmd)
     };
     format!(
-        "{:>7} {} {:>5.1} {:>8}  {cmd}",
+        "{:>7} {} {:>5.1} {:>8} {:>8}  {cmd}",
         p.pid,
         fit(&p.user, 10),
         p.cpu,
-        human(p.mem)
+        human(p.mem),
+        p.run / 60
     )
 }
 
@@ -821,7 +838,73 @@ pub fn procs_footer(p: &Procs) -> String {
     if p.snap.procs.is_empty() {
         return "loading...".into();
     }
-    "c/m/p/n sort  / filter  s interval  F8 kill".into()
+    String::new()
+}
+
+/// Info popup of the process monitor: title and label / value rows.
+pub struct ProcInfo {
+    pub title: String,
+    pub rows: Vec<(&'static str, String)>,
+}
+
+/// Info popup rows of the process under the info cursor; `None` while the popup is closed.
+pub fn procs_info(p: &Procs) -> Option<ProcInfo> {
+    let pid = p.info?;
+    let title = format!(" Process {pid} ");
+    let Some(q) = p.snap.procs.iter().find(|q| q.pid == pid) else {
+        return Some(ProcInfo {
+            title,
+            rows: vec![("Status", "ended".into())],
+        });
+    };
+    let s = &p.snap;
+    let of_cores = match s.cores {
+        0 => String::new(),
+        n => format!(" ({:.1} % of all {n} cores)", q.cpu / n as f32),
+    };
+    let of_mem = match s.mem_total {
+        0 => String::new(),
+        t => format!(
+            " ({:.1} % of {})",
+            q.mem as f64 * 100.0 / t as f64,
+            human(t)
+        ),
+    };
+    let or_dash = |v: &str| {
+        if v.is_empty() {
+            "-".to_owned()
+        } else {
+            v.to_owned()
+        }
+    };
+    let rows = vec![
+        ("PID", q.pid.to_string()),
+        ("Name", q.name.clone()),
+        ("Command", or_dash(&q.cmd)),
+        ("User", or_dash(&q.user)),
+        ("CPU", format!("{:.1} % of one core{of_cores}", q.cpu)),
+        (
+            "Memory",
+            format!("{} ({} bytes){of_mem}", human(q.mem), thousands(q.mem)),
+        ),
+        ("Runtime", format!("{} ({} min)", clock(q.run), q.run / 60)),
+    ];
+    Some(ProcInfo { title, rows })
+}
+
+/// `[d d ]hh:mm:ss` of a runtime in seconds.
+fn clock(secs: u64) -> String {
+    let (d, h, m, s) = (
+        secs / 86_400,
+        secs % 86_400 / 3600,
+        secs % 3600 / 60,
+        secs % 60,
+    );
+    if d > 0 {
+        format!("{d} d {h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{h:02}:{m:02}:{s:02}")
+    }
 }
 
 /// Kill question for the process monitor.
@@ -914,8 +997,9 @@ mod tests {
         let at = |t: &str| proc_col_key(PROC_COLS.find(t).unwrap());
         assert_eq!(
             ["PID", "USER", "CPU%", "MEM", "COMMAND"].map(at),
-            [Some('p'), None, Some('c'), Some('m'), Some('n')]
+            [None, None, Some('c'), Some('m'), None]
         );
+        assert_eq!(at("Min"), Some('r'));
     }
 
     #[test]

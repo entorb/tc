@@ -387,22 +387,31 @@ exceed 100). Load = average number of busy processes
 over the last 1 / 5 / 15 minutes; above the core count
 means overloaded. The cursor keeps its row while the
 list re-sorts. On an SFTP panel the list comes from the
-server's /proc and ps.
+server's /proc and ps. RUN is the time since the
+process started, in minutes.
 
 == Move ==
 Up/Down         move cursor
 PgUp/PgDn       page up / down
 Home/End        first / last process
 Mouse wheel     scroll
-Click title     sort by that column (GUI)
+Click header    sort by CPU or memory (GUI)
 
 == Keys ==
-c / m / p / n   sort by CPU, memory, pid, name (again: reverse)
-/ or f          filter (name, command, user, pid):
-                Enter keeps, Esc clears
-Ctrl+R          sample now
+Tab             toggle sort: CPU, memory, runtime
+                (largest first)
+c / m / r       sort by CPU / memory / runtime
+/ or f          filter popup, all fields optional:
+                Find: id, command or name, * wildcard
+                  (fire*, *--x*, 42*; no * = substring)
+                Min MEM (MB), Min CPU (%), Min runtime (min)
+                Tab / Up / Down move, Enter applies,
+                Esc cancels; Esc with no popup clears
+Ctrl+R / F5     sample now
 s               update interval in seconds (default 2):
                 Enter sets, Esc keeps
+i               info popup of the selected process
+                i / Esc / F10 or a click outside closes
 F8 / k          kill: t / Enter SIGTERM, k SIGKILL, n / Esc cancel
 Esc / q / F10   close";
 pub const HELP_VIEW: &str = "\

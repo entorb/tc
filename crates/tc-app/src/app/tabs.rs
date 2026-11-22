@@ -110,6 +110,16 @@ impl App {
             }
             return;
         }
+        // process info popup: a click outside it closes it, inside does nothing
+        if let Mode::Procs(p) = &mut self.mode
+            && p.info.is_some()
+            && ev.kind == MouseEventKind::Down(MouseButton::Left)
+        {
+            if !self.proc_info_area.contains((ev.column, ev.row).into()) {
+                p.info = None;
+            }
+            return;
+        }
         if ev.kind == MouseEventKind::Down(MouseButton::Left)
             && (self.footer_click(ev)
                 || self.stats_click(ev.column, ev.row)
