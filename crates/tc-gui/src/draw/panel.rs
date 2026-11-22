@@ -40,10 +40,15 @@ pub(super) fn draw_panel(
             rows = ((height / row_h) as usize).saturating_sub(1).max(1);
             let panel = &app.panels[i];
             let cursor = panel.cursor();
+            // no coasting, no rubber-band past first/last row: an export tool, not a phone
+            ui.spacing_mut().scroll.kinetic.decay_time = 0.0;
+            ui.spacing_mut().scroll.kinetic.rubber_band = false;
             let mut table = TableBuilder::new(ui)
                 .id_salt(i)
                 .striped(true)
+                .auto_shrink([false, false])
                 .sense(Sense::CLICK)
+                .animate_scrolling(false)
                 .min_scrolled_height(height)
                 .max_scroll_height(height)
                 .column(Column::remainder().clip(true))
