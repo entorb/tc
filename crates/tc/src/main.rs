@@ -1,4 +1,3 @@
-mod app;
 mod ui;
 
 use std::time::Duration;
@@ -16,27 +15,13 @@ use ratatui::crossterm::terminal::{
 };
 use tc_core::panel::Panel;
 
-use app::App;
+use tc::app::{self, App};
 
 fn main() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("cannot read current directory")?;
     let open = || Panel::open(&cwd).with_context(|| format!("cannot open {}", cwd.display()));
     let mut app = App::new(open()?, open()?);
-    app.hotlist_file = tc_core::hotlist::default_path();
-    if let Some(file) = &app.hotlist_file {
-        app.hotlist = tc_core::hotlist::load(file).context("cannot read hotlist")?;
-    }
-    app.connections_file = app
-        .hotlist_file
-        .as_ref()
-        .map(|f| f.with_file_name("connections"));
-    if let Some(file) = &app.connections_file {
-        app.connections = tc_core::hotlist::load(file).context("cannot read connections")?;
-    }
-    app.history_file = tc_core::cmdline::history_path();
-    if let Some(file) = &app.history_file {
-        app.history = tc_core::cmdline::load_history(file).context("cannot read history")?;
-    }
+    app.load_config()?;
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = ratatui::run(|terminal| {
         while !app.quit {

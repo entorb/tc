@@ -136,7 +136,7 @@ jobs:
       # Linux/Windows release binaries only for releases; macOS always, thin LTO outside releases
       - name: Build release
         if: inputs.release || runner.os == 'macOS'
-        run: cargo build --release --locked -p tc
+        run: cargo build --release --locked -p tc -p tc-ui
         env:
           CARGO_PROFILE_RELEASE_LTO: ${{ inputs.release && 'true' || 'thin' }}
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.release && '1' || '16' }}
@@ -147,6 +147,14 @@ jobs:
         with:
           name: tc-cli-${{ runner.os }}
           path: target/release/tc-cli${{ runner.os == 'Windows' && '.exe' || '' }}
+          retention-days: 7
+
+      - name: Upload desktop binary
+        if: inputs.release || runner.os == 'macOS'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: tc-ui-${{ runner.os }}
+          path: target/release/tc-ui${{ runner.os == 'Windows' && '.exe' || '' }}
           retention-days: 7
 
   e2e:
@@ -229,13 +237,16 @@ jobs:
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Invalid tag: $TAG"; exit 1; }
           # artifact zips drop the exec bit
-          chmod +x dist/tc-cli-Linux/tc-cli dist/tc-cli-macOS/tc-cli
+          chmod +x dist/tc-cli-Linux/tc-cli dist/tc-cli-macOS/tc-cli dist/tc-ui-Linux/tc-ui dist/tc-ui-macOS/tc-ui
           mv dist/tc-cli-Linux/tc-cli dist/tc-cli-linux
           mv dist/tc-cli-macOS/tc-cli dist/tc-cli-macos
           mv dist/tc-cli-Windows/tc-cli.exe dist/tc-cli.exe
+          mv dist/tc-ui-Linux/tc-ui dist/tc-ui-linux
+          mv dist/tc-ui-macOS/tc-ui dist/tc-ui-macos
+          mv dist/tc-ui-Windows/tc-ui.exe dist/tc-ui.exe
           gh release create "$TAG" --target "$GITHUB_SHA" --title "${TAG#v}${TITLE:+ $TITLE}" \
             --generate-notes ${PRERELEASE:+--prerelease} \
-            dist/tc-cli-linux dist/tc-cli-macos dist/tc-cli.exe
+            dist/tc-cli-linux dist/tc-cli-macos dist/tc-cli.exe dist/tc-ui-linux dist/tc-ui-macos dist/tc-ui.exe
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

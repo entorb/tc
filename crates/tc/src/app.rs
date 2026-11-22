@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::ui::{DATE_WIDTH, SIZE_WIDTH};
+use crate::fmt::{DATE_WIDTH, SIZE_WIDTH};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -557,6 +557,27 @@ impl App {
         }
     }
 
+    /// Load hotlist, connections and command history from the config directory.
+    pub fn load_config(&mut self) -> anyhow::Result<()> {
+        use anyhow::Context;
+        self.hotlist_file = hotlist::default_path();
+        if let Some(file) = &self.hotlist_file {
+            self.hotlist = hotlist::load(file).context("cannot read hotlist")?;
+        }
+        self.connections_file = self
+            .hotlist_file
+            .as_ref()
+            .map(|f| f.with_file_name("connections"));
+        if let Some(file) = &self.connections_file {
+            self.connections = hotlist::load(file).context("cannot read connections")?;
+        }
+        self.history_file = cmdline::history_path();
+        if let Some(file) = &self.history_file {
+            self.history = cmdline::load_history(file).context("cannot read history")?;
+        }
+        Ok(())
+    }
+
     pub fn other_dir(&self) -> &Path {
         self.panels[1 - self.active].path()
     }
@@ -641,9 +662,7 @@ impl App {
             } else {
                 SortKey::Name
             };
-            self.active = i;
-            self.panels[i].set_sort(key);
-            return;
+            return self.sort_by(i, key);
         }
         // first row is the border
         let Some(row) = usize::from(ev.row - area.y).checked_sub(1) else {
@@ -655,18 +674,36 @@ impl App {
         {
             return;
         }
+        let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
+        let now = Instant::now();
+        let double = !shift
+            && self.last_click.is_some_and(|(t, c, r)| {
+                (c, r) == (ev.column, ev.row) && now.duration_since(t) < Duration::from_millis(400)
+            });
+        if !shift {
+            self.last_click = (!double).then_some((now, ev.column, ev.row));
+        }
+        self.click_entry(i, idx, shift, double);
+    }
+
+    /// Sort panel `i` by `key` (same key again reverses) and make it active.
+    pub fn sort_by(&mut self, i: usize, key: SortKey) {
+        self.active = i;
+        self.panels[i].set_sort(key);
+    }
+
+    /// Click on entry `idx` of panel `i`: cursor there, Shift selects the range from the old cursor, double click opens.
+    pub fn click_entry(&mut self, i: usize, idx: usize, shift: bool, double: bool) {
+        if self.input.is_some() || !matches!(self.mode, Mode::Normal) {
+            return;
+        }
         self.active = i;
         let panel = &mut self.panels[i];
-        if ev.modifiers.contains(KeyModifiers::SHIFT) {
+        if shift {
             panel.select_range(panel.cursor(), idx);
             return;
         }
         panel.set_cursor(idx);
-        let now = Instant::now();
-        let double = self.last_click.is_some_and(|(t, c, r)| {
-            (c, r) == (ev.column, ev.row) && now.duration_since(t) < Duration::from_millis(400)
-        });
-        self.last_click = (!double).then_some((now, ev.column, ev.row));
         if double {
             let is_dir = self.panels[i]
                 .current()

@@ -7,16 +7,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
 use regex::Regex;
 
-use crate::app::{App, FOOTER, Found, Mode, Stats, Step, Xfer};
 use ratatui::widgets::ListState;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use tc::app::{App, FOOTER, Found, Mode, Stats};
+use tc::fmt::{
+    self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
+    help, input_dialog, panel_info, panel_title, stats_footer, stats_row,
+};
 use tc_core::cmdline::LineEdit;
-use tc_core::edit::{Eol, human};
-use tc_core::find::MAX_RESULTS;
-use tc_core::panel::SortKey;
 use tc_core::syntax::{self, Kind, Lang};
-use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // Norton Commander look: blue panels, light-cyan files, white dirs, cyan cursor bar.
@@ -43,50 +42,6 @@ fn themed_block() -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Double)
         .style(PANEL)
-}
-
-/// Length of "YY-MM-DD HH:MM".
-pub(crate) const DATE_WIDTH: usize = 14;
-/// Length of "1023.9 K".
-pub(crate) const SIZE_WIDTH: usize = 8;
-
-/// `1234567` as `1,234,567`.
-fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// `s` cut to `w` display columns with a trailing `…`, or padded with spaces to `w`.
-fn fit(s: &str, w: usize) -> String {
-    if w == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    if s.width() <= w {
-        out.push_str(s);
-        used = s.width();
-    } else {
-        for c in s.chars() {
-            let cw = c.width().unwrap_or(0);
-            if used + cw > w - 1 {
-                break;
-            }
-            out.push(c);
-            used += cw;
-        }
-        out.push('…');
-        used += 1;
-    }
-    out.extend(std::iter::repeat_n(' ', w - used));
-    out
 }
 
 fn draw_view(frame: &mut Frame, app: &mut App) {
@@ -173,126 +128,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     match &app.mode {
-        Mode::Confirm(op, _, text) => popup(frame, op.verb(), text),
-        Mode::Transfer(op, targets, l) => popup_edit(
-            frame,
-            op.verb(),
-            &format!(
-                "{} {} item(s) to (edit name or directory):",
-                op.verb(),
-                targets.len()
-            ),
-            l,
-            "Enter ok   Esc cancel",
-        ),
-        Mode::Mkdir(l) => popup_edit(frame, "Make directory", "", l, "Enter ok   Esc cancel"),
-        Mode::NewFile(l) => popup_edit(
-            frame,
-            "New file (created if missing, opened in editor)",
-            "",
-            l,
-            "Enter ok   Esc cancel",
-        ),
-        Mode::Editor(_, l) => popup_edit(
-            frame,
-            "Editor not found, enter editor command",
-            "",
-            l,
-            "Enter ok   Esc cancel",
-        ),
-        Mode::Hotlist(sel) => list_popup(
-            frame,
-            "Hotlist",
-            &app.hotlist,
-            *sel,
-            "(empty, Ctrl+D adds the current directory)",
-            "Enter go  Del remove  Esc close",
-        ),
-        Mode::Drives(rows, sel, _) => list_popup(
-            frame,
-            "Drives",
-            rows,
-            *sel,
-            "(no drives found)",
-            "Enter go  Esc close",
-        ),
-        Mode::Connections(sel) => list_popup(
-            frame,
-            "Connections",
-            &app.connections,
-            *sel,
-            "(empty, Insert adds one)",
-            "Enter connect  Ins add  F4 edit  Del remove  Esc close",
-        ),
-        Mode::ConnEdit(_, l) => popup_edit(
-            frame,
-            "Connection",
-            "sftp://user@host[:port]/dir, ftp://..., ftps://...\n(no passwords, they are asked on connect)",
-            l,
-            "Enter save   Esc cancel",
-        ),
-        Mode::Connecting(c) => match &c.ask {
-            Some((Prompt::HostKey(text), _)) => popup(
-                frame,
-                "Host key",
-                &format!("{text}\n\n[y] trust and save to known_hosts   [n] cancel"),
-            ),
-            Some((Prompt::Password(label), l)) => {
-                let masked = LineEdit::from("*".repeat(l.text.chars().count()));
-                popup_edit(frame, label, "", &masked, "Enter ok   Esc cancel");
-            }
-            None => popup(frame, "Connecting", &format!("{}\n\nEsc abandon", c.url)),
-        },
         Mode::Found(f) => draw_found(frame, f),
         Mode::Stats(st) => draw_stats(frame, st, None),
         Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l)),
-        Mode::Message(msg) => popup(frame, "Error", &format!("{msg}\n\nany key")),
-        Mode::Edit { error, .. } => {
-            if let Some(msg) = error {
-                popup(frame, "Error", &format!("{msg}\n\nany key"));
+        _ => {
+            if let Some(d) = dialog(app) {
+                draw_dialog(frame, &d);
             }
         }
-        Mode::Work(job) if job.visible() => popup(
-            frame,
-            job.label,
-            &format!("{}%\n\nEsc cancel", job.percent()),
-        ),
-        Mode::Work(_) => {}
-        Mode::Xfer(x) => {
-            if let Some(l) = &x.rename {
-                popup_edit(frame, "Rename", "", l, "Enter ok   Esc back");
-            } else if let Some((_, target)) = &x.ask {
-                popup(
-                    frame,
-                    "File exists",
-                    &format!(
-                        "{}\n\no overwrite  s skip  r rename  n newer\nO all  S skip all  N newer all\nEsc cancel",
-                        target.display()
-                    ),
-                );
-            } else if x.visible() {
-                popup(frame, "Working", &progress_text(x));
-            }
-        }
-        Mode::AskViewer { text, .. } => popup(frame, "Edit", text),
-        Mode::AskSave { editor, step, .. } => {
-            let text = match step {
-                Step::Changed => "File changed on disk. Overwrite it?".to_owned(),
-                Step::Encoding => format!("File is {}. Convert to UTF-8?", editor.encoding_name()),
-                Step::Eol => "Convert line endings to LF?".to_owned(),
-            };
-            popup(
-                frame,
-                "Save",
-                &format!("{text}\n\n[y] yes   [n] no   Esc cancel"),
-            );
-        }
-        Mode::AskExit(_) => popup(
-            frame,
-            "Edit",
-            "Save changes?\n\n[y] yes   [n] no   Esc cancel",
-        ),
-        Mode::Normal | Mode::View { .. } | Mode::Search(_) | Mode::Filter(_) | Mode::Cmd(_) => {}
     }
 
     draw_input(frame, app);
@@ -338,16 +181,7 @@ fn draw_found(frame: &mut Frame, f: &Found) {
         .skip(start)
         .take(h)
         .map(|e| e.name.to_string_lossy());
-    let state = if f.running { "searching" } else { "done" };
-    let cap = if f.list.len() >= MAX_RESULTS {
-        ", capped"
-    } else {
-        ""
-    };
-    let title = format!(
-        " Find: {} found, {state}{cap}  Enter panelize  Esc stop/close ",
-        f.list.len()
-    );
+    let title = found_title(f);
     let list = List::new(items)
         .style(PANEL)
         .block(themed_block().title(title))
@@ -360,41 +194,17 @@ fn draw_found(frame: &mut Frame, f: &Found) {
 /// File Stats: entries of the browsed directory, largest first, with share and bar.
 /// `cmd`: command line typed from the stats, shown in the footer row.
 fn draw_stats(frame: &mut Frame, st: &Stats, cmd: Option<&LineEdit>) {
-    const BAR_WIDTH: usize = 10;
     let area = frame.area();
     let h = usize::from(area.height.saturating_sub(3)).max(1);
-    let dir = st.current();
-    let value = |n: &tc_core::stats::Node| if st.by_files { n.files } else { n.size };
-    let fmt = |v: u64| if st.by_files { thousands(v) } else { human(v) };
-    let total = value(dir).max(1);
     let start = st.sel / h * h;
-    let items = dir.children.iter().skip(start).take(h).map(|n| {
-        let share = value(n) as f64 / total as f64;
-        let filled = (share * BAR_WIDTH as f64).round() as usize;
-        let bar = "#".repeat(filled) + &" ".repeat(BAR_WIDTH - filled.min(BAR_WIDTH));
-        let slash = if n.is_dir { "/" } else { "" };
-        format!(
-            "{:>11} {:>5.1}% [{bar}] {}{slash}",
-            fmt(value(n)),
-            share * 100.0,
-            n.name.to_string_lossy()
-        )
-    });
-    let footer = if st.scanning() {
-        format!(
-            "scanning: {} files, {} / {} dirs  Esc/F10 cancel",
-            thousands(st.progress.files.load(Ordering::Relaxed)),
-            thousands(st.progress.dirs_done.load(Ordering::Relaxed)),
-            thousands(st.progress.dirs.load(Ordering::Relaxed))
-        )
-    } else {
-        let mode = if st.by_files { "count" } else { "size" };
-        format!(
-            "{}, {} files  Tab size/count ({mode})  Enter open  Bksp up  F1 Help  F3 View  F4 Edit  S-F4 Ext  F8 Del  : Cmd  F10 Quit",
-            human(dir.size),
-            thousands(dir.files)
-        )
-    };
+    let items = st
+        .current()
+        .children
+        .iter()
+        .skip(start)
+        .take(h)
+        .map(|n| stats_row(st, n));
+    let footer = stats_footer(st);
     let list = List::new(items)
         .style(PANEL)
         .block(themed_block().title(format!(" Stats: {} ", st.path().display())))
@@ -418,12 +228,7 @@ fn draw_stats(frame: &mut Frame, st: &Stats, cmd: Option<&LineEdit>) {
 
 fn draw_input(frame: &mut Frame, app: &mut App) {
     if app.help {
-        let (title, text) = match app.mode {
-            Mode::View { .. } => ("Help: viewer", HELP_VIEW),
-            Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
-            Mode::Stats(_) => ("Help: file stats (ncdu)", HELP_STATS),
-            _ => ("Help", HELP_MAIN),
-        };
+        let (title, text) = help(&app.mode);
         let lines = text.lines().count();
         let [h] = Layout::horizontal([Constraint::Length(frame.area().width.min(64))])
             .flex(Flex::Center)
@@ -449,14 +254,7 @@ fn draw_input(frame: &mut Frame, app: &mut App) {
         );
     }
     if let Some(input) = &app.input {
-        let error = input.error.as_deref().unwrap_or_default();
-        popup_edit(
-            frame,
-            input.ask.title(),
-            "",
-            &input.text,
-            &format!("{error}\nEnter ok   Esc cancel"),
-        );
+        draw_dialog(frame, &input_dialog(input));
     }
 }
 
@@ -518,72 +316,43 @@ fn draw_editor(
         })
         .collect();
     frame.render_widget(Paragraph::new(lines).style(PANEL).block(block), main);
-    let (line, col) = editor.cursor;
     let (dy, dx) = editor.cursor_cell(width);
     if dx < width && dy < height {
         frame.set_cursor_position((text_area.x + dx as u16, inner.y + dy as u16));
     }
-    let eol = match editor.eol() {
-        Eol::Lf => "LF",
-        Eol::Crlf => "CRLF",
-        Eol::Mixed => "mixed",
-    };
-    let dirty = if editor.dirty() { " *" } else { "" };
-    let info = format!(
-        "{}:{}  {}  {eol}{dirty}  {note}  F2 Save  F3 Next  F4/^R Replace  F7/^F Find  ^Z Undo  Esc Exit",
-        line + 1,
-        col + 1,
-        editor.encoding_name()
-    );
+    let info = editor_info(editor, note);
     frame.render_widget(Line::raw(info).style(BAR), status);
 }
 
-/// `row` in `lang` syntax colors, with all matches of `re` marked yellow and the selected columns
-/// (counted from the first column of the line, minus `left`) reversed.
-// shortcut: matches the shown text, so a pattern with \t or one cut at the left edge can differ from the real match
+/// `row` in `lang` syntax colors, search hits yellow, selection reversed, see [`fmt::highlight`].
 fn highlight(
     row: String,
     lang: Option<&Lang>,
     fence: &mut bool,
     re: Option<&Regex>,
     sel: Option<(usize, usize)>,
-    (left, brackets): (usize, &[usize]),
+    cols: (usize, &[usize]),
 ) -> Line<'static> {
-    let mut styles = vec![Style::new(); row.chars().count()];
-    let at = |byte: usize| row[..byte].chars().count();
-    for (r, kind) in lang
-        .map(|l| syntax::tokens(l, &row, fence))
-        .unwrap_or_default()
-    {
-        styles[at(r.start)..at(r.end)].fill(syntax_style(kind));
+    let spans: Vec<Span> = fmt::highlight(&row, lang, fence, re, sel, cols)
+        .into_iter()
+        .map(|(t, m)| Span::styled(t, mark_style(m)))
+        .collect();
+    Line::from(spans)
+}
+
+fn mark_style(m: Mark) -> Style {
+    let mut st = if m.hit {
+        MARK
+    } else {
+        m.kind.map_or_else(Style::new, syntax_style)
+    };
+    if m.selected {
+        st = st.reversed();
     }
-    for m in re.into_iter().flat_map(|re| re.find_iter(&row)) {
-        styles[at(m.start())..at(m.end())].fill(MARK);
+    if m.bracket {
+        st = st.bold().underlined();
     }
-    if let Some((a, b)) = sel {
-        let end = styles.len();
-        for st in &mut styles[a.saturating_sub(left).min(end)..b.saturating_sub(left).min(end)] {
-            *st = st.reversed();
-        }
-    }
-    for &c in brackets {
-        if let Some(st) = styles.get_mut(c) {
-            *st = st.bold().underlined();
-        }
-    }
-    let mut spans: Vec<(String, Style)> = Vec::new();
-    for (c, st) in row.chars().zip(styles) {
-        match spans.last_mut() {
-            Some((text, last)) if *last == st => text.push(c),
-            _ => spans.push((c.to_string(), st)),
-        }
-    }
-    Line::from(
-        spans
-            .into_iter()
-            .map(|(t, st)| Span::styled(t, st))
-            .collect::<Vec<_>>(),
-    )
+    st
 }
 
 fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
@@ -591,39 +360,11 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
     let active = i == app.active;
     let width = area.width.saturating_sub(2) as usize;
     let today = jiff::ZonedDateTime::now().date();
-    let date_of = |e: &tc_core::panel::Entry| {
-        e.modified
-            .and_then(|t| jiff::ZonedDateTime::try_from(t).ok())
-            .map_or_else(String::new, |z| fmt_date(&z, today))
-    };
-    let dir_size = |e: &tc_core::panel::Entry| -> Option<String> {
-        if !e.is_dir || e.is_parent() || panel.archive().is_some() {
-            return None;
-        }
-        match &app.dir_job {
-            Some((side, p, _)) if *side == i && *p == panel.path().join(&e.name) => {
-                Some("...".into())
-            }
-            _ => panel.dir_size(e).map(human),
-        }
-    };
     let items: Vec<ListItem> = panel
         .entries()
         .iter()
         .map(|e| {
-            let prefix = match (e.is_symlink, e.is_dir) {
-                (true, true) => '~',
-                (true, false) => '@',
-                (false, true) => '/',
-                _ => ' ',
-            };
-            let name = format!("{prefix}{}", e.name.to_string_lossy());
-            let size = if e.is_dir {
-                dir_size(e).unwrap_or_else(|| "<DIR>".to_owned())
-            } else {
-                human(e.size)
-            };
-            let date = date_of(e);
+            let [name, size, date] = entry_cols(app, i, e, today);
             let pad = width.saturating_sub(SIZE_WIDTH + DATE_WIDTH + 2);
             let row = format!(
                 "{} {size:>SIZE_WIDTH$} {date:>DATE_WIDTH$}",
@@ -641,55 +382,8 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
             ListItem::new(row).style(style)
         })
         .collect();
-    let mut title = panel.title();
-    let tabs = app.tabs[i].len() + 1;
-    if tabs > 1 {
-        title = format!("[{}/{tabs}] {title}", app.tab[i] + 1);
-    }
-    if panel.is_virtual() {
-        title += " [found]";
-    }
-    if let Some(dir) = panel.loading() {
-        title += &format!(" [loading {}, Esc cancels]", dir.display());
-    }
-    match panel.sort() {
-        (SortKey::Name, false) => {}
-        (key, rev) => {
-            let key = format!("{key:?}").to_lowercase();
-            title += &format!(" [{key}{}]", if rev { " desc" } else { "" });
-        }
-    }
-    if !panel.shows_hidden() {
-        title += " [no hidden]";
-    }
-    match &app.mode {
-        Mode::Search(t) if active => title += &format!(" [search: {t}]"),
-        Mode::Filter(t) if active => title += &format!(" [filter: {t}]"),
-        _ if !panel.filter().is_empty() => title += &format!(" [filter: {}]", panel.filter()),
-        _ => {}
-    }
-    // status line: selection sum (cached in the panel), else the cursor entry in full
-    let (count, bytes) = panel.selection_info();
-    let info = match panel.current().filter(|e| !e.is_parent()) {
-        _ if count > 0 => format!(" {count} selected, {} bytes ", thousands(bytes)),
-        Some(e) => {
-            let size = match dir_size(e) {
-                Some(s) => s,
-                None if e.is_dir => "<DIR>".to_owned(),
-                None => thousands(e.size),
-            };
-            let link = e
-                .link
-                .as_ref()
-                .map_or(String::new(), |l| format!("  -> {}", l.display()));
-            format!(
-                " {}  {size}  {}{link} ",
-                e.name.to_string_lossy(),
-                date_of(e)
-            )
-        }
-        None => String::new(),
-    };
+    let title = panel_title(app, i);
+    let info = panel_info(app, i, today);
     let block = Block::bordered()
         .border_type(BorderType::Double)
         .title(title)
@@ -701,170 +395,6 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
     state.select(Some(panel.cursor()));
     frame.render_stateful_widget(list, area, state);
 }
-
-/// Time only for today's files, else short date and time.
-fn fmt_date(z: &jiff::ZonedDateTime, today: jiff::civil::Date) -> String {
-    let fmt = if z.date() == today {
-        "%H:%M:%S"
-    } else {
-        "%y-%m-%d %H:%M"
-    };
-    z.strftime(fmt).to_string()
-}
-
-fn progress_text(x: &Xfer) -> String {
-    let p = &x.progress;
-    let (done, files) = (
-        p.done.load(Ordering::Relaxed),
-        p.files.load(Ordering::Relaxed),
-    );
-    let current = p
-        .current
-        .lock()
-        .map(|c| c.display().to_string())
-        .unwrap_or_default();
-    let (total, of) = if p.scanned.load(Ordering::Acquire) {
-        let (t, f) = (
-            p.total.load(Ordering::Relaxed),
-            p.files_total.load(Ordering::Relaxed),
-        );
-        (human(t), format!("{} / {f}", files.min(f)))
-    } else {
-        ("scanning...".to_owned(), files.to_string())
-    };
-    let remaining = p.total.load(Ordering::Relaxed).saturating_sub(done) as f64;
-    let speed = x
-        .eta
-        .rate()
-        .map_or("--".to_owned(), |r| format!("{}/s", human(r as u64)));
-    let eta = match x.eta.eta(remaining) {
-        Some(s) if p.scanned.load(Ordering::Acquire) => hms(s as u64),
-        _ => "--".to_owned(),
-    };
-    format!(
-        "{current}\n{} / {total}   files {of}\n{speed}   ETA {eta}\n\nEsc cancel",
-        human(done)
-    )
-}
-
-fn hms(s: u64) -> String {
-    match (s / 3600, s / 60 % 60, s % 60) {
-        (0, m, s) => format!("{m}:{s:02}"),
-        (h, m, s) => format!("{h}:{m:02}:{s:02}"),
-    }
-}
-
-const HELP_MAIN: &str = "\
-== Highlights ==
-Ctrl+Space      FILE STATS (like ncdu): biggest files and dirs
-                of the current tree, with % and bar
-Ctrl+N          SFTP / FTP / FTPS connections
-Ctrl+B          bookmarks (hotlist), Ctrl+D adds this directory
-
-== Navigation ==
-Up/Down/PgUp/PgDn/Home/End   move cursor
-Tab             switch panel
-Enter           open directory, archive or file
-Backspace       parent directory
-Alt+Left/Right  history back / forward
-~               home directory
-Ctrl+\\         root directory
-Ctrl+R          refresh
-Alt+F1 / F2     drives for left / right panel
-Ctrl+U          swap panels
-Ctrl+T / Ctrl+W new / close tab
-Ctrl+PgDn/PgUp  next / previous tab
-Alt+=           other panel to this directory
-Alt+.           show / hide hidden files
-Ctrl+F3..F6     sort name/ext/date/size (again: reverse)
-Esc             clear filter, leave found list
-
-== Selection ==
-Insert / Space  select entry
-Shift+Up/Down   select range
-+ / -           select / deselect by mask
-*               invert selection
-Ctrl+Y          select differences to other panel
-
-== Search ==
-Ctrl+S          quick search (again: next match)
-Ctrl+F          quick filter
-Alt+F7          find files
-:               command line
-
-== Files ==
-F3 / F4         view / edit
-Shift+F4        create file, edit in external editor
-Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
-F5 / F6         copy / move
-Shift+F6        rename
-F7 / F8         make directory / delete
-F10 / q         quit";
-
-const HELP_STATS: &str = "\
-Up/Down/PgUp/PgDn/Home/End  move cursor
-Enter / Right  open directory
-Backspace / Left  parent directory
-Tab  toggle size / file count
-F3  view file
-F4  edit file
-Shift+F4  edit in external editor
-F8 / d  delete (y trash, p permanent), no rescan
-:  command line in this directory
-Esc / q / F10  close (while scanning: cancel)
-
-Scan runs in up to 8 threads; footer shows files and
-scanned / discovered directories.";
-
-const HELP_VIEW: &str = "\
-== Move ==
-Up/Down/PgUp/PgDn/Home/End  scroll
-Left/Right  scroll sideways
-g  go to line or N%
-
-== Search ==
-/ or f or F7  find
-n  next match
-N  previous match
-
-== View ==
-w  wrap long lines
-l  line numbers
-Esc / q / F3 / F10  close";
-
-const HELP_EDIT: &str = "\
-== File ==
-F2  save
-Esc / F10  exit
-
-== Move ==
-Ctrl+Left/Right  by word
-Ctrl+Home/End  start / end of file
-Ctrl+G  go to line
-
-== Search ==
-F7 / Ctrl+F  find
-F3  next match
-Shift+F3  previous match
-F4 / Ctrl+R  replace all
-Alt+R  replace one by one (y n a Esc)
-Alt+C  case sensitive / smart case
-
-== Edit ==
-Ctrl+Z  undo
-Ctrl+Y  redo
-Shift+arrows  select
-Ctrl+C  copy (also system clipboard)
-Ctrl+X  cut
-Ctrl+V  paste (terminal paste works too)
-Ctrl+K / F8  delete selection or line
-Ctrl+A  select all
-Ctrl+D  duplicate line
-Ctrl+Backspace/Delete  delete word
-Shift+Tab  unindent line / selection
-Alt+W  wrap on / off
-Alt+L  line numbers on / off
-Mouse  click, drag, Shift+click select";
 
 fn popup(frame: &mut Frame, title: &str, text: &str) {
     popup_area(frame, title, text);
@@ -948,6 +478,25 @@ fn list_popup(
     popup(frame, title, &text);
 }
 
+fn draw_dialog(frame: &mut Frame, d: &Dialog) {
+    match d {
+        Dialog::Text { title, text } => popup(frame, title, text),
+        Dialog::Edit {
+            title,
+            head,
+            line,
+            tail,
+        } => popup_edit(frame, title, head, line, tail),
+        Dialog::List {
+            title,
+            rows,
+            sel,
+            empty,
+            keys,
+        } => list_popup(frame, title, rows, *sel, empty, keys),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,18 +522,6 @@ mod tests {
         assert!(screen.contains("file.txt"));
         assert!(screen.contains("Make directory"));
         assert!(screen.contains("F5 Copy"));
-    }
-
-    #[test]
-    fn date_today_shows_time_only() {
-        let z = jiff::ZonedDateTime::now();
-        let today = z.date();
-        assert_eq!(fmt_date(&z, today), z.strftime("%H:%M:%S").to_string());
-        let yesterday = today.yesterday().unwrap();
-        assert_eq!(
-            fmt_date(&z, yesterday),
-            z.strftime("%y-%m-%d %H:%M").to_string()
-        );
     }
 
     #[test]
@@ -1073,20 +610,6 @@ mod tests {
             (0, &[]),
         );
         assert_eq!(line.to_string(), "é o");
-    }
-
-    #[test]
-    fn thousands_and_fit() {
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1000), "1,000");
-        assert_eq!(thousands(1234567), "1,234,567");
-        assert_eq!(fit("abcdef", 4), "abc…");
-        assert_eq!(fit("ab", 4), "ab  ");
-        assert_eq!(fit("x", 0), "");
-        let w = fit("日本語", 5);
-        assert_eq!(w.width(), 5);
-        assert!(w.trim_end().ends_with('…'));
     }
 
     fn screen(term: &Terminal<TestBackend>) -> String {
