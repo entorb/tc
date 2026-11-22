@@ -167,6 +167,7 @@ pub(super) fn parse_record(root: &str, text: &str) -> Option<Entry> {
         size: size.parse().unwrap_or(0),
         modified,
         link: None,
+        ignored: false,
     })
 }
 

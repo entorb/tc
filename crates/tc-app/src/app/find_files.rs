@@ -766,6 +766,7 @@ mod tests {
                 is_symlink: false,
                 modified: None,
                 link: None,
+                ignored: false,
             },
             line: None,
         };

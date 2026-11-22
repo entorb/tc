@@ -33,6 +33,7 @@ pub(crate) fn entry_with(name: OsString, path: &Path, link_meta: fs::Metadata) -
         } else {
             None
         },
+        ignored: false,
     }
 }
 
@@ -95,6 +96,7 @@ pub(super) fn read_entries(
             entries.push(entry_with(item.file_name(), &item.path(), meta));
         }
     }
+    super::git::mark_ignored(dir, &mut entries);
     sort_entries(&mut entries, sort);
     if dir.parent().is_some() {
         entries.insert(0, Entry::parent());

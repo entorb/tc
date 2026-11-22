@@ -130,6 +130,8 @@ fn header_cols(mut h: egui_extras::TableRow, sort: (SortKey, bool), action: &mut
 fn entry_color(selected: bool, e: &tc_core::panel::Entry) -> Color32 {
     if selected {
         MARK
+    } else if e.ignored {
+        MUTED
     } else if e.is_symlink {
         LINK
     } else if e.is_dir {

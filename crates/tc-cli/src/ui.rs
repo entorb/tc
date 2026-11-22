@@ -283,6 +283,8 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
             );
             let style = if panel.is_selected(e) {
                 MARK
+            } else if e.ignored {
+                Style::new().fg(Color::Gray)
             } else if e.is_symlink {
                 Style::new().fg(Color::Magenta)
             } else if e.is_dir {

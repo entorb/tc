@@ -228,6 +228,7 @@ fn entry(name: String, a: &FileAttributes, link_dir: Option<bool>) -> Entry {
         size: a.size.unwrap_or(0),
         modified: a.modified().ok(),
         link: None,
+        ignored: false,
     }
 }
 

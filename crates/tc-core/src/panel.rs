@@ -13,6 +13,7 @@ use crate::vfs::{Remote, Side, rpath};
 use crate::{Result, io_err};
 
 mod entries;
+mod git;
 mod load;
 mod select;
 
@@ -36,6 +37,8 @@ pub struct Entry {
     pub modified: Option<SystemTime>,
     /// Target of a symlink (read once with the entry).
     pub link: Option<PathBuf>,
+    /// Git-ignored or a `.git` dir; set for local listings only.
+    pub ignored: bool,
 }
 
 /// What the list is ordered by; directories always come first.
@@ -61,6 +64,7 @@ impl Entry {
             size: 0,
             modified: None,
             link: None,
+            ignored: false,
         }
     }
 }
@@ -559,6 +563,7 @@ mod tests {
             size,
             modified: Some(t + std::time::Duration::from_secs(s)),
             link: None,
+            ignored: false,
         };
         let a = [
             e("same", false, 1, 5),

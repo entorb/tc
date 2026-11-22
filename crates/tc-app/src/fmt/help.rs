@@ -59,6 +59,10 @@ R-click tab     close the tab (tc-gui; not the last one)
 Click cmd line  type a command, like : (tc-gui)
 Shift held      F-bar shows the Shift actions (tc-gui)
 
+== Colors ==
+Dim entries     git-ignored (.gitignore, info/exclude, global
+                excludes) and .git dirs; local panels only
+
 == Selection ==
 Insert          select entry, cursor moves down
 Space           same; on a local directory also sizes it

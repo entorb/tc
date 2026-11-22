@@ -92,6 +92,7 @@ fn entry(f: &File) -> Entry {
         size: f.size() as u64,
         modified: Some(f.modified()),
         link: f.symlink().map(Into::into),
+        ignored: false,
     }
 }
 
@@ -136,6 +137,7 @@ impl<T: TlsStream + Send + 'static> Remote for Ftp<T> {
                 size: 0,
                 modified: None,
                 link: None,
+                ignored: false,
             }));
         }
         // a failed listing is an error, never "absent": write_new and rename would overwrite

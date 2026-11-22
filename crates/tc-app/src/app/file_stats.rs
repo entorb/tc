@@ -464,6 +464,7 @@ impl App {
                 size: n.size,
                 modified: None,
                 link: None,
+                ignored: false,
             })
             .collect();
         let panel = &mut self.panels[self.active];

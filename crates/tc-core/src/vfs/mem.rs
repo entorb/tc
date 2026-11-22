@@ -100,6 +100,7 @@ impl Mem {
                 _ => None,
             },
             link: None,
+            ignored: false,
         }
     }
 }

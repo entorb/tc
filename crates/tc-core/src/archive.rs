@@ -294,6 +294,7 @@ impl Archive {
                 size: if dir { 0 } else { it.size },
                 modified: it.modified,
                 link: None,
+                ignored: false,
             });
             if dir && !nested {
                 e.modified = it.modified;
