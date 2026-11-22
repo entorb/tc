@@ -12,8 +12,8 @@ use std::path::Path;
 use tc::app::{App, FindForm, Found, MENUS, Mode, RenameForm, Stats, Sync, SyncForm, menu_drop};
 use tc::fmt::{
     self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
-    help, input_dialog, panel_info, panel_title, stats_footer, stats_row, stats_title, sync_footer,
-    sync_row, sync_title,
+    help, input_dialog, panel_info, panel_title, stats_footer, stats_progress, stats_row,
+    stats_title, sync_footer, sync_row, sync_title,
 };
 use tc::fmt::{
     PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
@@ -400,6 +400,9 @@ fn draw_stats(frame: &mut Frame, st: &Stats, cmd: Option<&LineEdit>, area: Rect)
     if let Some(text) = &st.confirm {
         popup(frame, "Delete", text);
     }
+    if let Some(text) = stats_progress(st) {
+        popup(frame, "Scanning", &text);
+    }
 }
 
 /// Process monitor: summary, column titles, the page of processes holding the cursor, footer.
@@ -616,7 +619,7 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
         })
         .collect();
     let title = panel_title(app, i);
-    let info = panel_info(app, i, today);
+    let info = panel_info(app, i);
     let block = Block::bordered()
         .border_type(BorderType::Double)
         .title(title)
@@ -892,7 +895,12 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         app.panels[0].select_mask("*", true);
         term.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&term).contains("2 selected, 8 bytes"));
+        assert!(screen(&term).contains("2 selected, 8 B"));
+        app.panels[0].select_mask("*", false);
+        app.panels[0].move_cursor(isize::MIN);
+        app.panels[0].move_cursor(1);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&term).contains("a  3 B  "));
     }
 
     #[test]

@@ -125,6 +125,8 @@ Ctrl+B          bookmarks (hotlist)
 Ctrl+Space      FILE STATS (like ncdu): biggest files and dirs
                 of the current tree, with % and bar
 Ctrl+N          SFTP / FTP / FTPS connections
+Disconnect all  (F9 Go) panels and tabs on a server go back
+                to their local directory
 Ctrl+P          PROCESSES (like btop / task manager), of the
                 SSH server on an SFTP panel
 
@@ -132,6 +134,8 @@ Ctrl+P          PROCESSES (like btop / task manager), of the
 Tab             switch panel
 Enter           open directory, archive or file
 Backspace       parent directory
+Left            parent directory
+Right           open directory or archive
 Up/Down         move cursor
 PgUp/PgDn       page up / down
 Home/End        first / last entry
@@ -150,7 +154,6 @@ Ctrl+PgDn       next tab
 Ctrl+Tab        next tab
 Ctrl+PgUp       previous tab
 Alt+=           other panel to this directory
-Alt+.           show / hide hidden files
 Ctrl+F3         sort by name (Ctrl+F4 ext, F5 date, F6 size;
                 again: reverse)
 Esc             clear filter, leave found list
@@ -186,9 +189,11 @@ Ctrl+E          synchronize directories (left / right panel)
 == Files ==
 F3              view (media: preview)
 F4              edit (media: default application)
-Shift+F4        create file, edit in external editor
+Shift+F4        edit in external editor (asks the name,
+                creates a missing file)
 F5              copy
 F6              move
+F2              rename; with several marked: multi-rename
 Shift+F6        rename
 Ctrl+M          multi-rename: masks, counter, find / replace
                 (tc-cli: use F9 -> File, Enter is Ctrl+M)
@@ -734,6 +739,31 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
     }
 }
 
+/// Help lines (with their continuation lines) of the key a footer label names, e.g. "S-F4 Ext" -> Shift+F4.
+pub fn key_help(help: &str, label: &str) -> String {
+    let key = label
+        .split(' ')
+        .next()
+        .unwrap_or_default()
+        .replace("S-", "Shift+");
+    let mut out = Vec::new();
+    let mut taking = false;
+    for l in help.lines() {
+        let col = l.get(..16).unwrap_or(l);
+        if col.trim().is_empty() && !l.trim().is_empty() {
+            if taking {
+                out.push(l.trim());
+            }
+            continue;
+        }
+        taking = col.split(' ').chain(col.split('/')).any(|t| t == key);
+        if taking {
+            out.push(l.trim());
+        }
+    }
+    out.join("\n")
+}
+
 /// Size of a directory entry of panel `i`: calculating, calculated, or `None`.
 fn dir_size(app: &App, i: usize, e: &Entry) -> Option<String> {
     let panel = &app.panels[i];
@@ -799,9 +829,6 @@ pub fn panel_title(app: &App, i: usize) -> String {
             title += &format!(" [{key}{}]", if rev { " desc" } else { "" });
         }
     }
-    if !panel.shows_hidden() {
-        title += " [no hidden]";
-    }
     let active = i == app.active;
     match &app.mode {
         Mode::Search(t) if active => title += &format!(" [search: {t}]"),
@@ -813,26 +840,26 @@ pub fn panel_title(app: &App, i: usize) -> String {
 }
 
 /// Status line of panel `i`: selection sum (cached in the panel), else the cursor entry in full.
-pub fn panel_info(app: &App, i: usize, today: jiff::civil::Date) -> String {
+pub fn panel_info(app: &App, i: usize) -> String {
     let panel = &app.panels[i];
     let (count, bytes) = panel.selection_info();
     match panel.current().filter(|e| !e.is_parent()) {
-        _ if count > 0 => format!(" {count} selected, {} bytes ", thousands(bytes)),
+        _ if count > 0 => format!(" {count} selected, {} ", human(bytes)),
         Some(e) => {
             let size = match dir_size(app, i, e) {
                 Some(s) => s,
                 None if e.is_dir => "<DIR>".to_owned(),
-                None => thousands(e.size),
+                None => format!("{} B", thousands(e.size)),
             };
             let link = e
                 .link
                 .as_ref()
                 .map_or(String::new(), |l| format!("  -> {}", l.display()));
-            format!(
-                " {}  {size}  {}{link} ",
-                e.name.to_string_lossy(),
-                date_of(e, today)
-            )
+            let date = e
+                .modified
+                .and_then(|t| jiff::ZonedDateTime::try_from(t).ok())
+                .map_or_else(String::new, |z| z.strftime("%y-%m-%d %H:%M:%S").to_string());
+            format!(" {}  {size}  {date}{link} ", e.name.to_string_lossy())
         }
         None => String::new(),
     }
@@ -1104,14 +1131,21 @@ pub fn stats_title(st: &Stats) -> String {
 }
 
 /// File Stats footer: scan progress, else totals and keys.
-pub fn stats_footer(st: &Stats) -> String {
-    if st.scanning() {
-        return format!(
-            "scanning: {} files, {} / {} dirs  [Esc] Cancel",
+/// Scan progress shown centered while File Stats reads the tree.
+pub fn stats_progress(st: &Stats) -> Option<String> {
+    st.scanning().then(|| {
+        format!(
+            "{} files\n{} / {} dirs\n\n[Esc] Cancel",
             thousands(st.progress.files.load(Ordering::Relaxed)),
             thousands(st.progress.dirs_done.load(Ordering::Relaxed)),
             thousands(st.progress.dirs.load(Ordering::Relaxed))
-        );
+        )
+    })
+}
+
+pub fn stats_footer(st: &Stats) -> String {
+    if st.scanning() {
+        return "scanning...  [Esc] Cancel".to_owned();
     }
     let dir = st.current();
     let mode = if st.by_files { "count" } else { "size" };

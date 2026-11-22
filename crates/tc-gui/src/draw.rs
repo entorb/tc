@@ -12,7 +12,8 @@ use tc::app::{
 };
 use tc::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
-    panel_title, stats_footer, stats_row, stats_title, sync_footer, sync_row, sync_title,
+    panel_title, stats_footer, stats_progress, stats_row, stats_title, sync_footer, sync_row,
+    sync_title,
 };
 use tc::fmt::{
     PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
@@ -202,7 +203,7 @@ fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff
                         }
                     });
                 });
-            ui.add(Label::new(RichText::new(panel_info(app, i, today)).color(MUTED)).truncate());
+            ui.add(Label::new(RichText::new(panel_info(app, i)).color(MUTED)).truncate());
         });
     app.page = rows;
     match action {
@@ -289,10 +290,23 @@ fn toolbar_group(ui: &mut Ui, app: &mut App, group: &[ToolItem]) {
 }
 
 /// F-key bar; buttons are not focusable, so Tab and Space stay with the app.
+/// Holding Shift shows the Shift alternates; the tooltip is the key's F1 help.
 fn footer(ui: &mut Ui, app: &mut App) {
+    let shift = ui.input(|i| i.modifiers.shift);
+    let help = tc::fmt::help(&app.mode).1;
     ui.horizontal(|ui| {
-        for &(label, code, mods) in app.footer_keys() {
-            let clicked = ui.add(Button::new(label).sense(Sense::CLICK)).clicked();
+        for &item in app.footer_keys() {
+            let (label, code, mods) = if shift {
+                app.footer_shifted(item)
+            } else {
+                item
+            };
+            let clicked = ui
+                .add(Button::new(label).sense(Sense::CLICK))
+                .on_hover_ui(|ui| {
+                    ui.label(tc::fmt::key_help(help, label));
+                })
+                .clicked();
             if clicked && app.footer_active() {
                 app.on_key(KeyEvent::new(code, mods));
             }
@@ -728,6 +742,15 @@ fn overlays(ctx: &Context, app: &mut App) {
             text: text.clone(),
         };
         show_dialog(ctx, "stats-confirm", &d);
+    }
+    if let Mode::Stats(st) = &app.mode
+        && let Some(text) = stats_progress(st)
+    {
+        let d = Dialog::Text {
+            title: "Scanning",
+            text,
+        };
+        show_dialog(ctx, "stats-progress", &d);
     }
     if let Mode::Procs(p) = &app.mode
         && let Some((pid, name)) = &p.confirm

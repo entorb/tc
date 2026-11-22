@@ -37,6 +37,7 @@ use tc_core::{
 use tc_remote::Prompt;
 
 mod config;
+mod connect;
 mod sync;
 pub use sync::{Sync, SyncForm};
 
@@ -1650,9 +1651,9 @@ const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
 /// Footer bar items: label, key sent when clicked.
 pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
+    ("F2 Rename", KeyCode::F(2), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
-    ("S-F4 Ext", KeyCode::F(4), KeyModifiers::SHIFT),
     ("F5 Copy", KeyCode::F(5), KeyModifiers::NONE),
     ("F6 Move", KeyCode::F(6), KeyModifiers::NONE),
     ("F7 Mkdir", KeyCode::F(7), KeyModifiers::NONE),
@@ -1660,6 +1661,10 @@ pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [
     ("F9 Menu", KeyCode::F(9), KeyModifiers::NONE),
     ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
 ];
+
+/// Shift alternates of footer buttons (panels, File Stats); tc-gui shows them while Shift is held.
+const SHIFT_FOOTER: [(&str, KeyCode, KeyModifiers); 1] =
+    [("S-F4 Ext edit", KeyCode::F(4), KeyModifiers::SHIFT)];
 
 const C: KeyModifiers = KeyModifiers::CONTROL;
 const A: KeyModifiers = KeyModifiers::ALT;
@@ -1679,7 +1684,7 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Edit external       Shift+F4", KeyCode::F(4), S),
             ("Copy                F5", KeyCode::F(5), N),
             ("Move                F6", KeyCode::F(6), N),
-            ("Rename              Shift+F6", KeyCode::F(6), S),
+            ("Rename              F2", KeyCode::F(2), N),
             ("Multi-rename        Ctrl+M", KeyCode::Char('m'), C),
             ("Make directory      F7", KeyCode::F(7), N),
             ("Delete              F8", KeyCode::F(8), N),
@@ -1703,6 +1708,8 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Bookmarks           Ctrl+B", KeyCode::Char('b'), C),
             ("Add bookmark        Ctrl+D", KeyCode::Char('d'), C),
             ("Connections         Ctrl+N", KeyCode::Char('n'), C),
+            // no shortcut: Shift+`Null` is never typed, only sent by this entry and F1 help
+            ("Disconnect all", KeyCode::Null, S),
         ],
     ),
     (
@@ -1735,7 +1742,6 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
         &[
             ("Swap panels         Ctrl+U", KeyCode::Char('u'), C),
             ("Other panel here    Alt+=", KeyCode::Char('='), A),
-            ("Hidden files        Alt+.", KeyCode::Char('.'), A),
             ("New tab             Ctrl+T", KeyCode::Char('t'), C),
             ("Close tab           Ctrl+W", KeyCode::Char('w'), C),
         ],
@@ -1769,11 +1775,10 @@ pub fn help_action(line: &str) -> Option<(KeyCode, KeyModifiers)> {
 }
 
 /// F-key bar of File Stats (labels and the keys they send).
-pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
+pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
-    ("S-F4 Ext", KeyCode::F(4), KeyModifiers::SHIFT),
     ("F8 Delete", KeyCode::F(8), KeyModifiers::NONE),
     ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
     ("Tab Size/Count", KeyCode::Tab, KeyModifiers::NONE),
@@ -1802,7 +1807,6 @@ pub const TOOLBAR: [&[ToolItem]; 2] = [
         ("⏶", "Parent directory (Backspace)", KeyCode::Backspace, N),
         ("🏠", "Home directory (~)", KeyCode::Char('~'), N),
         ("⟳", "Refresh (Ctrl+R)", KeyCode::Char('r'), C),
-        ("👁", "Hidden files (Alt+.)", KeyCode::Char('.'), A),
         ("★", "Bookmarks (Ctrl+B)", KeyCode::Char('b'), C),
         ("✚", "New tab (Ctrl+T)", KeyCode::Char('t'), C),
         ("🖧", "Connect to server (Ctrl+N)", KeyCode::Char('n'), C),
@@ -2203,6 +2207,21 @@ impl App {
         }
     }
 
+    /// Footer button `item` as shown while Shift is held: its Shift action, if the screen has one.
+    pub fn footer_shifted(
+        &self,
+        item: (&'static str, KeyCode, KeyModifiers),
+    ) -> (&'static str, KeyCode, KeyModifiers) {
+        let keys = self.footer_keys();
+        let alts: &Footer =
+            if std::ptr::eq(keys, &FOOTER[..]) || std::ptr::eq(keys, &STATS_FOOTER[..]) {
+                &SHIFT_FOOTER
+            } else {
+                &[]
+            };
+        alts.iter().find(|a| a.1 == item.1).copied().unwrap_or(item)
+    }
+
     /// F1 opens the help here: the footer screens plus lists and the conflict question.
     fn takes_f1(&self) -> bool {
         self.footer_active()
@@ -2539,6 +2558,7 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::F(4) if shift => self.new_file_prompt(),
+            KeyCode::Null if shift => self.disconnect_all(),
             KeyCode::F(6) if shift => self.rename(),
             KeyCode::Enter if self.default_open().is_some() => {
                 if let Some(path) = self.default_open() {
@@ -2547,11 +2567,6 @@ impl App {
             }
             KeyCode::F(n @ 1..=2) if alt => {
                 self.mode = Mode::Drives(hotlist::mounts(), 0, usize::from(n == 2));
-            }
-            KeyCode::Char('.') if alt => {
-                if let Err(e) = self.panels[self.active].toggle_hidden() {
-                    self.mode = Mode::Message(e.to_string());
-                }
             }
             KeyCode::Char('=') if alt => {
                 let panel = &self.panels[self.active];
@@ -3907,6 +3922,18 @@ impl App {
     fn normal_key(&mut self, code: KeyCode) {
         let page = self.page as isize;
         let panel = &mut self.panels[self.active];
+        // Left goes up like Backspace; Right opens only dirs and archives, never runs a file
+        let code = match code {
+            KeyCode::Left => KeyCode::Backspace,
+            KeyCode::Right
+                if panel
+                    .current()
+                    .is_some_and(|e| e.is_dir || Format::detect(Path::new(&e.name)).is_some()) =>
+            {
+                KeyCode::Enter
+            }
+            c => c,
+        };
         match code {
             KeyCode::Char('q') | KeyCode::F(10) => self.mode = Mode::AskQuit,
             KeyCode::Null => self.ask_reset_config(),
@@ -3959,6 +3986,8 @@ impl App {
                     self.mode = Mode::Message(e.to_string());
                 }
             }
+            KeyCode::F(2) if panel.selection_info().0 > 1 => self.multi_rename(),
+            KeyCode::F(2) => self.rename(),
             KeyCode::F(3 | 4) if panel.archive().is_some() => self.view_archive_entry(),
             KeyCode::F(3 | 4) if panel.remote().is_some() => {
                 self.fetch_remote(code == KeyCode::F(4))
@@ -5170,6 +5199,45 @@ mod tests {
     }
 
     #[test]
+    fn left_right_navigate_dirs_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("d")).unwrap();
+        std::fs::write(dir.path().join("f"), "").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        let name = |app: &App| app.panels[0].current().map(|e| e.name.clone());
+        key(&mut app, KeyCode::Down); // "d"
+        assert_eq!(name(&app), Some("d".into()));
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.panels[0].path(), dir.path().join("d"));
+        key(&mut app, KeyCode::Left);
+        assert_eq!(
+            (app.panels[0].path(), name(&app)),
+            (dir.path(), Some("d".into()))
+        );
+        key(&mut app, KeyCode::Down); // "f"
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.panels[0].path(), dir.path());
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn f2_renames_one_or_multi_renames_several() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a", "b"] {
+            std::fs::write(dir.path().join(n), "").unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(2));
+        assert!(matches!(app.mode, Mode::Transfer(Op::Move, _, _)));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::F(2));
+        assert!(matches!(app.mode, Mode::MultiRename(_)));
+    }
+
+    #[test]
     fn delete_confirm_text_trash_choice_and_permanent() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("d")).unwrap();
@@ -5273,7 +5341,7 @@ mod tests {
     }
 
     #[test]
-    fn swap_root_sort_click_and_hidden() {
+    fn swap_root_and_sort_click() {
         let (l, r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         std::fs::write(l.path().join(".h"), "").unwrap();
         let mut app = two_panels(l.path(), r.path());
@@ -5285,8 +5353,6 @@ mod tests {
         with(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL);
         settle(&mut app); // listing may take over the 50 ms wait on a loaded machine
         assert!(app.panels[0].path().parent().is_none());
-        with(&mut app, KeyCode::Char('.'), KeyModifiers::ALT);
-        assert!(!app.panels[0].shows_hidden());
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 40 + 20,
@@ -5472,6 +5538,24 @@ mod tests {
         assert_eq!(names, ["ro"]);
         assert!(st.marked.contains(OsStr::new("ro")));
         restore().unwrap();
+    }
+
+    #[test]
+    fn disconnect_all_closes_every_remote_hold() {
+        let left = tempfile::tempdir().unwrap();
+        let mem = tc_core::vfs::mem::Mem::new();
+        let mut app = two_panels(left.path(), left.path());
+        app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
+        settle(&mut app);
+        app.active = 1;
+        with(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL); // tab on the same session
+        settle(&mut app);
+        assert!(Arc::strong_count(&mem) > 2);
+        with(&mut app, KeyCode::Null, KeyModifiers::SHIFT);
+        settle(&mut app);
+        assert_eq!(Arc::strong_count(&mem), 1);
+        assert_eq!(app.panels[1].path(), left.path());
+        assert!(app.panels[1].remote().is_none());
     }
 
     #[test]
@@ -5680,22 +5764,23 @@ mod tests {
             (&PROCS_FOOTER, &[fmt::HELP_PROCS]),
         ];
         for (footer, helps) in screens {
-            for &(label, ..) in footer {
-                let key = label
-                    .split(' ')
-                    .next()
-                    .unwrap_or_default()
-                    .replace("S-", "Shift+");
-                // F1 opens the help itself; Tab and arrows are navigation
-                if key == "F1" {
+            // every screen: F1 help first, F10 close last, F-keys only up to F12
+            assert_eq!(footer.first().map(|f| f.1), Some(KeyCode::F(1)));
+            assert_eq!(footer.last().map(|f| f.1), Some(KeyCode::F(10)));
+            assert!(footer.iter().all(|f| !matches!(f.1, KeyCode::F(13..))));
+            let shift = [&SHIFT_FOOTER[..]].into_iter().filter(|_| {
+                std::ptr::eq(footer, &FOOTER[..]) || std::ptr::eq(footer, &STATS_FOOTER[..])
+            });
+            for &(label, ..) in footer.iter().chain(shift.flatten()) {
+                // F1 opens the help itself
+                if label.starts_with("F1 ") {
                     continue;
                 }
                 for help in helps {
-                    let found = help.lines().any(|l| {
-                        let col = l.get(..16).unwrap_or(l);
-                        col.split(' ').chain(col.split('/')).any(|t| t == key)
-                    });
-                    assert!(found, "{label} missing in help");
+                    assert!(
+                        !fmt::key_help(help, label).is_empty(),
+                        "{label} missing in help"
+                    );
                 }
             }
         }

@@ -126,7 +126,6 @@ pub struct Panel {
     /// Sort key and reverse flag; survives directory changes.
     sort: (SortKey, bool),
     /// Dot-names listed (default); only real directories are filtered.
-    show_hidden: bool,
     /// Cached (count, bytes) of the selection among visible entries; `None` = stale.
     sel_sum: Cell<Option<(usize, u64)>>,
     /// Directory sizes calculated on request (by entry name); dropped when the list is re-read.
@@ -137,7 +136,7 @@ pub struct Panel {
 impl Panel {
     pub fn open(path: &Path) -> Result<Self> {
         let path = std::path::absolute(path).map_err(io_err(path))?;
-        let entries = read_entries(&path, (SortKey::Name, false), true, &AtomicBool::new(false))?;
+        let entries = read_entries(&path, (SortKey::Name, false), &AtomicBool::new(false))?;
         Ok(Self {
             history: vec![path.clone()],
             pos: 0,
@@ -153,7 +152,6 @@ impl Panel {
             archive: None,
             remote: None,
             sort: (SortKey::Name, false),
-            show_hidden: true,
             sel_sum: Cell::new(None),
             dir_sizes: HashMap::new(),
             pending: None,
@@ -162,10 +160,6 @@ impl Panel {
 
     pub fn sort(&self) -> (SortKey, bool) {
         self.sort
-    }
-
-    pub fn shows_hidden(&self) -> bool {
-        self.show_hidden
     }
 
     /// Same key reverses the order, another key sorts ascending. In memory, cursor stays on its entry.
@@ -180,13 +174,6 @@ impl Panel {
         if let Some(name) = keep {
             self.focus(&name);
         }
-    }
-
-    /// Show or hide dot-names and re-read.
-    // shortcut: Windows hidden attribute is ignored, only names starting with '.' count
-    pub fn toggle_hidden(&mut self) -> Result<()> {
-        self.show_hidden = !self.show_hidden;
-        self.reload()
     }
 
     /// Remember the calculated size of directory `name` (counts in the selection sum).
@@ -250,6 +237,20 @@ impl Panel {
             focus: None,
         };
         self.load_on(Some(remote), dir, then)
+    }
+
+    /// Back to the local directory the remote was opened from; drops this panel's hold on the session.
+    pub fn disconnect(&mut self) -> Result<()> {
+        let pending = self.pending.as_ref().is_some_and(|p| p.remote.is_some());
+        if self.remote.is_none() && !pending {
+            return Ok(());
+        }
+        let then = Then::Show {
+            pos: None,
+            visit: false,
+            focus: None,
+        };
+        self.load_on(None, self.local.clone(), then)
     }
 
     /// New panel on the same directory and side (Ctrl+T).
@@ -358,7 +359,7 @@ impl Panel {
     }
 
     /// Re-read the directory, keeping cursor name and still existing selections.
-    /// A pending directory change is restarted instead (current sort and hidden flag).
+    /// A pending directory change is restarted instead (current sort).
     pub fn reload(&mut self) -> Result<()> {
         if let Some(p) = self.pending.take() {
             p.cancel.store(true, Ordering::Relaxed);
@@ -699,11 +700,11 @@ impl Panel {
         path: PathBuf,
         then: Then,
     ) -> Result<()> {
-        let (dir, sort, hidden) = (path.clone(), self.sort, self.show_hidden);
+        let (dir, sort) = (path.clone(), self.sort);
         let r = remote.clone();
         self.start(remote, path, then, move |c| match r {
-            Some(r) => remote_entries(&*r, &dir, sort, hidden),
-            None => read_entries(&dir, sort, hidden, c),
+            Some(r) => remote_entries(&*r, &dir, sort),
+            None => read_entries(&dir, sort, c),
         })
     }
 
@@ -868,37 +869,21 @@ fn sort_entries(entries: &mut [Entry], (key, reverse): (SortKey, bool)) {
 }
 
 /// Remote listing; always has "..", at the root it leaves the remote.
-fn remote_entries(
-    r: &dyn Remote,
-    dir: &Path,
-    sort: (SortKey, bool),
-    hidden: bool,
-) -> Result<Vec<Entry>> {
+fn remote_entries(r: &dyn Remote, dir: &Path, sort: (SortKey, bool)) -> Result<Vec<Entry>> {
     let mut entries = r.list(&rpath(dir))?;
-    if !hidden {
-        entries.retain(|e| !e.name.as_encoded_bytes().starts_with(b"."));
-    }
     sort_entries(&mut entries, sort);
     entries.insert(0, Entry::parent());
     Ok(entries)
 }
 
 /// Stops early (partial list) once `cancel` is set.
-fn read_entries(
-    dir: &Path,
-    sort: (SortKey, bool),
-    hidden: bool,
-    cancel: &AtomicBool,
-) -> Result<Vec<Entry>> {
+fn read_entries(dir: &Path, sort: (SortKey, bool), cancel: &AtomicBool) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for item in fs::read_dir(dir).map_err(io_err(dir))? {
         if cancel.load(Ordering::Relaxed) {
             return Ok(entries);
         }
         let item = item.map_err(io_err(dir))?;
-        if !hidden && item.file_name().as_encoded_bytes().starts_with(b".") {
-            continue;
-        }
         // DirEntry::metadata does not follow symlinks and is free on Windows (part of the listing)
         // Err: vanished between read_dir and stat
         if let Ok(meta) = item.metadata() {
@@ -1231,14 +1216,12 @@ mod tests {
     }
 
     #[test]
-    fn hidden_toggle() {
+    fn dot_names_are_listed() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join(".a"), "").unwrap();
         fs::write(tmp.path().join("b"), "").unwrap();
-        let mut p = Panel::open(tmp.path()).unwrap();
+        let p = Panel::open(tmp.path()).unwrap();
         assert_eq!(names(&p), ["..", ".a", "b"]);
-        p.toggle_hidden().unwrap();
-        assert_eq!(names(&p), ["..", "b"]);
     }
 
     #[test]
@@ -1284,7 +1267,7 @@ mod tests {
         assert_eq!(p.path(), tmp.path()); // still the old directory
         assert_eq!(p.loading(), Some(sub.as_path()));
         let never = AtomicBool::new(false);
-        tx.send(read_entries(&sub, p.sort, true, &never)).unwrap();
+        tx.send(read_entries(&sub, p.sort, &never)).unwrap();
         assert!(p.poll().unwrap().is_ok());
         assert_eq!((p.path(), p.loading()), (sub.as_path(), None));
         assert_eq!(p.current().unwrap().name, "f");
@@ -1312,7 +1295,7 @@ mod tests {
         assert!(cancel.load(Ordering::Relaxed) && p.loading().is_none() && !p.cancel_load());
         fs::write(tmp.path().join("a"), "").unwrap();
         assert!(
-            read_entries(tmp.path(), p.sort, true, &cancel)
+            read_entries(tmp.path(), p.sort, &cancel)
                 .unwrap()
                 .is_empty()
         );
