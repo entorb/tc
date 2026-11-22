@@ -1744,9 +1744,16 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Other panel here    Alt+=", KeyCode::Char('='), A),
             ("New tab             Ctrl+T", KeyCode::Char('t'), C),
             ("Close tab           Ctrl+W", KeyCode::Char('w'), C),
+            ("Font size +         Ctrl+=", KeyCode::Char('='), C),
+            ("Font size -         Ctrl+-", KeyCode::Char('-'), C),
         ],
     ),
 ];
+
+/// Font scale one 10 % step up or down, kept within 50 %..300 %.
+pub fn zoom_step(zoom: f32, dir: i8) -> f32 {
+    ((zoom * 10.0).round() + f32::from(dir)).clamp(5.0, 30.0) / 10.0
+}
 
 fn menu_title_width(group: usize) -> u16 {
     MENUS[group].0.len() as u16 + 2
@@ -1817,18 +1824,18 @@ pub const TOOLBAR: [&[ToolItem]; 2] = [
         ("🖥", "Process monitor (Ctrl+P)", KeyCode::Char('p'), C),
         ("🔍", "Find files (Ctrl+F)", KeyCode::Char('f'), C),
         (
+            "⚖",
+            "Compare panels, select differences (Ctrl+Y)",
+            KeyCode::Char('y'),
+            C,
+        ),
+        (
             "⬌",
             "Synchronize directories (Ctrl+E)",
             KeyCode::Char('e'),
             C,
         ),
         ("🖊", "Multi-rename (Ctrl+M)", KeyCode::Char('m'), C),
-        (
-            "⚖",
-            "Compare panels, select differences (Ctrl+Y)",
-            KeyCode::Char('y'),
-            C,
-        ),
     ],
 ];
 
@@ -1858,6 +1865,8 @@ pub struct App {
     pub help_scroll: usize,
     /// Text typed into the help filter (case-insensitive substring of each line).
     pub help_filter: String,
+    /// tc-gui font scale (Ctrl+= / Ctrl+-), saved in the settings.
+    pub zoom: f32,
     /// Selected line of the filtered help text.
     pub help_sel: usize,
     /// Visible text rows of the help popup, set by the UI.
@@ -1962,6 +1971,7 @@ impl App {
             help: false,
             help_scroll: 0,
             help_filter: String::new(),
+            zoom: 1.0,
             help_sel: 0,
             help_rows: 0,
             search: None,
@@ -2460,9 +2470,8 @@ impl App {
     pub fn help_entries(&self) -> Vec<(&'static str, Option<(KeyCode, KeyModifiers)>)> {
         let (_, text) = fmt::help(&self.mode);
         let main = text == fmt::HELP_MAIN;
-        let f = self.help_filter.to_lowercase();
-        text.lines()
-            .filter(|l| f.is_empty() || l.to_lowercase().contains(&f))
+        fmt::help_filter(text, &self.help_filter.to_lowercase())
+            .into_iter()
             .map(|l| (l, if main { help_action(l) } else { None }))
             .collect()
     }
@@ -2611,6 +2620,8 @@ impl App {
 
     fn ctrl_key(&mut self, code: KeyCode) {
         match code {
+            KeyCode::Char('+' | '=') => self.zoom = zoom_step(self.zoom, 1),
+            KeyCode::Char('-') => self.zoom = zoom_step(self.zoom, -1),
             KeyCode::Char('s') => self.mode = Mode::Search(String::new()),
             KeyCode::Char('c') => self.clip_files(Op::Copy),
             KeyCode::Char('x') => self.clip_files(Op::Move),
@@ -2759,6 +2770,14 @@ impl App {
     }
 
     /// Shows tab `k` of `side` (click on a tab button).
+    /// Close tab `k` of `side` (tc-gui right click); the last tab of a side stays.
+    pub fn close_tab(&mut self, side: usize, k: usize) {
+        if !self.tabs[side].is_empty() {
+            self.select_tab(side, k);
+            self.tab_key(KeyCode::Char('w'));
+        }
+    }
+
     pub fn select_tab(&mut self, side: usize, k: usize) {
         self.active = side;
         let n = self.tabs[side].len() + 1;
@@ -5196,6 +5215,14 @@ mod tests {
         assert!(app.tabs[1].is_empty());
         with(&mut app, KeyCode::Char('w'), ctrl); // last tab stays
         assert_eq!(app.panels[1].path(), dir.path());
+        app.go(0, sub.clone());
+        app.active = 0;
+        with(&mut app, KeyCode::Char('t'), ctrl);
+        app.go(0, dir.path().to_owned());
+        app.close_tab(0, 0); // the first tab, while the second is shown
+        assert_eq!((app.panels[0].path(), app.tabs[0].len()), (dir.path(), 0));
+        app.close_tab(0, 0); // last one stays
+        assert_eq!(app.panels[0].path(), dir.path());
     }
 
     #[test]
@@ -5218,6 +5245,13 @@ mod tests {
         key(&mut app, KeyCode::Right);
         assert_eq!(app.panels[0].path(), dir.path());
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn zoom_steps_and_clamps() {
+        assert!((zoom_step(1.0, 1) - 1.1).abs() < 1e-6);
+        assert!((zoom_step(0.5, -1) - 0.5).abs() < 1e-6);
+        assert!((zoom_step(3.0, 1) - 3.0).abs() < 1e-6);
     }
 
     #[test]
@@ -5842,8 +5876,10 @@ mod tests {
         for c in "ncdu".chars() {
             key(&mut app, KeyCode::Char(c));
         }
-        assert_eq!(app.help_entries().len(), 1);
-        assert!(app.help_entries()[0].0.contains("FILE STATS"));
+        let e = app.help_entries();
+        // section title, the entry and its continuation line
+        assert_eq!(e[0].0, "== Highlights ==");
+        assert!(e[1].0.contains("FILE STATS") && e[2].0.starts_with(' '));
         key(&mut app, KeyCode::Esc);
         assert!(app.help && app.help_filter.is_empty());
         key(&mut app, KeyCode::Esc);
@@ -5856,7 +5892,7 @@ mod tests {
         let p = || Panel::open(tmp.path()).unwrap();
         let mut app = App::new(p(), p());
         key(&mut app, KeyCode::F(1));
-        type_keys(&mut app, "== search");
+        type_keys(&mut app, "type to filter");
         assert!(app.help_entries().iter().all(|e| e.1.is_none()));
         key(&mut app, KeyCode::Down);
         assert_eq!(app.help_scroll, 1);

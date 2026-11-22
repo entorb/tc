@@ -150,6 +150,8 @@ Ctrl+D          add this directory to the bookmarks
 Ctrl+U          swap panels
 Ctrl+T          new tab
 Ctrl+W          close tab
+Ctrl+=/Ctrl+-   font size (tc-gui, saved; terminals: use
+                the terminal's zoom)
 Ctrl+PgDn       next tab
 Ctrl+Tab        next tab
 Ctrl+PgUp       previous tab
@@ -167,6 +169,9 @@ Double click    open directory / archive, view file
 Click title     sort by name / size / date (again: reverse)
 Click F-bar     run the key shown on the label
 Click menu bar  open the F9 menu
+R-click tab     close the tab (tc-gui; not the last one)
+Click cmd line  type a command, like : (tc-gui)
+Shift held      F-bar shows the Shift actions (tc-gui)
 
 == Selection ==
 Insert          select entry, cursor moves down
@@ -214,7 +219,7 @@ Delete config files
 F10             quit (asks first), also q";
 pub const HELP_STATS: &str = "\
 == About ==
-Scan runs in up to 8 threads; footer shows files and
+Scan runs in up to 8 threads; a popup shows files and
 scanned / discovered directories.
 
 == Move ==
@@ -737,6 +742,62 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Xfer(_) => ("Help: file exists", HELP_CONFLICT),
         _ => ("Help", HELP_MAIN),
     }
+}
+
+/// One help line split for a table: `== Section ==`, `key  info`, continuation, free text.
+#[derive(Debug, PartialEq)]
+pub enum HelpLine<'a> {
+    Section(&'a str),
+    Entry(&'a str, &'a str),
+    More(&'a str),
+    Text(&'a str),
+}
+
+pub fn help_line(l: &str) -> HelpLine<'_> {
+    if let Some(t) = l.strip_prefix("== ").and_then(|t| t.strip_suffix(" ==")) {
+        return HelpLine::Section(t);
+    }
+    if l.starts_with(' ') {
+        return HelpLine::More(l.trim());
+    }
+    match l.find("  ") {
+        Some(k) if k < 17 => HelpLine::Entry(&l[..k], l[k..].trim()),
+        _ => HelpLine::Text(l),
+    }
+}
+
+/// Help lines whose section title or entry (key line with its continuation lines) contains
+/// `f` (lowercase); the section title stays above its matching entries.
+pub fn help_filter<'a>(text: &'a str, f: &str) -> Vec<&'a str> {
+    let lines: Vec<&str> = text.lines().collect();
+    if f.is_empty() {
+        return lines;
+    }
+    let (mut out, mut section, mut shown) = (Vec::new(), "", "");
+    let mut i = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        let more = lines[i + 1..]
+            .iter()
+            .take_while(|c| c.starts_with(' '))
+            .count();
+        let entry = &lines[i..i + 1 + more];
+        i += 1 + more;
+        if l.starts_with("==") {
+            section = l;
+            continue;
+        }
+        let hit = |t: &str| t.to_lowercase().contains(f);
+        if l.trim().is_empty() || !(hit(section) || entry.iter().any(|e| hit(e))) {
+            continue;
+        }
+        if !section.is_empty() && shown != section {
+            out.push(section);
+            shown = section;
+        }
+        out.extend(entry);
+    }
+    out
 }
 
 /// Help lines (with their continuation lines) of the key a footer label names, e.g. "S-F4 Ext" -> Shift+F4.
@@ -1330,7 +1391,31 @@ pub fn highlight(
 
 #[cfg(test)]
 mod tests {
-    use super::{PROC_COLS, UnicodeWidthStr, fit, fmt_date, proc_col_key, thousands};
+    use super::{
+        HelpLine, PROC_COLS, UnicodeWidthStr, fit, fmt_date, help_filter, help_line, proc_col_key,
+        thousands,
+    };
+
+    #[test]
+    fn help_lines_split_and_filter_by_entry() {
+        assert_eq!(help_line("== Move =="), HelpLine::Section("Move"));
+        assert_eq!(
+            help_line("Ctrl+B          bookmarks"),
+            HelpLine::Entry("Ctrl+B", "bookmarks")
+        );
+        assert_eq!(help_line("                more"), HelpLine::More("more"));
+        assert_eq!(
+            help_line("Free text, no key"),
+            HelpLine::Text("Free text, no key")
+        );
+        let text = "== A ==\nx               one\n                two\ny               three\n\n== B ==\nz               four";
+        assert_eq!(
+            help_filter(text, "two"),
+            ["== A ==", "x               one", "                two"]
+        );
+        assert_eq!(help_filter(text, "b"), ["== B ==", "z               four"]);
+        assert!(help_filter(text, "nothing").is_empty());
+    }
 
     /// Every column title maps to its sort key, the user column to none.
     #[test]

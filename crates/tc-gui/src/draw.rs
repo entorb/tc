@@ -15,12 +15,12 @@ use tc::fmt::{
     panel_title, stats_footer, stats_progress, stats_row, stats_title, sync_footer, sync_row,
     sync_title,
 };
-use tc::fmt::{
-    PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
-};
+use tc::fmt::{procs_confirm, procs_footer, procs_header, procs_prompt, procs_title};
 use tc::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, Rect};
 use tc_core::cmdline::LineEdit;
+use tc_core::edit::human;
 use tc_core::panel::SortKey;
+use tc_core::procs::ProcSort;
 use tc_core::syntax::{self, Kind};
 
 const ACCENT: Color32 = Color32::from_rgb(90, 160, 255);
@@ -47,6 +47,18 @@ pub fn setup_fonts(ctx: &Context) {
         .families
         .insert(FontFamily::Name("icons".into()), family.into());
     ctx.set_fonts(fonts);
+    ctx.all_styles_mut(|s| {
+        // a file manager, not a document: arrow pointer, no text selection on labels
+        s.interaction.selectable_labels = false;
+        s.interaction.tooltip_delay = 0.1;
+    });
+}
+
+/// Modal without the fade-in animation.
+fn modal(id: &str) -> Modal {
+    let mut m = Modal::new(Id::unique(id));
+    m.area = m.area.fade_in(false);
+    m
 }
 
 /// Frontend state that `App` does not keep: last drawn cursor per panel (scroll only when it moved).
@@ -93,6 +105,7 @@ enum Action {
     Sort(SortKey),
     Click(usize, bool, bool),
     Tab(usize),
+    CloseTab(usize),
 }
 
 fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff::civil::Date) {
@@ -101,7 +114,7 @@ fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff
     let shift = ui.input(|inp| inp.modifiers.shift);
     let mut action = None;
     let stroke = if active {
-        Stroke::new(1.5, ACCENT)
+        Stroke::new(1.0, ACCENT)
     } else {
         Stroke::new(1.0, MUTED)
     };
@@ -112,11 +125,14 @@ fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff
             if !app.tabs[i].is_empty() {
                 ui.horizontal_wrapped(|ui| {
                     for (k, name) in app.tab_names(i).into_iter().enumerate() {
-                        if ui
-                            .selectable_label(k == app.tab[i], format!("{} {name}", k + 1))
-                            .clicked()
-                        {
+                        let b = Button::selectable(k == app.tab[i], format!("{} {name}", k + 1));
+                        let r = ui
+                            .add(b.sense(Sense::CLICK))
+                            .on_hover_text("Right click closes");
+                        if r.clicked() {
                             action = Some(Action::Tab(k));
+                        } else if r.secondary_clicked() {
+                            action = Some(Action::CloseTab(k));
                         }
                     }
                 });
@@ -210,6 +226,7 @@ fn draw_panel(ui: &mut Ui, app: &mut App, look: &mut Look, i: usize, today: jiff
         Some(Action::Sort(key)) => app.sort_by(i, key),
         Some(Action::Click(idx, shift, double)) => app.click_entry(i, idx, shift, double),
         Some(Action::Tab(k)) => app.select_tab(i, k),
+        Some(Action::CloseTab(k)) => app.close_tab(i, k),
         None => {}
     }
 }
@@ -224,7 +241,8 @@ fn menu_bar(ui: &mut Ui, app: &mut App) {
     let mut run = None;
     ui.horizontal(|ui| {
         for (g, (title, items)) in MENUS.iter().enumerate() {
-            let r = ui.selectable_label(open == Some(g), *title);
+            // not focusable: Tab stays with the app instead of walking into the menu
+            let r = ui.add(Button::selectable(open == Some(g), *title).sense(Sense::CLICK));
             if r.clicked() {
                 app.mode = if open == Some(g) {
                     Mode::Normal
@@ -245,9 +263,14 @@ fn menu_bar(ui: &mut Ui, app: &mut App) {
                 .fixed_pos(r.rect.left_bottom())
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_width(260.0);
                         for (i, (label, ..)) in items.iter().enumerate() {
-                            let t = RichText::new(*label).font(mono());
-                            if ui.selectable_label(i == sel, t).clicked() {
+                            let (name, key) = label.split_once("  ").unwrap_or((label, ""));
+                            let b = Button::selectable(i == sel, name)
+                                .shortcut_text(key.trim())
+                                .sense(Sense::CLICK)
+                                .min_size(egui::vec2(ui.available_width(), 0.0));
+                            if ui.add(b).clicked() {
                                 run = Some((g, i));
                             }
                         }
@@ -280,7 +303,7 @@ fn toolbar(ui: &mut Ui, app: &mut App) {
 fn toolbar_group(ui: &mut Ui, app: &mut App, group: &[ToolItem]) {
     for &(icon, tip, code, mods) in group {
         let clicked = ui
-            .add(Button::new(RichText::new(icon).font(icons())))
+            .add(Button::new(RichText::new(icon).font(icons())).sense(Sense::CLICK))
             .on_hover_text(tip)
             .clicked();
         if clicked && app.idle() {
@@ -314,14 +337,23 @@ fn footer(ui: &mut Ui, app: &mut App) {
     });
 }
 
-fn cmdline(ui: &mut Ui, app: &App) {
-    ui.horizontal(|ui| {
+/// Prompt and command being typed; a click starts typing like `:`.
+fn cmdline(ui: &mut Ui, app: &mut App) {
+    let r = ui.horizontal(|ui| {
         let prompt = format!("{}> ", app.panels[app.active].path().display());
         ui.label(RichText::new(prompt).font(mono()).color(MUTED));
         if let Mode::Cmd(l) = &app.mode {
             line_edit(ui, l);
         }
+        ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
     });
+    let click = r.response.interact(Sense::CLICK);
+    if click.on_hover_cursor(egui::CursorIcon::Text).clicked()
+        && matches!(app.mode, Mode::Normal)
+        && app.idle()
+    {
+        app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+    }
 }
 
 /// Single-line text of `l` with a caret at its cursor.
@@ -678,30 +710,89 @@ fn draw_procs(ui: &mut Ui, app: &mut App) {
         return;
     };
     ui.label(RichText::new(procs_title(p)).strong().color(ACCENT));
-    ui.label(RichText::new(procs_header(p)).font(mono()).color(TEXT));
-    let title = RichText::new(PROC_COLS).font(mono()).strong().color(MUTED);
-    let r = ui.add(Label::new(title).sense(Sense::CLICK));
-    // the title is one monospace line: the clicked char column names the sort key
-    let sort = r
-        .clicked()
-        .then(|| r.interact_pointer_pos())
-        .flatten()
-        .and_then(|pos| fmt::proc_col_key(((pos.x - r.rect.min.x) / cell(ui).x) as usize));
-    let h = page_rows(ui);
+    ui.label(RichText::new(procs_header(p)).color(TEXT));
+    let row_h = ui.text_style_height(&TextStyle::Body) + 6.0;
+    let h = ((ui.available_height() / row_h) as usize)
+        .saturating_sub(1)
+        .max(1);
     let start = p.sel / h * h;
-    let rows: Vec<String> = p
-        .rows
-        .iter()
-        .skip(start)
-        .take(h)
-        .map(|&i| proc_row(&p.snap.procs[i]))
-        .collect();
-    let mut clicked = None;
-    for (k, row) in rows.into_iter().enumerate() {
-        if list_row(ui, row, start + k == p.sel).is_some() {
-            clicked = Some(start + k);
-        }
-    }
+    let shown = p.rows.len().saturating_sub(start).min(h);
+    let (mut sort, mut clicked) = (None, None);
+    let right = || Layout::right_to_left(Align::Center);
+    TableBuilder::new(ui)
+        .striped(false)
+        .vscroll(false)
+        .sense(Sense::CLICK)
+        .column(Column::exact(70.0))
+        .column(Column::exact(110.0))
+        .column(Column::exact(70.0))
+        .column(Column::exact(90.0))
+        .column(Column::remainder().clip(true))
+        .header(row_h, |mut head| {
+            let cols = [
+                ("PID", Some(('p', ProcSort::Pid))),
+                ("User", None),
+                ("CPU %", Some(('c', ProcSort::Cpu))),
+                ("Memory", Some(('m', ProcSort::Mem))),
+                ("Command", Some(('n', ProcSort::Name))),
+            ];
+            for (k, (title, key)) in cols.into_iter().enumerate() {
+                let arrow = match key {
+                    Some((_, s)) if s == p.sort => {
+                        if p.rev {
+                            " ⏷"
+                        } else {
+                            " ⏶"
+                        }
+                    }
+                    _ => "",
+                };
+                head.col(|ui| {
+                    let t = RichText::new(format!("{title}{arrow}"))
+                        .strong()
+                        .color(MUTED);
+                    let add = |ui: &mut Ui| ui.add(Label::new(t).sense(Sense::CLICK)).clicked();
+                    let hit = if matches!(k, 0 | 2 | 3) {
+                        ui.with_layout(right(), add).inner
+                    } else {
+                        add(ui)
+                    };
+                    if hit {
+                        sort = key.map(|(c, _)| c);
+                    }
+                });
+            }
+        })
+        .body(|body| {
+            body.rows(row_h, shown, |mut row| {
+                let i = start + row.index();
+                let q = &p.snap.procs[p.rows[i]];
+                row.set_selected(i == p.sel);
+                row.col(|ui| {
+                    ui.with_layout(right(), |ui| ui.label(q.pid.to_string()));
+                });
+                row.col(|ui| {
+                    ui.add(Label::new(q.user.as_str()).truncate());
+                });
+                row.col(|ui| {
+                    ui.with_layout(right(), |ui| ui.label(format!("{:.1}", q.cpu)));
+                });
+                row.col(|ui| {
+                    ui.with_layout(right(), |ui| ui.label(human(q.mem)));
+                });
+                row.col(|ui| {
+                    let cmd = if q.cmd.is_empty() || q.cmd == q.name {
+                        q.name.clone()
+                    } else {
+                        format!("{}  {}", q.name, q.cmd)
+                    };
+                    ui.add(Label::new(cmd).truncate());
+                });
+                if row.response().clicked() {
+                    clicked = Some(i);
+                }
+            });
+        });
     let idle = p.idle();
     if let Some(k) = clicked.filter(|_| idle) {
         p.sel = k;
@@ -770,14 +861,14 @@ fn overlays(ctx: &Context, app: &mut App) {
 }
 
 fn show_dialog(ctx: &Context, id: &str, d: &Dialog) {
-    Modal::new(Id::unique(id)).show(ctx, |ui| {
+    modal(id).show(ctx, |ui| {
         ui.set_min_width(420.0);
         ui.set_max_width(720.0);
         match d {
             Dialog::Text { title, text } => {
                 ui.heading(*title);
                 ui.separator();
-                ui.label(RichText::new(text).font(mono()));
+                ui.label(text.as_str());
             }
             Dialog::Edit {
                 title,
@@ -804,7 +895,7 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) {
                 ui.separator();
                 ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     for (k, p) in rows.iter().enumerate() {
-                        let mut t = RichText::new(p.as_str()).font(mono());
+                        let mut t = RichText::new(p.as_str());
                         if k == *sel {
                             t = t.background_color(SELECT_BG).color(Color32::WHITE);
                         }
@@ -825,7 +916,8 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) {
 
 /// Find files form: fields and checkboxes, the focused one highlighted; keys go through the app.
 fn show_find_form(ctx: &Context, form: &FindForm) {
-    Modal::new(Id::unique("find-form")).show(ctx, |ui| {
+    modal("find-form").show(ctx, |ui| {
+        ui.set_width(560.0);
         ui.heading("Find files");
         ui.separator();
         form_rows(ui, &form.rows, form.focus, form.error.as_deref());
@@ -834,7 +926,8 @@ fn show_find_form(ctx: &Context, form: &FindForm) {
 }
 
 fn show_sync_form(ctx: &Context, form: &SyncForm) {
-    Modal::new(Id::unique("sync-form")).show(ctx, |ui| {
+    modal("sync-form").show(ctx, |ui| {
+        ui.set_width(560.0);
         ui.heading("Synchronize directories (left <-> right panel)");
         ui.separator();
         form_rows(ui, &form.rows, form.focus, form.error.as_deref());
@@ -842,56 +935,84 @@ fn show_sync_form(ctx: &Context, form: &SyncForm) {
     });
 }
 
-/// Multi-rename form and the visible part of the old -> new list; keys go through the app.
+/// Multi-rename over the whole window: form, then as many old -> new rows as fit; keys go through the app.
 fn show_multi_rename(ctx: &Context, form: &RenameForm) {
-    Modal::new(Id::unique("multi-rename")).show(ctx, |ui| {
+    let size = ctx.content_rect().shrink(24.0).size();
+    modal("multi-rename").show(ctx, |ui| {
+        ui.set_min_size(size);
+        ui.set_max_size(size);
         ui.heading("Multi-rename");
         ui.separator();
         form_rows(ui, &form.rows, form.focus, form.error.as_deref());
         ui.separator();
         ui.label(format!("{} files:", form.preview.len()));
-        let rows = form
-            .preview
-            .iter()
-            .skip(form.scroll)
-            .take(fmt::RENAME_PREVIEW_ROWS);
-        for (old, new) in rows {
+        let row_h = ui.text_style_height(&TextStyle::Body) + ui.spacing().item_spacing.y;
+        let keys_h = 2.0 * row_h;
+        let fit = ((ui.available_height() - keys_h) / row_h).max(1.0) as usize;
+        for (old, new) in form.preview.iter().skip(form.scroll).take(fit) {
             let (text, bad) = fmt::rename_row(old, new);
-            let mut t = RichText::new(text).font(mono());
-            if bad {
-                t = t.color(Color32::LIGHT_RED);
-            }
-            ui.label(t);
+            let t = RichText::new(text);
+            ui.label(if bad { t.color(Color32::LIGHT_RED) } else { t });
         }
-        ui.label(RichText::new(fmt::RENAME_FORM_KEYS).color(MUTED));
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.label(RichText::new(fmt::RENAME_FORM_KEYS).color(MUTED));
+        });
     });
 }
 
-/// Form rows, the focused one highlighted, and the error under them.
+/// Form as a label | value grid, the focused row highlighted, and the error under it.
 fn form_rows(ui: &mut Ui, rows: &[FormRow], focus: usize, error: Option<&str>) {
-    for (text, focused) in fmt::form_lines(rows, focus) {
-        let mut t = RichText::new(text).font(mono());
-        if focused {
-            t = t.background_color(SELECT_BG).color(Color32::WHITE);
-        }
-        ui.label(t);
-    }
+    egui::Grid::new("form")
+        .num_columns(2)
+        .spacing(vec2(12.0, 4.0))
+        .show(ui, |ui| {
+            for (i, row) in rows.iter().enumerate() {
+                let focused = i == focus;
+                let color = if focused { ACCENT } else { TEXT };
+                let label = |t: &str| RichText::new(t.to_owned()).color(color);
+                match row {
+                    FormRow::Text(name, l) => {
+                        ui.label(label(name).strong());
+                        if focused {
+                            line_edit(ui, l);
+                        } else {
+                            ui.label(RichText::new(l.text.as_str()).font(mono()));
+                        }
+                    }
+                    FormRow::Check(name, on) => {
+                        ui.label("");
+                        ui.label(label(&format!(
+                            "{} {name}",
+                            if *on { "[x]" } else { "[ ]" }
+                        )));
+                    }
+                    FormRow::Choice(name, opts, k) => {
+                        ui.label(label(name).strong());
+                        ui.label(label(&format!("< {} >", opts[*k])));
+                    }
+                }
+                ui.end_row();
+            }
+        });
     if let Some(e) = error {
         ui.label(RichText::new(e).color(Color32::LIGHT_RED));
     }
 }
 
+/// Help as a table: section titles, then key | info rows (continuation lines join the info).
 fn show_help(ctx: &Context, app: &mut App) {
+    const KEY_W: f32 = 150.0;
     let title = fmt::help(&app.mode).0;
     let text = app.help_entries();
-    let row_h = ctx.fonts_mut(|f| f.row_height(&mono()));
+    let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::proportional(14.0)));
     let max_h = ctx.content_rect().height() * 0.7;
     let rows = (max_h / row_h) as usize;
     app.help_rows = rows;
     app.help_scroll = app.help_scroll.min(text.len().saturating_sub(rows));
     let offset = app.help_scroll as f32 * row_h;
     let mut clicked = None;
-    Modal::new(Id::unique("help")).show(ctx, |ui| {
+    modal("help").show(ctx, |ui| {
+        ui.set_width(640.0);
         ui.heading(title);
         ui.label(RichText::new(format!("Find: {}_", app.help_filter)).color(ACCENT));
         ui.separator();
@@ -901,24 +1022,47 @@ fn show_help(ctx: &Context, app: &mut App) {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, (line, action)) in text.iter().enumerate() {
-                    let mut t = RichText::new(*line).font(mono());
-                    let clickable = action.is_some();
-                    if clickable {
-                        t = t.color(ACCENT);
-                    }
-                    if clickable && i == app.help_sel {
-                        t = t.background_color(SELECT_BG).color(Color32::WHITE);
-                    }
-                    let l = Label::new(t).sense(if clickable {
+                    let selected = action.is_some() && i == app.help_sel;
+                    let color = match (selected, action.is_some()) {
+                        (true, _) => Color32::WHITE,
+                        (_, true) => ACCENT,
+                        _ => TEXT,
+                    };
+                    let r = ui.horizontal(|ui| {
+                        ui.set_min_height(row_h);
+                        if selected {
+                            ui.painter()
+                                .rect_filled(ui.max_rect().expand(1.0), 2.0, SELECT_BG);
+                        }
+                        let (key, info) = match fmt::help_line(line) {
+                            fmt::HelpLine::Section(t) => {
+                                ui.label(RichText::new(t).strong().color(ACCENT));
+                                return;
+                            }
+                            fmt::HelpLine::Entry(k, info) => (k, info),
+                            fmt::HelpLine::More(info) => ("", info),
+                            fmt::HelpLine::Text(t) => {
+                                ui.label(RichText::new(t).color(MUTED));
+                                return;
+                            }
+                        };
+                        let left = egui::Layout::left_to_right(egui::Align::Center);
+                        ui.allocate_ui_with_layout(egui::vec2(KEY_W, row_h), left, |ui| {
+                            ui.set_min_width(KEY_W);
+                            ui.label(RichText::new(key).strong().color(color));
+                        });
+                        ui.label(RichText::new(info).color(color));
+                    });
+                    let r = r.response.interact(if action.is_some() {
                         Sense::CLICK
                     } else {
                         Sense::hover()
                     });
-                    if ui
-                        .add(l)
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
+                    let r = match action {
+                        Some(_) => r.on_hover_cursor(egui::CursorIcon::PointingHand),
+                        None => r,
+                    };
+                    if r.clicked() {
                         clicked = Some(i);
                     }
                 }
@@ -981,6 +1125,39 @@ mod sim {
             repeat: false,
             modifiers: m,
         }
+    }
+
+    #[test]
+    /// Help table, process table headers and the multi-rename window draw their texts.
+    fn tables_and_dialogs_draw() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        let mut run = |app: &mut App, ev: Vec<Event>| frame(&ctx, app, &mut look, ev);
+        run(&mut app, vec![press(Key::F1, Modifiers::NONE)]);
+        let shown = run(&mut app, vec![]);
+        assert!(
+            shown.contains("Highlights") && shown.contains("Ctrl+B"),
+            "{shown}"
+        );
+        assert!(shown.contains("bookmarks (hotlist)"), "{shown}");
+        run(&mut app, vec![press(Key::Escape, Modifiers::NONE)]);
+        run(&mut app, vec![press(Key::ArrowDown, Modifiers::NONE)]);
+        run(&mut app, vec![press(Key::M, Modifiers::CTRL)]);
+        let shown = run(&mut app, vec![]);
+        assert!(
+            shown.contains("Multi-rename") && shown.contains("a.txt"),
+            "{shown}"
+        );
+        run(&mut app, vec![press(Key::Escape, Modifiers::NONE)]);
+        run(&mut app, vec![press(Key::P, Modifiers::CTRL)]);
+        let shown = run(&mut app, vec![]);
+        assert!(
+            shown.contains("PID") && shown.contains("Command"),
+            "{shown}"
+        );
     }
 
     #[test]

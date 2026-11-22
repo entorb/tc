@@ -86,7 +86,10 @@ impl App {
 
     /// Local tabs of both sides in tab order, the shown one, and the active side.
     fn session(&self) -> Vec<(String, OsString)> {
-        let mut kv = vec![("active".to_owned(), self.active.to_string().into())];
+        let mut kv = vec![
+            ("active".to_owned(), self.active.to_string().into()),
+            ("zoom".to_owned(), format!("{:.1}", self.zoom).into()),
+        ];
         for (side, name) in SIDES.iter().enumerate() {
             // ring layout of `tab_key`: shown panel is tab `tab[side]`, `tabs[side]` follow it
             let mut ring: Vec<&Panel> = std::iter::once(&self.panels[side])
@@ -127,6 +130,12 @@ impl App {
                 .find(|(k, _)| k == key)
                 .and_then(|(_, v)| v.to_str()?.parse::<usize>().ok())
         };
+        if let Some(z) = kv.iter().find(|(k, _)| k == "zoom")
+            && let Some(z) = z.1.to_str().and_then(|v| v.parse::<f32>().ok())
+            && z.is_finite()
+        {
+            self.zoom = super::zoom_step(z, 0);
+        }
         for (side, name) in SIDES.iter().enumerate() {
             let mut list: VecDeque<Panel> = (kv.iter().filter(|(k, _)| k == name))
                 .map(|(_, v)| Path::new(v))
@@ -217,6 +226,7 @@ mod tests {
         src.tabs[1].push_back(Panel::open(&b).unwrap());
         src.tab[1] = 1; // shown = tmp is tab 1, ring: tmp, a, gone, b -> tabs b, tmp, a, gone
         src.active = 1;
+        src.zoom = 1.3;
         let kv = src.session();
         let order: Vec<PathBuf> = (kv.iter().filter(|(k, _)| k == "right"))
             .map(|(_, v)| v.into())
@@ -232,6 +242,7 @@ mod tests {
             (dst.active, dst.tab[1], dst.panels[1].path()),
             (1, 1, tmp.path())
         );
+        assert!((dst.zoom - 1.3).abs() < 1e-6);
         assert_eq!(
             dst.tabs[1].iter().map(Panel::path).collect::<Vec<_>>(),
             [a.as_path(), b.as_path()]

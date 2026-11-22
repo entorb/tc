@@ -59,6 +59,8 @@ fn main() -> anyhow::Result<()> {
         options,
         Box::new(|cc| {
             draw::setup_fonts(&cc.egui_ctx);
+            // Ctrl+= / Ctrl+- go to the app, which saves the zoom
+            cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
             Ok(Box::new(gui))
         }),
     )
@@ -77,6 +79,9 @@ impl eframe::App for Gui {
             self.start(cmd, &dir, url);
         }
         self.poll_command();
+        if ctx.zoom_factor() != self.app.zoom {
+            ctx.set_zoom_factor(self.app.zoom);
+        }
         draw::draw(ui, &mut self.app, &mut self.look);
         if self.app.quit {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -99,8 +104,13 @@ impl Gui {
             let alt = i.modifiers.alt && !i.modifiers.ctrl;
             (i.events.clone(), alt, i.smooth_scroll_delta.y)
         });
+        // macOS layouts type `[`, `@`, `|` with Option: keep that text, drop the Alt+key
+        let typed = cfg!(target_os = "macos") && alt && keys::option_typed(&events);
         for ev in &events {
-            match keys::translate(ev, alt) {
+            if typed && keys::is_alt_char(ev) {
+                continue;
+            }
+            match keys::translate(ev, alt && !typed) {
                 // in the file panel Ctrl+V pastes files; elsewhere it pastes text into the prompt or editor
                 Some(keys::Input::Key(k))
                     if k.code == tc::KeyCode::Char('v')

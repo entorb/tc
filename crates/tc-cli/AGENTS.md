@@ -15,7 +15,7 @@ A user-facing feature is done when all apply:
 
 - Key binding works in TUI and GUI (shared logic, check `tc-gui/src/keys.rs` for GUI-only keys).
 - F1 help (`fmt.rs` `HELP_*`) lists every key and its behavior; same layout (`== Section ==`, key column), ends with the close key.
-- F-key footer: screen shows its own keys, sub-screens end with `F10 Close`, panels with `F10 Quit`; every footer key is in its help (test enforces).
+- F-key footer: the most important actions of a screen are buttons there. Every screen starts with `F1 Help` and ends with `F10 Close` (panels `F10 Quit`); button keys are F1–F12. A Shift action of a button is no extra button: add it to `SHIFT_FOOTER`, tc-gui swaps the label while Shift is held. Every footer key, Shift alternates included, is in its help; the tooltip is that help line (test enforces).
 - F9 menu entry (terminals eat keys); `tc-gui` toolbar icon if it is a tool (same icon font, tooltip shows the key).
 - List screens follow conventions: `/` filter, Ctrl+R refresh, Esc / `q` / F10 close.
 - README: one overview line under the matching feature section, limits included; no key details.

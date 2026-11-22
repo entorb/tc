@@ -38,6 +38,22 @@ pub fn translate(ev: &Event, alt: bool) -> Option<Input> {
     }
 }
 
+/// Option+key typed an ASCII symbol this frame (`[`, `@`, `|` on many macOS layouts):
+/// the text is the input, not the Alt+key shortcut. Non-ASCII Option text (∫, ç) stays a shortcut.
+pub fn option_typed(events: &[Event]) -> bool {
+    events.iter().any(|e| {
+        let Event::Text(t) = e else { return false };
+        let mut c = t.chars();
+        matches!((c.next(), c.next()), (Some(c), None) if c.is_ascii_graphic() && !c.is_ascii_alphanumeric())
+    })
+}
+
+/// Alt+character key press (not a named key like an arrow), dropped when [`option_typed`].
+pub fn is_alt_char(ev: &Event) -> bool {
+    matches!(ev, Event::Key { key, pressed: true, modifiers, .. }
+        if modifiers.alt && named(*key, mods(*modifiers)).is_none())
+}
+
 fn mods(m: Modifiers) -> KeyModifiers {
     let mut out = KeyModifiers::NONE;
     if m.shift {
@@ -123,7 +139,9 @@ fn char_key(k: Key, mods: KeyModifiers) -> Option<KeyCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Input, Key, KeyCode, KeyModifiers, Modifiers, translate};
+    use super::{
+        Event, Input, Key, KeyCode, KeyModifiers, Modifiers, is_alt_char, option_typed, translate,
+    };
 
     fn press(key: Key, modifiers: Modifiers) -> Event {
         Event::Key {
@@ -194,6 +212,12 @@ mod tests {
             assert_eq!(code(&ev, false), want, "{ev:?}");
         }
         assert_eq!(code(&Event::Text("ç".into()), true), None);
+        // macOS German layout: Option+5 types "[" (text wins), Option+b types "∫" (Alt+b wins)
+        let bracket = [press(Key::Num5, Modifiers::ALT), Event::Text("[".into())];
+        assert!(option_typed(&bracket) && is_alt_char(&bracket[0]));
+        assert!(!option_typed(&[Event::Text("∫".into())]));
+        assert!(!option_typed(&[Event::Text("a".into())]));
+        assert!(!is_alt_char(&press(Key::ArrowLeft, Modifiers::ALT)));
         assert!(matches!(
             translate(&Event::Paste("a\nb".into()), false),
             Some(Input::Paste(t)) if t == "a\nb"
