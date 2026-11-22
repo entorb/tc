@@ -4,7 +4,6 @@ use tc_app::app::App;
 use tc_app::fmt::{self};
 /// Help as a table: section titles, then key | info rows (continuation lines join the info).
 pub(super) fn show_help(ctx: &Context, app: &mut App) {
-    const KEY_W: f32 = 150.0;
     let title = fmt::help(&app.mode).0;
     let text = app.help_entries();
     let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::proportional(14.0)));
@@ -31,31 +30,7 @@ pub(super) fn show_help(ctx: &Context, app: &mut App) {
                         (_, true) => ACCENT,
                         _ => TEXT,
                     };
-                    let r = ui.horizontal(|ui| {
-                        ui.set_min_height(row_h);
-                        if selected {
-                            ui.painter()
-                                .rect_filled(ui.max_rect().expand(1.0), 2.0, SELECT_BG);
-                        }
-                        let (key, info) = match fmt::help_line(line) {
-                            fmt::HelpLine::Section(t) => {
-                                ui.label(RichText::new(t).strong().color(ACCENT));
-                                return;
-                            }
-                            fmt::HelpLine::Entry(k, info) => (k, info),
-                            fmt::HelpLine::More(info) => ("", info),
-                            fmt::HelpLine::Text(t) => {
-                                ui.label(RichText::new(t).color(MUTED));
-                                return;
-                            }
-                        };
-                        let left = egui::Layout::left_to_right(egui::Align::Center);
-                        ui.allocate_ui_with_layout(egui::vec2(KEY_W, row_h), left, |ui| {
-                            ui.set_min_width(KEY_W);
-                            ui.label(RichText::new(key).strong().color(color));
-                        });
-                        ui.label(RichText::new(info).color(color));
-                    });
+                    let r = ui.horizontal(|ui| help_cells(ui, line, color, selected, row_h));
                     let r = r.response.interact(if action.is_some() {
                         Sense::CLICK
                     } else {
@@ -78,4 +53,32 @@ pub(super) fn show_help(ctx: &Context, app: &mut App) {
     if let Some(i) = clicked {
         app.help_click(i);
     }
+}
+
+/// One help row: a section title, or key | info.
+fn help_cells(ui: &mut egui::Ui, line: &str, color: Color32, selected: bool, row_h: f32) {
+    const KEY_W: f32 = 150.0;
+    ui.set_min_height(row_h);
+    if selected {
+        ui.painter()
+            .rect_filled(ui.max_rect().expand(1.0), 2.0, SELECT_BG);
+    }
+    let (key, info) = match fmt::help_line(line) {
+        fmt::HelpLine::Section(t) => {
+            ui.label(RichText::new(t).strong().color(ACCENT));
+            return;
+        }
+        fmt::HelpLine::Entry(k, info) => (k, info),
+        fmt::HelpLine::More(info) => ("", info),
+        fmt::HelpLine::Text(t) => {
+            ui.label(RichText::new(t).color(MUTED));
+            return;
+        }
+    };
+    let left = egui::Layout::left_to_right(egui::Align::Center);
+    ui.allocate_ui_with_layout(egui::vec2(KEY_W, row_h), left, |ui| {
+        ui.set_min_width(KEY_W);
+        ui.label(RichText::new(key).strong().color(color));
+    });
+    ui.label(RichText::new(info).color(color));
 }

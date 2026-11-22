@@ -159,7 +159,7 @@ pub fn opens_externally(path: &Path) -> bool {
         "odt", "xls", "xlsx", "ods", "ppt", "pptx", "odp",
     ];
     path.extension()
-        .and_then(|e| e.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|e| EXT.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
@@ -174,12 +174,15 @@ pub fn view_command(path: &Path) -> Command {
 
 #[cfg(windows)]
 pub fn view_command(path: &Path) -> Command {
-    let image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tif" | "tiff"
-        )
-    });
+    let image = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tif" | "tiff"
+            )
+        });
     if !image {
         return open_command(path);
     }

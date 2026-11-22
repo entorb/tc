@@ -131,7 +131,7 @@ impl Query {
         self.exts.is_empty()
             || Path::new(name)
                 .extension()
-                .and_then(|e| e.to_str())
+                .and_then(std::ffi::OsStr::to_str)
                 .is_some_and(|e| self.exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
     }
 

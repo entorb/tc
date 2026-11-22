@@ -569,13 +569,7 @@ pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, K
         if c.is_alphanumeric() || c == '_' {
             let end = word_end(&mut it, i, c);
             if !prev_word {
-                if c.is_ascii_digit() {
-                    if !lang.markdown {
-                        out.push((i..end, Kind::Number));
-                    }
-                } else if lang.keywords.contains(&&line[i..end]) {
-                    out.push((i..end, Kind::Keyword));
-                }
+                word_token(lang, &line[i..end], c, i..end, &mut out);
             }
             prev_word = true;
             continue;
@@ -583,6 +577,17 @@ pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, K
         prev_word = false;
     }
     out
+}
+
+/// Number or keyword token for the word `w` (first char `c`), if it is one.
+fn word_token(lang: &Lang, w: &str, c: char, r: Range<usize>, out: &mut Vec<(Range<usize>, Kind)>) {
+    if c.is_ascii_digit() {
+        if !lang.markdown {
+            out.push((r, Kind::Number));
+        }
+    } else if lang.keywords.contains(&w) {
+        out.push((r, Kind::Keyword));
+    }
 }
 
 /// Markdown line classified as a whole (fence, fenced text, heading); `None` means inline scan.

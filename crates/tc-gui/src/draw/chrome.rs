@@ -30,29 +30,43 @@ pub(super) fn menu_bar(ui: &mut Ui, app: &mut App) {
             } else {
                 0
             };
-            egui::Area::new(Id::unique("menu-drop"))
-                .order(egui::Order::Foreground)
-                .fixed_pos(r.rect.left_bottom())
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_width(260.0);
-                        for (i, (label, ..)) in items.iter().enumerate() {
-                            let (name, key) = label.split_once("  ").unwrap_or((label, ""));
-                            let b = Button::selectable(i == sel, name)
-                                .shortcut_text(key.trim())
-                                .sense(Sense::CLICK)
-                                .min_size(egui::vec2(ui.available_width(), 0.0));
-                            if ui.add(b).clicked() {
-                                run = Some((g, i));
-                            }
-                        }
-                    });
-                });
+            if let Some(i) = menu_drop(ui, r.rect.left_bottom(), items, sel) {
+                run = Some((g, i));
+            }
         }
     });
     if let Some((g, i)) = run {
         app.menu_run(g, i);
     }
+}
+
+/// Dropdown of one menu group; returns the clicked item.
+fn menu_drop(
+    ui: &Ui,
+    pos: egui::Pos2,
+    items: &[(&str, KeyCode, KeyModifiers)],
+    sel: usize,
+) -> Option<usize> {
+    let mut run = None;
+    egui::Area::new(Id::unique("menu-drop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(260.0);
+                for (i, (label, ..)) in items.iter().enumerate() {
+                    let (name, key) = label.split_once("  ").unwrap_or((label, ""));
+                    let b = Button::selectable(i == sel, name)
+                        .shortcut_text(key.trim())
+                        .sense(Sense::CLICK)
+                        .min_size(egui::vec2(ui.available_width(), 0.0));
+                    if ui.add(b).clicked() {
+                        run = Some(i);
+                    }
+                }
+            });
+        });
+    run
 }
 
 /// Icon toolbar under the menu bar; clicks send the key the menu lists.

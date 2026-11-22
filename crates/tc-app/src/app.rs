@@ -1098,6 +1098,38 @@ impl App {
         });
     }
 
+    /// Join a finished File Stats scan; true when one was handled.
+    fn stats_job_tick(&mut self) -> bool {
+        let Mode::Stats(st) = &mut self.mode else {
+            return false;
+        };
+        if !st
+            .job
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            return false;
+        }
+        let Some(job) = st.job.take() else {
+            return false;
+        };
+        match job.join() {
+            Ok(root) => st.scanned(root),
+            // a failed rescan keeps the old tree
+            Err(_) if st.splice.is_some() => {
+                st.splice = None;
+                if let Mode::Stats(st) = mem::replace(
+                    &mut self.mode,
+                    Mode::Message("File Stats scan failed.".into()),
+                ) {
+                    self.stats = Some(st);
+                }
+            }
+            Err(_) => self.mode = Mode::Message("File Stats scan failed.".into()),
+        }
+        true
+    }
+
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
         // dialogs keep a pending listing waiting so its error cannot replace them
@@ -1148,27 +1180,7 @@ impl App {
             self.mode = Mode::Message(format!("Processes: {e}"));
             return;
         }
-        if let Mode::Stats(st) = &mut self.mode
-            && st
-                .job
-                .as_ref()
-                .is_some_and(std::thread::JoinHandle::is_finished)
-            && let Some(job) = st.job.take()
-        {
-            match job.join() {
-                Ok(root) => st.scanned(root),
-                // a failed rescan keeps the old tree
-                Err(_) if st.splice.is_some() => {
-                    st.splice = None;
-                    if let Mode::Stats(st) = mem::replace(
-                        &mut self.mode,
-                        Mode::Message("File Stats scan failed.".into()),
-                    ) {
-                        self.stats = Some(st);
-                    }
-                }
-                Err(_) => self.mode = Mode::Message("File Stats scan failed.".into()),
-            }
+        if self.stats_job_tick() {
             return;
         }
         if matches!(self.mode, Mode::Xfer(_)) {

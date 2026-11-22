@@ -33,21 +33,7 @@ pub(super) fn draw_panel(
     egui::Frame::group(ui.style())
         .stroke(stroke)
         .show(ui, |ui| {
-            if !app.tabs[i].is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    for (k, name) in app.tab_names(i).into_iter().enumerate() {
-                        let b = Button::selectable(k == app.tab[i], format!("{} {name}", k + 1));
-                        let r = ui
-                            .add(b.sense(Sense::CLICK))
-                            .on_hover_text("Right click closes");
-                        if r.clicked() {
-                            action = Some(Action::Tab(k));
-                        } else if r.secondary_clicked() {
-                            action = Some(Action::CloseTab(k));
-                        }
-                    }
-                });
-            }
+            tab_bar(ui, app, i, &mut action);
             let title = RichText::new(panel_title(app, i)).strong();
             ui.add(Label::new(if active { title.color(ACCENT) } else { title }).truncate());
             let height = (ui.available_height() - 2.0 * row_h - 8.0).max(row_h);
@@ -68,66 +54,21 @@ pub(super) fn draw_panel(
                 table = table.scroll_to_row(cursor, None);
             }
             table
-                .header(row_h, |mut h| {
-                    for (label, key) in [
-                        ("Name", SortKey::Name),
-                        ("Size", SortKey::Size),
-                        ("Date", SortKey::Date),
-                    ] {
-                        let label = match panel.sort() {
-                            (k, false) if k == key => format!("{label} ⏶"),
-                            (k, true) if k == key => format!("{label} ⏷"),
-                            _ => label.to_owned(),
-                        };
-                        h.col(|ui| {
-                            let l = Label::new(RichText::new(label).strong()).sense(Sense::CLICK);
-                            if ui.add(l).clicked() {
-                                action = Some(Action::Sort(key));
-                            }
-                        });
-                    }
-                })
+                .header(row_h, |h| header_cols(h, panel.sort(), &mut action))
                 .body(|body| {
-                    body.rows(row_h, panel.entries().len(), |mut row| {
+                    body.rows(row_h, panel.entries().len(), |row| {
                         let idx = row.index();
-                        let e = &panel.entries()[idx];
-                        if idx == cursor {
-                            if active {
-                                row.set_selected(true);
-                            } else {
-                                row.set_hovered(true);
-                            }
-                        }
-                        let color = if panel.is_selected(e) {
-                            MARK
-                        } else if e.is_symlink {
-                            LINK
-                        } else if e.is_dir {
-                            Color32::WHITE
+                        let hl = if idx != cursor {
+                            None
+                        } else if active {
+                            Some(true)
                         } else {
-                            TEXT
+                            Some(false)
                         };
-                        let [name, size, date] = entry_cols(app, i, e, today);
-                        let name = RichText::new(name).color(color);
-                        row.col(|ui| {
-                            ui.add(
-                                Label::new(if e.is_dir { name.strong() } else { name }).truncate(),
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(size).color(color));
-                            });
-                        });
-                        row.col(|ui| {
-                            ui.label(RichText::new(date).color(MUTED));
-                        });
-                        let r = row.response();
-                        if r.double_clicked() {
-                            action = Some(Action::Click(idx, false, true));
-                        } else if r.clicked() {
-                            action = Some(Action::Click(idx, shift, false));
-                        }
+                        let e = &panel.entries()[idx];
+                        let color = entry_color(panel.is_selected(e), e);
+                        let cols = entry_cols(app, i, e, today);
+                        entry_row(row, (e.is_dir, color, cols), hl, shift, &mut action);
                     });
                 });
             ui.add(Label::new(RichText::new(panel_info(app, i)).color(MUTED)).truncate());
@@ -139,5 +80,90 @@ pub(super) fn draw_panel(
         Some(Action::Tab(k)) => app.select_tab(i, k),
         Some(Action::CloseTab(k)) => app.close_tab(i, k),
         None => {}
+    }
+}
+
+fn tab_bar(ui: &mut Ui, app: &App, i: usize, action: &mut Option<Action>) {
+    if app.tabs[i].is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for (k, name) in app.tab_names(i).into_iter().enumerate() {
+            let b = Button::selectable(k == app.tab[i], format!("{} {name}", k + 1));
+            let r = ui
+                .add(b.sense(Sense::CLICK))
+                .on_hover_text("Right click closes");
+            if r.clicked() {
+                *action = Some(Action::Tab(k));
+            } else if r.secondary_clicked() {
+                *action = Some(Action::CloseTab(k));
+            }
+        }
+    });
+}
+
+fn header_cols(mut h: egui_extras::TableRow, sort: (SortKey, bool), action: &mut Option<Action>) {
+    for (label, key) in [
+        ("Name", SortKey::Name),
+        ("Size", SortKey::Size),
+        ("Date", SortKey::Date),
+    ] {
+        let label = match sort {
+            (k, false) if k == key => format!("{label} ⏶"),
+            (k, true) if k == key => format!("{label} ⏷"),
+            _ => label.to_owned(),
+        };
+        h.col(|ui| {
+            let l = Label::new(RichText::new(label).strong()).sense(Sense::CLICK);
+            if ui.add(l).clicked() {
+                *action = Some(Action::Sort(key));
+            }
+        });
+    }
+}
+
+fn entry_color(selected: bool, e: &tc_core::panel::Entry) -> Color32 {
+    if selected {
+        MARK
+    } else if e.is_symlink {
+        LINK
+    } else if e.is_dir {
+        Color32::WHITE
+    } else {
+        TEXT
+    }
+}
+
+/// `hl`: `Some(true)` selected cursor row, `Some(false)` hovered cursor row of the inactive panel.
+fn entry_row(
+    mut row: egui_extras::TableRow,
+    (is_dir, color, [name, size, date]): (bool, Color32, [String; 3]),
+    hl: Option<bool>,
+    shift: bool,
+    action: &mut Option<Action>,
+) {
+    let idx = row.index();
+    match hl {
+        Some(true) => row.set_selected(true),
+        Some(false) => row.set_hovered(true),
+        None => {}
+    }
+    let name = RichText::new(name).color(color);
+    row.col(|ui| {
+        ui.add(Label::new(if is_dir { name.strong() } else { name }).truncate());
+    });
+    row.col(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(size).color(color));
+        });
+    });
+    row.col(|ui| {
+        ui.label(RichText::new(date).color(MUTED));
+    });
+    let r = row.response();
+    if r.double_clicked() {
+        *action = Some(Action::Click(idx, false, true));
+    } else if r.clicked() {
+        *action = Some(Action::Click(idx, shift, false));
     }
 }
