@@ -1,4 +1,4 @@
-//! egui rendering of the shared `App` state; texts come from `tc::fmt`, so both front ends say the same.
+//! egui rendering of the shared `App` state; texts come from `tc_app::fmt`, so both front ends say the same.
 
 use std::path::Path;
 
@@ -7,16 +7,16 @@ use eframe::egui::{
     RichText, ScrollArea, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob, vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{
+use tc_app::app::{
     App, FindForm, FormRow, MENUS, Mode, RenameForm, Stats, SyncForm, TOOLBAR, ToolItem,
 };
-use tc::fmt::{
+use tc_app::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
     panel_title, stats_footer, stats_progress, stats_row, stats_title, sync_footer, sync_row,
     sync_title,
 };
-use tc::fmt::{procs_confirm, procs_footer, procs_header, procs_prompt, procs_title};
-use tc::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, Rect};
+use tc_app::fmt::{procs_confirm, procs_footer, procs_header, procs_prompt, procs_title};
+use tc_app::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, Rect};
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
 use tc_core::panel::SortKey;
@@ -316,7 +316,7 @@ fn toolbar_group(ui: &mut Ui, app: &mut App, group: &[ToolItem]) {
 /// Holding Shift shows the Shift alternates; the tooltip is the key's F1 help.
 fn footer(ui: &mut Ui, app: &mut App) {
     let shift = ui.input(|i| i.modifiers.shift);
-    let help = tc::fmt::help(&app.mode).1;
+    let help = tc_app::fmt::help(&app.mode).1;
     ui.horizontal(|ui| {
         for &item in app.footer_keys() {
             let (label, code, mods) = if shift {
@@ -327,7 +327,7 @@ fn footer(ui: &mut Ui, app: &mut App) {
             let clicked = ui
                 .add(Button::new(label).sense(Sense::CLICK))
                 .on_hover_ui(|ui| {
-                    ui.label(tc::fmt::key_help(help, label));
+                    ui.label(tc_app::fmt::key_help(help, label));
                 })
                 .clicked();
             if clicked && app.footer_active() {

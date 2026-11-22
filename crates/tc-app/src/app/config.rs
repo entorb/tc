@@ -199,8 +199,9 @@ mod tests {
     use tc_core::panel::Panel;
     use tc_core::settings;
 
+    use super::super::find_files::F_NAME;
     use super::super::{
-        App, Ask, F_NAME, Mode, form_checked, form_text, rename_rows, rows_from_line, rows_to_line,
+        App, Ask, Mode, form_checked, form_text, rename_rows, rows_from_line, rows_to_line,
     };
 
     fn app(dir: &std::path::Path) -> App {

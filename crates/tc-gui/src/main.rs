@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use eframe::egui::{self, ViewportCommand};
-use tc::app::{App, Mode};
-use tc::{KeyModifiers, MouseEvent, MouseEventKind};
+use tc_app::app::{App, Mode};
+use tc_app::{KeyModifiers, MouseEvent, MouseEventKind};
 use tc_core::panel::Panel;
 use tc_core::view::Viewer;
 
@@ -113,7 +113,7 @@ impl Gui {
             match keys::translate(ev, alt && !typed) {
                 // in the file panel Ctrl+V pastes files; elsewhere it pastes text into the prompt or editor
                 Some(keys::Input::Key(k))
-                    if k.code == tc::KeyCode::Char('v')
+                    if k.code == tc_app::KeyCode::Char('v')
                         && k.modifiers == KeyModifiers::CONTROL
                         && !self.app.panel_keys() =>
                 {

@@ -4605,11 +4605,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "tc-cli"
+name = "tc-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "crossterm",
  "jiff",
  "ratatui",
  "regex",
@@ -4618,6 +4617,22 @@ dependencies = [
  "tempfile",
  "unicode-width",
  "zip",
+]
+
+[[package]]
+name = "tc-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "jiff",
+ "ratatui",
+ "regex",
+ "tc-app",
+ "tc-core",
+ "tc-remote",
+ "tempfile",
+ "unicode-width",
 ]
 
 [[package]]
@@ -4650,7 +4665,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "jiff",
- "tc-cli",
+ "tc-app",
  "tc-core",
  "tc-remote",
  "tempfile",

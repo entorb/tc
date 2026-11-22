@@ -3,24 +3,19 @@ name = "tc-cli"
 version = "0.1.0"
 edition = "2024"
 
-# lib keeps the short name: `tc::app` is shared with tc-gui
-[lib]
-name = "tc"
-
 [dependencies]
 anyhow = "1.0.104"
 crossterm = { version = "0.29", features = ["osc52", "bracketed-paste"] }
 jiff = "1.0.1"
 ratatui = "0.30.2"
 regex = "1.13.1"
+tc-app = { version = "0.1.0", path = "../tc-app" }
 tc-core = { version = "0.1.0", path = "../tc-core" }
 tc-remote = { version = "0.1.0", path = "../tc-remote" }
 unicode-width = "0.2"
 
 [dev-dependencies]
-tc-core = { version = "0.1.0", path = "../tc-core", features = ["mem"] }
 tempfile = "3.27.0"
-zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 
 [lints]
 workspace = true

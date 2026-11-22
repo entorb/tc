@@ -9,13 +9,15 @@ use regex::Regex;
 
 use ratatui::widgets::ListState;
 use std::path::Path;
-use tc::app::{App, FindForm, Found, MENUS, Mode, RenameForm, Stats, Sync, SyncForm, menu_drop};
-use tc::fmt::{
+use tc_app::app::{
+    App, FindForm, Found, MENUS, Mode, RenameForm, Stats, Sync, SyncForm, menu_drop,
+};
+use tc_app::fmt::{
     self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
     help, input_dialog, panel_info, panel_title, stats_footer, stats_progress, stats_row,
     stats_title, sync_footer, sync_row, sync_title,
 };
-use tc::fmt::{
+use tc_app::fmt::{
     PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
 };
 use tc_core::cmdline::LineEdit;
@@ -332,7 +334,11 @@ fn draw_multi_rename(frame: &mut Frame, form: &RenameForm) {
 }
 
 /// Form rows (focused one highlighted) and the error under them.
-fn form_lines(rows: &[tc::app::FormRow], focus: usize, error: Option<&str>) -> Vec<Line<'static>> {
+fn form_lines(
+    rows: &[tc_app::app::FormRow],
+    focus: usize,
+    error: Option<&str>,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = fmt::form_lines(rows, focus)
         .into_iter()
         .map(|(text, focus)| Line::raw(text).style(if focus { BAR } else { PANEL }))
@@ -744,9 +750,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let open = || Panel::open(tmp.path()).unwrap();
         let mut app = App::new(open(), open());
-        app.on_key(tc::KeyEvent::new(
-            tc::KeyCode::Char('p'),
-            tc::KeyModifiers::CONTROL,
+        app.on_key(tc_app::KeyEvent::new(
+            tc_app::KeyCode::Char('p'),
+            tc_app::KeyModifiers::CONTROL,
         ));
         while matches!(&app.mode, Mode::Procs(p) if p.rows.is_empty()) {
             app.tick();

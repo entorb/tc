@@ -1,7 +1,7 @@
 //! egui input events as the terminal key events `App` handles, so both front ends share all key logic.
 
 use eframe::egui::{Event, Key, Modifiers};
-use tc::{KeyCode, KeyEvent, KeyModifiers};
+use tc_app::{KeyCode, KeyEvent, KeyModifiers};
 
 pub enum Input {
     Key(KeyEvent),

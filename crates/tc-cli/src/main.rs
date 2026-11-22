@@ -15,7 +15,7 @@ use ratatui::crossterm::terminal::{
 };
 use tc_core::panel::Panel;
 
-use tc::app::{self, App};
+use tc_app::app::{self, App};
 
 fn main() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("cannot read current directory")?;
