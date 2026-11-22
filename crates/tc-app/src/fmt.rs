@@ -12,7 +12,7 @@ use tc_core::edit::{Editor, Eol, human};
 use tc_core::find::{Hit, MAX_RESULTS};
 use tc_core::panel::{Entry, SortKey};
 use tc_core::stats::treemap::Kind as TileKind;
-use tc_core::stats::{self, Node, Order};
+use tc_core::stats::{self, Node};
 use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -709,17 +709,8 @@ pub fn stats_tip(rel: &Path, n: &Node) -> String {
 
 /// File Stats title: directory, sort and filter.
 pub fn stats_title(st: &Stats) -> String {
-    let key = match st.order {
-        Order::Name => "name",
-        Order::Size => "size",
-        Order::Count => "count",
-    };
-    let rev = if st.rev { " rev" } else { "" };
-    format!(
-        "Stats: {} [{key}{rev}]{}",
-        st.path().display(),
-        st.filter.tag()
-    )
+    let key = if st.by_files { "count" } else { "size" };
+    format!("Stats: {} [{key}]{}", st.path().display(), st.filter.tag())
 }
 
 /// File Stats footer: scan progress, else totals and keys.
@@ -740,12 +731,7 @@ pub fn stats_footer(st: &Stats) -> String {
         return "scanning...  [Esc] Cancel".to_owned();
     }
     let dir = st.current();
-    let mode = if st.by_files { "count" } else { "size" };
-    format!(
-        "{}, {} files  Tab size/count ({mode})  n/s/C sort  p panel  Enter open  Backspace up",
-        human(dir.size),
-        thousands(dir.files)
-    )
+    format!("{}, {} files", human(dir.size), thousands(dir.files))
 }
 
 /// Process monitor title: source, sort and filter.

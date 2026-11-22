@@ -156,7 +156,7 @@ fn scan_dir(dir: &Path, p: &Progress, free: &AtomicUsize, list: &List) -> Node {
 fn finish(node: &mut Node) {
     node.size = node.children.iter().map(|c| c.size).sum();
     node.files = node.children.iter().map(|c| c.files).sum();
-    sort(&mut node.children, Order::Size, false);
+    sort(&mut node.children, Order::Size);
 }
 
 /// Most bytes of one `find` record; a longer one ends the parse as garbage.
@@ -286,24 +286,19 @@ pub fn dirs(n: &Node) -> u64 {
         .sum()
 }
 
-/// Sort key of a directory listing.
+/// Sort key of a directory listing: size or file count, as the browser shows them.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Order {
-    Name,
     #[default]
     Size,
     Count,
 }
 
-/// Name A-Z, or largest first by size or file count (ties by name); `rev` reverses it all.
-pub fn sort(children: &mut [Node], order: Order, rev: bool) {
-    children.sort_by(|a, b| {
-        let o = match order {
-            Order::Name => a.name.cmp(&b.name),
-            Order::Size => b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)),
-            Order::Count => b.files.cmp(&a.files).then_with(|| a.name.cmp(&b.name)),
-        };
-        if rev { o.reverse() } else { o }
+/// Largest first by size or file count (ties by name).
+pub fn sort(children: &mut [Node], order: Order) {
+    children.sort_by(|a, b| match order {
+        Order::Size => b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)),
+        Order::Count => b.files.cmp(&a.files).then_with(|| a.name.cmp(&b.name)),
     });
 }
 
@@ -367,7 +362,7 @@ mod tests {
         assert_eq!((root.size, root.files), ((1 << 40) + 6, 4));
         assert_eq!(root.children[0].name, "big");
         assert_eq!((root.children[1].size, root.children[1].files), (6, 3));
-        sort(&mut root.children, Order::Count, false);
+        sort(&mut root.children, Order::Count);
         assert_eq!(root.children[0].name, "many");
     }
 
@@ -402,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn sort_orders_and_reverse() {
+    fn sort_by_size_or_count() {
         let n = |name: &str, size, files| Node {
             name: name.into(),
             size,
@@ -415,14 +410,10 @@ mod tests {
                 .map(|n| n.name.to_str().unwrap().to_owned())
                 .collect::<Vec<_>>()
         };
-        sort(&mut v, Order::Name, false);
-        assert_eq!(names(&v), ["a", "b", "c"]);
-        sort(&mut v, Order::Size, false);
+        sort(&mut v, Order::Size);
         assert_eq!(names(&v), ["c", "a", "b"]);
-        sort(&mut v, Order::Count, false);
+        sort(&mut v, Order::Count);
         assert_eq!(names(&v), ["a", "c", "b"]);
-        sort(&mut v, Order::Count, true);
-        assert_eq!(names(&v), ["b", "c", "a"]);
     }
 
     #[test]

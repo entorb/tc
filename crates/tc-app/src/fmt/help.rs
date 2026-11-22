@@ -125,11 +125,8 @@ Enter           open directory
 Right           open directory
 Backspace       parent directory
 Left            parent directory
-Tab             show size / file count; count mode treemap:
-                dirs only by file count, 2 levels
-n               sort by name (again: reverse)
-s               sort by size (again: reverse)
-C               sort by file count (again: reverse)
+Tab             show and sort by size / file count (count
+                mode treemap: dirs only by file count, 2 levels)
 F5              rescan the browsed directory, totals above update
 /               filter the entries by name: Enter keeps,
                 Esc clears

@@ -30,9 +30,6 @@ pub struct Stats {
     pub filter: Filter,
     /// Show file count (value, share, bar) instead of size.
     pub by_files: bool,
-    pub order: stats::Order,
-    /// Reversed `order`.
-    pub rev: bool,
     /// Path of the running rescan to swap into `root`; `None` for the first scan.
     pub(super) splice: Option<Vec<usize>>,
     /// Running scan; `root` is empty until it finishes.
@@ -240,13 +237,12 @@ impl Stats {
                 }
             }
             KeyCode::Tab => {
+                let name = self.selected().map(|n| n.name.clone());
                 self.by_files = !self.by_files;
-                self.map = None;
+                self.resort();
+                self.select_name(name);
             }
             KeyCode::Insert | KeyCode::Char(' ') => self.toggle_mark(last),
-            KeyCode::Char('n') => self.set_order(stats::Order::Name),
-            KeyCode::Char('s') => self.set_order(stats::Order::Size),
-            KeyCode::Char('C') => self.set_order(stats::Order::Count),
             _ => {}
         }
     }
@@ -287,15 +283,6 @@ impl Stats {
         self.sel = (self.sel + 1).min(last);
     }
 
-    /// Same order again reverses it; the cursor stays on its entry.
-    pub(super) fn set_order(&mut self, order: stats::Order) {
-        let name = self.selected().map(|n| n.name.clone());
-        self.rev = self.order == order && !self.rev;
-        self.order = order;
-        self.resort();
-        self.select_name(name);
-    }
-
     /// Puts the cursor on the shown entry called `name`, if any.
     pub(super) fn select_name(&mut self, name: Option<OsString>) {
         if let Some(i) = name.and_then(|name| {
@@ -309,8 +296,12 @@ impl Stats {
 
     /// Sorts the browsed directory and puts the cursor on its first shown entry.
     pub(super) fn resort(&mut self) {
-        let (order, rev) = (self.order, self.rev);
-        stats::sort(&mut self.current_mut().children, order, rev);
+        let order = if self.by_files {
+            stats::Order::Count
+        } else {
+            stats::Order::Size
+        };
+        stats::sort(&mut self.current_mut().children, order);
         self.sel = 0;
         self.rebuild();
     }
@@ -378,8 +369,6 @@ impl App {
             view: Vec::new(),
             filter: Filter::default(),
             by_files: false,
-            order: stats::Order::default(),
-            rev: false,
             splice: None,
             job: Some(job),
             progress,
@@ -916,14 +905,10 @@ mod tests {
             _ => panic!("not in stats"),
         };
         assert_eq!(top(&app), "big");
-        key(&mut app, KeyCode::Tab); // only the shown value changes
+        key(&mut app, KeyCode::Tab); // count mode: sorted by file count, cursor stays on its entry
         assert_eq!(top(&app), "big");
-        key(&mut app, KeyCode::Char('s')); // active key again: smallest first
-        assert_eq!(top(&app), "big"); // cursor stays on its entry
         let Mode::Stats(st) = &app.mode else { panic!() };
         assert_eq!(st.current().children[0].name, "many");
-        key(&mut app, KeyCode::Char('C'));
-        assert_eq!(top(&app), "big");
         key(&mut app, KeyCode::Home);
         assert_eq!(top(&app), "many");
         key(&mut app, KeyCode::Enter);
