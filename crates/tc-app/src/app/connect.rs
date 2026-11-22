@@ -219,3 +219,64 @@ impl App {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::Mode;
+
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use super::super::tests::{key, settle, two_panels, type_keys, with};
+
+    #[test]
+    fn disconnect_all_closes_every_remote_hold() {
+        let left = tempfile::tempdir().unwrap();
+        let mem = tc_core::vfs::mem::Mem::new();
+        let mut app = two_panels(left.path(), left.path());
+        app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
+        settle(&mut app);
+        app.active = 1;
+        with(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL); // tab on the same session
+        settle(&mut app);
+        assert!(Arc::strong_count(&mem) > 2);
+        with(&mut app, KeyCode::Null, KeyModifiers::SHIFT);
+        settle(&mut app);
+        assert_eq!(Arc::strong_count(&mem), 1);
+        assert_eq!(app.panels[1].path(), left.path());
+        assert!(app.panels[1].remote().is_none());
+    }
+
+    #[test]
+    fn connection_list_add_edit_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        with(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert!(matches!(app.mode, Mode::Connections(0)));
+        key(&mut app, KeyCode::Insert);
+        type_keys(&mut app, "me@h");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.connections, [PathBuf::from("sftp://me@h")]);
+        key(&mut app, KeyCode::F(4));
+        type_keys(&mut app, "ost");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.connections, [PathBuf::from("sftp://me@host")]);
+        key(&mut app, KeyCode::Insert);
+        for _ in 0..7 {
+            key(&mut app, KeyCode::Backspace);
+        }
+        type_keys(&mut app, "nonsense");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Message(_)));
+        assert_eq!(app.connections.len(), 1);
+        key(&mut app, KeyCode::Esc);
+        with(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Delete);
+        assert!(app.connections.is_empty());
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+}

@@ -251,3 +251,132 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::App;
+
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::Rect;
+
+    use tc_core::panel::{Panel, SortKey};
+
+    use super::super::tests::{key, settle, two_panels, with};
+
+    #[test]
+    fn tabs_open_cycle_close_and_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        let ctrl = KeyModifiers::CONTROL;
+        with(&mut app, KeyCode::Char('t'), ctrl);
+        assert_eq!((app.tabs[0].len(), app.tab[0]), (1, 1));
+        app.go(0, sub.clone());
+        with(&mut app, KeyCode::PageDown, ctrl);
+        assert_eq!((app.panels[0].path(), app.tab[0]), (dir.path(), 0));
+        with(&mut app, KeyCode::PageUp, ctrl);
+        assert_eq!((app.panels[0].path(), app.tab[0]), (sub.as_path(), 1));
+        with(&mut app, KeyCode::Char('u'), ctrl);
+        assert_eq!(
+            (app.tabs[1].len(), app.tab[1], app.tabs[0].len()),
+            (1, 1, 0)
+        );
+        key(&mut app, KeyCode::Tab);
+        with(&mut app, KeyCode::Char('w'), ctrl);
+        assert_eq!((app.panels[1].path(), app.tab[1]), (dir.path(), 0));
+        assert!(app.tabs[1].is_empty());
+        with(&mut app, KeyCode::Char('w'), ctrl); // last tab stays
+        assert_eq!(app.panels[1].path(), dir.path());
+        app.go(0, sub.clone());
+        app.active = 0;
+        with(&mut app, KeyCode::Char('t'), ctrl);
+        app.go(0, dir.path().to_owned());
+        app.close_tab(0, 0); // the first tab, while the second is shown
+        assert_eq!((app.panels[0].path(), app.tabs[0].len()), (dir.path(), 0));
+        app.close_tab(0, 0); // last one stays
+        assert_eq!(app.panels[0].path(), dir.path());
+    }
+
+    #[test]
+    fn swap_root_and_sort_click() {
+        let (l, r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(l.path().join(".h"), "").unwrap();
+        let mut app = two_panels(l.path(), r.path());
+        app.areas = [Rect::new(0, 0, 40, 10), Rect::new(40, 0, 40, 10)];
+        with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.panels[0].path(), r.path());
+        with(&mut app, KeyCode::Char('='), KeyModifiers::ALT); // right gets left's dir
+        assert_eq!(app.panels[1].path(), r.path());
+        with(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL);
+        settle(&mut app); // listing may take over the 50 ms wait on a loaded machine
+        assert!(app.panels[0].path().parent().is_none());
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 40 + 20,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.panels[1].sort().0, SortKey::Size);
+        with(&mut app, KeyCode::F(5), KeyModifiers::CONTROL); // active panel is 1 now: by date
+        assert_eq!(app.panels[1].sort().0, SortKey::Date);
+    }
+
+    #[test]
+    fn shift_arrows_and_clicks_select() {
+        let tmp = tempfile::tempdir().unwrap();
+        // subdir: ".." then loads the small tempdir at once, not the slow-to-read $TMPDIR (macOS)
+        let dir = tmp.path().join("sub");
+        std::fs::create_dir(&dir).unwrap();
+        for n in ["a", "b", "c", "d"] {
+            std::fs::write(dir.join(n), "").unwrap();
+        }
+        let mut app = App::new(Panel::open(&dir).unwrap(), Panel::open(&dir).unwrap());
+        app.areas = [Rect::new(0, 0, 40, 10), Rect::new(40, 0, 40, 10)];
+        let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+        app.on_key(shift(KeyCode::Down)); // ".." is not selectable
+        app.on_key(shift(KeyCode::Down));
+        assert_eq!(app.panels[0].targets().len(), 1);
+        let click = |app: &mut App, column, row, modifiers| {
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers,
+            })
+        };
+        click(&mut app, 45, 3, KeyModifiers::NONE); // row 3 = entry 2 ("b") in right panel
+        assert_eq!((app.active, app.panels[1].cursor()), (1, 2));
+        click(&mut app, 45, 5, KeyModifiers::SHIFT); // entries 2..=4
+        assert_eq!(app.panels[1].targets().len(), 3);
+        click(&mut app, 45, 1, KeyModifiers::NONE); // ".." twice quickly: enters the parent
+        let before = app.panels[1].path().to_path_buf();
+        click(&mut app, 45, 1, KeyModifiers::NONE);
+        assert_ne!(app.panels[1].path(), before);
+    }
+
+    #[test]
+    fn wheel_moves_the_cursor_of_the_panel_under_the_pointer_by_3() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..10 {
+            std::fs::write(dir.path().join(format!("f{n}")), "x").unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        app.areas = [Rect::new(0, 0, 10, 10), Rect::new(10, 0, 10, 10)];
+        let wheel = |app: &mut App, kind, column| {
+            app.on_mouse(MouseEvent {
+                kind,
+                column,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        wheel(&mut app, MouseEventKind::ScrollDown, 12);
+        assert_eq!((app.panels[0].cursor(), app.panels[1].cursor()), (0, 3));
+        wheel(&mut app, MouseEventKind::ScrollUp, 12);
+        assert_eq!(app.panels[1].cursor(), 0);
+    }
+}

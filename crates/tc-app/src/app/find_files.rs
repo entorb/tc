@@ -582,3 +582,355 @@ impl App {
         self.panels[self.active].panelize(entries, lines);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::find_files::{
+        F_CONTENT, F_CONTENT_ON, F_EVERY, F_FOLLOW, F_HIDDEN, F_MIN, F_NAME, F_SAVED, Found,
+        FoundSort,
+    };
+
+    use super::super::{App, Filter, Mode};
+    use crate::fmt;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use tc_core::cmdline::LineEdit;
+    use tc_core::find;
+    use tc_core::find::Hit;
+    use tc_core::panel::{Entry, Panel};
+
+    use super::super::tests::{key, settle, two_panels, type_keys, wait, with};
+    use tc_core::cmdline;
+
+    /// Fills the find form (name, then content regex, which ticks its checkbox) and searches.
+    fn find_in_form(app: &mut App, mask: &str, content: Option<&str>) {
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        type_keys(app, mask);
+        if let Some(re) = content {
+            form_focus(app, F_CONTENT);
+            type_keys(app, re);
+        }
+        key(app, KeyCode::Enter);
+    }
+
+    fn form_focus(app: &mut App, label: &str) {
+        let Mode::FindForm(f) = &mut app.mode else {
+            panic!("no find form");
+        };
+        f.focus = f.rows.iter().position(|r| r.label() == label).unwrap();
+    }
+
+    fn wait_found(app: &mut App) {
+        while matches!(&app.mode, Mode::Found(f) if f.running) {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn find_form_bad_field_keeps_form_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        find_in_form(&mut app, "*", None); // starts a search
+        assert!(matches!(app.mode, Mode::Found(_)));
+        key(&mut app, KeyCode::Esc); // stop
+        while matches!(&app.mode, Mode::Found(f) if f.running) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::Esc); // close
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        type_keys(&mut app, "*");
+        form_focus(&mut app, F_MIN);
+        type_keys(&mut app, "10X");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.mode, Mode::FindForm(f) if f.error.is_some()));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+        // Ctrl+F reopens the last form; a typed or pasted regex ticks content search
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        let Mode::FindForm(f) = &mut app.mode else {
+            panic!("no find form");
+        };
+        assert_eq!(
+            (f.text(F_NAME), f.text(F_MIN), f.error.as_deref()),
+            ("**", "10X", None)
+        );
+        assert!(!f.checked(F_CONTENT_ON));
+        form_focus(&mut app, F_CONTENT);
+        app.on_paste("needle".into());
+        assert!(
+            matches!(&app.mode, Mode::FindForm(f) if f.checked(F_CONTENT_ON) && f.text(F_CONTENT) == "needle")
+        );
+    }
+
+    #[test]
+    fn find_then_panelize_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        std::fs::write(dir.path().join("sub/b.txt"), "world\n").unwrap();
+        std::fs::write(dir.path().join("c.rs"), "hello\n").unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        find_in_form(&mut app, "*.txt", Some("hello"));
+        wait_found(&mut app);
+        assert!(matches!(&app.mode, Mode::Found(f) if f.list.len() == 1));
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Normal) && app.panels[0].is_virtual());
+        assert_eq!(app.panels[0].targets(), [dir.path().join("a.txt")]);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Esc); // back to the directory
+        assert!(!app.panels[0].is_virtual());
+        // Esc cancels a running search, a second Esc closes
+        find_in_form(&mut app, "", None);
+        key(&mut app, KeyCode::Esc);
+        while matches!(&app.mode, Mode::Found(f) if f.running) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn found_sorts_by_size_name_and_reverses() {
+        let dir = tempfile::tempdir().unwrap();
+        for (n, len) in [("b.txt", 3), ("a.txt", 10), ("c.txt", 1)] {
+            std::fs::write(dir.path().join(n), vec![b'x'; len]).unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        find_in_form(&mut app, "*.txt", None);
+        wait_found(&mut app);
+        let shown = |app: &App| match &app.mode {
+            Mode::Found(f) => f
+                .shown()
+                .map(|h| (h.entry.size, h.entry.name.clone()))
+                .collect::<Vec<_>>(),
+            _ => panic!("no results"),
+        };
+        let names = |app: &App| {
+            shown(app)
+                .iter()
+                .map(|(_, n)| {
+                    Path::new(n)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        with(&mut app, KeyCode::F(6), KeyModifiers::CONTROL);
+        assert!(matches!(app.mode, Mode::Found(_)));
+        assert_eq!(names(&app), ["c.txt", "b.txt", "a.txt"]);
+        key(&mut app, KeyCode::Home); // on c.txt
+        with(&mut app, KeyCode::F(6), KeyModifiers::CONTROL);
+        assert_eq!(names(&app), ["a.txt", "b.txt", "c.txt"]);
+        assert!(
+            matches!(&app.mode, Mode::Found(f) if f.sel == 2 && fmt::found_title(f).contains("[size desc]"))
+        );
+        with(&mut app, KeyCode::F(4), KeyModifiers::CONTROL);
+        assert_eq!(names(&app), ["a.txt", "b.txt", "c.txt"]);
+        assert!(matches!(&app.mode, Mode::Found(f) if fmt::found_title(f).contains("[name]")));
+    }
+
+    #[test]
+    fn found_sort_keeps_streamed_hits_sorted() {
+        let (tx, rx) = mpsc::channel();
+        let mut f = Found {
+            list: Vec::new(),
+            view: Vec::new(),
+            filter: Filter::default(),
+            sort: None,
+            sel: 0,
+            running: true,
+            remote: false,
+            error: Arc::default(),
+            re: None,
+            query: find::Query::default(),
+            rx,
+            cancel: Arc::default(),
+        };
+        f.set_sort(FoundSort::Size);
+        let hit = |size| Hit {
+            entry: Entry {
+                size,
+                name: OsString::from(format!("n{size}")),
+                is_dir: false,
+                is_symlink: false,
+                modified: None,
+                link: None,
+            },
+            line: None,
+        };
+        for size in [5, 1, 9] {
+            tx.send(hit(size)).unwrap();
+        }
+        f.pump();
+        for size in [3, 7, 0] {
+            tx.send(hit(size)).unwrap();
+        }
+        f.pump();
+        let sizes: Vec<u64> = f.shown().map(|h| h.entry.size).collect();
+        assert_eq!(sizes, [0, 1, 3, 5, 7, 9]);
+        assert_eq!(f.shown_len(), 6);
+        // A filter keeps the cursor row, not an arbitrary hit of the unsorted view.
+        f.sel = 0;
+        f.filter.line = LineEdit::from("n".to_owned());
+        f.rebuild();
+        assert_eq!(
+            (f.sel, f.shown().next().map(|h| h.entry.size)),
+            (0, Some(0))
+        );
+    }
+
+    #[test]
+    fn found_ctrl_r_searches_again_and_slash_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("B.txt"), "x").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        find_in_form(&mut app, "*.txt", None);
+        wait_found(&mut app);
+        std::fs::write(dir.path().join("c.txt"), "x").unwrap();
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        wait_found(&mut app);
+        let n = |app: &App| match &app.mode {
+            Mode::Found(f) => (f.list.len(), f.shown_len()),
+            _ => panic!("no results"),
+        };
+        assert_eq!(n(&app), (3, 3));
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "b.");
+        assert_eq!(n(&app), (3, 1));
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter); // panelizes the shown result only
+        assert_eq!(app.panels[0].entries().len(), 1);
+    }
+
+    #[test]
+    fn found_enter_with_empty_filter_keeps_results() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        find_in_form(&mut app, "*.txt", None);
+        wait_found(&mut app);
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "zzz");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.mode, Mode::Found(f) if f.shown_len() == 0));
+    }
+
+    #[test]
+    fn q_and_f10_close_found_results_and_the_menu() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        find_in_form(&mut app, "*", None);
+        wait_found(&mut app);
+        key(&mut app, KeyCode::Char('q'));
+        assert!(matches!(app.mode, Mode::Normal));
+        key(&mut app, KeyCode::F(9));
+        key(&mut app, KeyCode::F(10));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn found_lines_open_at_match_and_feed_the_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::create_dir(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/b.txt"), "x\nhello one\ny\nhello two\n").unwrap();
+        let mut app = two_panels(d, d);
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        form_focus(&mut app, F_EVERY);
+        key(&mut app, KeyCode::Char(' '));
+        form_focus(&mut app, F_CONTENT);
+        type_keys(&mut app, "hello");
+        key(&mut app, KeyCode::Enter);
+        wait_found(&mut app);
+        let Mode::Found(f) = &app.mode else {
+            panic!("no results");
+        };
+        let lines: Vec<_> = f.list.iter().map(|h| h.line.clone().unwrap().0).collect();
+        assert_eq!(lines, [2, 4]);
+        assert!(fmt::found_row(&f.list[1]).ends_with("b.txt:4: hello two"));
+        // F3 opens the second hit at its line; closing the viewer brings the list back
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        let Mode::View { view, .. } = &mut app.mode else {
+            panic!("no viewer");
+        };
+        assert_eq!(view.lines(1, 80).unwrap(), ["hello two"]);
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        assert!(matches!(&app.mode, Mode::Found(f) if f.sel == 1));
+        // Enter: one panel row per file, shown below the search root; F3 there at the first hit
+        key(&mut app, KeyCode::Enter);
+        let file = d.join("sub").join("b.txt");
+        assert_eq!(app.panels[0].entries().len(), 1);
+        assert_eq!(app.panels[0].hit_line(file.as_os_str()), Some(2));
+        let today = jiff::ZonedDateTime::now().date();
+        let shown = &fmt::entry_cols(&app, 0, &app.panels[0].entries()[0], today)[0];
+        assert_eq!(
+            shown.trim(),
+            Path::new("sub").join("b.txt").to_string_lossy()
+        );
+        key(&mut app, KeyCode::F(3));
+        let Mode::View { view, .. } = &mut app.mode else {
+            panic!("no viewer");
+        };
+        assert_eq!(view.lines(1, 80).unwrap(), ["hello one"]);
+        assert!(app.search.as_ref().is_some_and(|re| re.is_match("hello")));
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        // F4 puts the editor cursor on the hit
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        assert!(matches!(&app.mode, Mode::Edit { editor, .. } if editor.cursor.0 == 1));
+        key(&mut app, KeyCode::Esc);
+        // Ctrl+G: the real directory with the cursor on the file
+        with(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        settle(&mut app);
+        let p = &app.panels[0];
+        assert!(!p.is_virtual() && p.path() == d.join("sub"));
+        assert_eq!(p.current().unwrap().name, "b.txt");
+    }
+
+    #[test]
+    fn saved_searches_save_load_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        let file = dir.path().join("searches");
+        app.searches_file = Some(file.clone());
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        type_keys(&mut app, "*.rs");
+        form_focus(&mut app, F_HIDDEN);
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::F(2)); // no name yet
+        assert!(
+            matches!(&app.mode, Mode::FindForm(f) if f.error.as_deref().is_some_and(|e| e.contains("name")))
+        );
+        form_focus(&mut app, F_SAVED);
+        type_keys(&mut app, "rust");
+        key(&mut app, KeyCode::F(2));
+        assert_eq!(cmdline::load_history(&file).unwrap().len(), 1);
+        key(&mut app, KeyCode::Esc);
+        app.last_find = None; // a fresh form
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        key(&mut app, KeyCode::F(3));
+        let Mode::FindForm(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!((f.text(F_NAME), f.text(F_SAVED)), ("*.rs", "rust"));
+        assert!(f.checked(F_HIDDEN) && !f.checked(F_FOLLOW));
+        key(&mut app, KeyCode::F(8));
+        assert!(cmdline::load_history(&file).unwrap().is_empty());
+    }
+}

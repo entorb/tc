@@ -489,3 +489,266 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::xfer::{FileClip, delete_text};
+    use super::super::{App, Mode, Op};
+
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    use std::ffi::OsStr;
+
+    use tc_core::panel::Panel;
+
+    use tc_core::vfs::Side;
+
+    use super::super::tests::{key, rows, settle, two_panels, type_keys, type_text, wait, with};
+
+    #[test]
+    fn delete_confirm_text_trash_choice_and_permanent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("d")).unwrap();
+        for n in ["a", "b", "c"] {
+            std::fs::write(dir.path().join(n), "").unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        for c in "+".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        type_text(&mut app, ""); // select all files
+        key(&mut app, KeyCode::Down); // "d"
+        key(&mut app, KeyCode::Char(' ')); // select the dir too
+        key(&mut app, KeyCode::F(8));
+        let Mode::Confirm(_, _, text) = &app.mode else {
+            panic!("no confirm")
+        };
+        assert!(text.contains("recursively") && text.contains('…'));
+        key(&mut app, KeyCode::Esc);
+        assert!(dir.path().join("a").exists() && dir.path().join("d").exists());
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        assert!(!dir.path().join("a").exists() && !dir.path().join("d").exists());
+    }
+
+    #[test]
+    fn clipboard_and_paste() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        with(&mut app, KeyCode::Insert, KeyModifiers::CONTROL);
+        assert_eq!(
+            app.copied.take(),
+            Some(dir.path().join("a.txt").display().to_string())
+        );
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        with(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+        with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.copied.as_deref(), Some("o"));
+        app.on_paste("a\r\nb".into());
+        assert_eq!(rows(&mut app)[..2], ["a", "bne"]);
+    }
+
+    #[test]
+    fn conflict_dialog_overwrite_all_and_rename() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(left.path().join(f), "new").unwrap();
+            std::fs::write(right.path().join(f), "old").unwrap();
+        }
+        let mut app = App::new(
+            Panel::open(left.path()).unwrap(),
+            Panel::open(right.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        key(&mut app, KeyCode::Char('r'));
+        key(&mut app, KeyCode::Char('2'));
+        key(&mut app, KeyCode::Enter); // "a2"
+        wait(&mut app);
+        key(&mut app, KeyCode::Char('O')); // overwrite all
+        wait(&mut app);
+        assert!(matches!(app.mode, Mode::Normal));
+        let read = |f| std::fs::read_to_string(right.path().join(f)).unwrap();
+        assert_eq!(
+            (read("a"), read("a2"), read("b")),
+            ("old".into(), "new".into(), "new".into())
+        );
+    }
+
+    #[test]
+    fn mkdir_then_copy_to_other_panel() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Panel::open(left.path()).unwrap(),
+            Panel::open(right.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::F(7));
+        for c in "new".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Enter);
+        assert!(left.path().join("new").is_dir());
+        assert_eq!(app.panels[0].current().unwrap().name, "..");
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(5));
+        assert!(matches!(app.mode, Mode::Transfer(Op::Copy, _, _)));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(right.path().join("new").is_dir());
+        assert!(matches!(app.mode, Mode::Normal));
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(matches!(app.mode, Mode::Normal)); // existing dir is merged, no conflict
+        // copy in the current dir under a new name (relative to the active panel)
+        key(&mut app, KeyCode::F(5));
+        for _ in 0..right.path().display().to_string().len() + 5 {
+            key(&mut app, KeyCode::Backspace);
+        }
+        for c in "copy".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(left.path().join("copy").is_dir());
+    }
+
+    #[test]
+    fn remote_panel_copy_delete_mkdir_and_blocked_keys() {
+        let left = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("a"), "data").unwrap();
+        let mem = tc_core::vfs::mem::Mem::new();
+        let mut app = two_panels(left.path(), left.path());
+        app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
+        settle(&mut app);
+        assert_eq!(app.panels[1].title(), "mem:///");
+        // upload: the prefilled absolute path is on the other panel's side
+        app.panels[0].focus(OsStr::new("a"));
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(mem.get("/a").unwrap(), b"data");
+        // download it back under a new name
+        key(&mut app, KeyCode::Tab);
+        app.panels[1].focus(OsStr::new("a"));
+        key(&mut app, KeyCode::F(5));
+        let Mode::Transfer(_, _, l) = &mut app.mode else {
+            panic!("no transfer prompt")
+        };
+        l.text.push_str(".back");
+        key(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(std::fs::read(left.path().join("a.back")).unwrap(), b"data");
+        // delete: no trash on remote, only `p`
+        key(&mut app, KeyCode::F(8));
+        assert!(matches!(&app.mode, Mode::Confirm(_, _, t) if t.contains("No trash")));
+        key(&mut app, KeyCode::Char('y'));
+        assert!(matches!(app.mode, Mode::Confirm(..)));
+        key(&mut app, KeyCode::Char('p'));
+        settle(&mut app);
+        assert!(mem.get("/a").is_none());
+        key(&mut app, KeyCode::F(7));
+        type_keys(&mut app, "d");
+        key(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(mem.paths(), ["/", "/d"]);
+        with(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(matches!(&app.mode, Mode::FindForm(_)));
+        key(&mut app, KeyCode::Esc);
+        // ".." at the remote root goes back to the local directory
+        app.panels[1].set_cursor(0);
+        key(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert!(app.panels[1].remote().is_none());
+        assert_eq!(app.panels[1].path(), left.path());
+    }
+
+    #[test]
+    fn delete_text_lists_the_answers_and_no_trash_on_remote() {
+        let local = delete_text("Delete a?".into(), true, false);
+        assert!(
+            local.contains("recursively")
+                && local.ends_with("[y] Trash   [p] Delete permanently   [Esc] Cancel")
+        );
+        let remote = delete_text("Delete a?".into(), false, true);
+        assert!(
+            !remote.contains("[y]") && remote.ends_with("[p] Delete permanently   [Esc] Cancel")
+        );
+    }
+
+    #[test]
+    fn ctrl_v_pastes_changed_host_files_before_app_clip() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("h.txt"), "host\n").unwrap();
+        std::fs::write(src.path().join("a.txt"), "app\n").unwrap();
+        let mut app = two_panels(src.path(), dst.path());
+        key(&mut app, KeyCode::Tab); // paste into the destination panel
+        // host files: pasted once, then the app clipboard is used again
+        app.paste_with(vec![src.path().join("h.txt")]);
+        wait(&mut app);
+        assert!(dst.path().join("h.txt").exists());
+        app.file_clip = Some(FileClip {
+            op: Op::Copy,
+            paths: vec![src.path().join("a.txt")],
+            side: Side::Local,
+        });
+        app.paste_with(vec![src.path().join("h.txt")]);
+        wait(&mut app);
+        assert!(dst.path().join("a.txt").exists());
+    }
+
+    #[test]
+    fn failed_cut_paste_keeps_the_clip() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let mut app = two_panels(src.path(), dst.path());
+        app.file_clip = Some(FileClip {
+            op: Op::Move,
+            paths: vec![src.path().join("gone.txt")],
+            side: Side::Local,
+        });
+        key(&mut app, KeyCode::Tab);
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(app.file_clip.is_some() && !dst.path().join("gone.txt").exists());
+    }
+
+    #[test]
+    fn ctrl_c_v_copies_and_ctrl_x_v_moves_between_panels() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), "one\n").unwrap();
+        std::fs::write(src.path().join("b.txt"), "two\n").unwrap();
+        let mut app = two_panels(src.path(), dst.path());
+        key(&mut app, KeyCode::Down); // a.txt, the first entry after ".."
+        with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Tab); // paste into the other panel
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(dst.path().join("a.txt").exists() && src.path().join("a.txt").exists());
+        // cut b.txt from the left panel and paste it into the right one: it moves
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Down); // b.txt
+        with(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Tab);
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(dst.path().join("b.txt").exists() && !src.path().join("b.txt").exists());
+        assert!(app.file_clip.is_none());
+        // nothing left to paste
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(matches!(&app.mode, Mode::Message(m) if m.starts_with("Nothing copied")));
+    }
+}

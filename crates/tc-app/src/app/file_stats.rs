@@ -486,3 +486,389 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::{App, Mode};
+
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+
+    use super::super::tests::{key, settle, two_panels, type_keys, type_text, wait, with};
+
+    #[test]
+    fn stats_deletes_without_rescan_and_runs_cmd_in_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("many")).unwrap();
+        std::fs::write(tmp.path().join("many").join("a"), "x").unwrap();
+        std::fs::write(tmp.path().join("big"), "x".repeat(100)).unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('n'));
+        assert!(tmp.path().join("big").exists());
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        app.tick();
+        assert!(!tmp.path().join("big").exists());
+        match &app.mode {
+            Mode::Stats(st) => {
+                assert_eq!((st.root.size, st.root.files), (1, 1));
+                assert_eq!(st.current().children[0].name, "many");
+            }
+            _ => panic!("not in stats"),
+        }
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char(':'));
+        type_text(&mut app, "ls");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.run, Some(("ls".into(), tmp.path().join("many"), None)));
+        app.tick();
+        assert!(matches!(app.mode, Mode::Stats(_)));
+    }
+
+    fn stats_app(dir: &Path) -> App {
+        let mut app = two_panels(dir, dir);
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        app
+    }
+
+    #[test]
+    fn stats_feeds_entries_to_panel() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "x".repeat(30)).unwrap();
+        std::fs::write(tmp.path().join("b"), "x".repeat(20)).unwrap();
+        std::fs::create_dir(tmp.path().join("c")).unwrap();
+        let names = |app: &App| -> Vec<PathBuf> {
+            let p = &app.panels[app.active];
+            assert!(p.is_virtual());
+            p.entries().iter().map(|e| PathBuf::from(&e.name)).collect()
+        };
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Insert); // b
+        key(&mut app, KeyCode::Char('p'));
+        assert!(matches!(app.mode, Mode::Normal));
+        settle(&mut app);
+        assert_eq!(names(&app), [tmp.path().join("b")]);
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Char('p'));
+        settle(&mut app);
+        let mut all = names(&app);
+        all.sort();
+        assert_eq!(all, ["a", "b", "c"].map(|n| tmp.path().join(n)));
+    }
+
+    #[test]
+    fn stats_marks_and_deletes_all_marked() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (n, size) in [("a", 30), ("b", 20), ("c", 10)] {
+            std::fs::write(tmp.path().join(n), "x".repeat(size)).unwrap();
+        }
+        #[cfg(target_os = "linux")] // macOS APFS rejects non-UTF-8 names (EILSEQ)
+        let odd = {
+            use std::os::unix::ffi::OsStrExt;
+            let odd = OsStr::from_bytes(b"f\xff");
+            std::fs::write(tmp.path().join(odd), "x").unwrap();
+            odd
+        };
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Char(' ')); // a, moves down
+        key(&mut app, KeyCode::Insert); // b
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Insert); // b unmarked again, moves down
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Insert); // b marked
+        key(&mut app, KeyCode::F(8));
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert!(st.confirm.as_ref().is_some_and(|t| t.contains("2 items (")));
+        key(&mut app, KeyCode::Char('p'));
+        app.tick();
+        assert!(!tmp.path().join("a").exists() && !tmp.path().join("b").exists());
+        assert!(tmp.path().join("c").exists());
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert_eq!(
+            st.root.size,
+            if cfg!(target_os = "linux") { 11 } else { 10 }
+        );
+        assert!(st.marked.is_empty());
+        #[cfg(target_os = "linux")]
+        {
+            assert!(tmp.path().join(odd).exists());
+            assert_eq!(st.root.files, 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stats_batch_stops_at_first_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "x".repeat(30)).unwrap();
+        let ro = tmp.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::write(ro.join("f"), "x".repeat(20)).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let restore = || std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755));
+        if std::fs::write(ro.join("probe"), "").is_ok() {
+            return restore().unwrap(); // root ignores permissions
+        }
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Insert); // a
+        key(&mut app, KeyCode::Insert); // ro
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        assert!(matches!(app.mode, Mode::Message(_)));
+        app.tick();
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert!(!tmp.path().join("a").exists() && ro.join("f").exists());
+        let names: Vec<_> = st.root.children.iter().map(|n| n.name.clone()).collect();
+        assert_eq!(names, ["ro"]);
+        assert!(st.marked.contains(OsStr::new("ro")));
+        restore().unwrap();
+    }
+
+    #[test]
+    fn remote_stats_deletes_all_marked() {
+        let left = tempfile::tempdir().unwrap();
+        let mem = tc_core::vfs::mem::Mem::new();
+        for (n, size) in [("/a", 3), ("/b", 2), ("/c", 1)] {
+            mem.put(n, &b"x".repeat(size));
+        }
+        let mut app = two_panels(left.path(), left.path());
+        app.active = 1;
+        app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
+        settle(&mut app);
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        settle(&mut app);
+        app.tick();
+        assert!(mem.get("/a").is_none() && mem.get("/b").is_none() && mem.get("/c").is_some());
+        assert!(
+            matches!(&app.mode, Mode::Stats(st) if st.root.size == 1 && st.current().children.len() == 1)
+        );
+    }
+
+    #[test]
+    fn slash_filters_stats_and_acts_on_shown_rows_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (n, size) in [("Alpha", 30), ("beta", 20), ("gamma", 10)] {
+            std::fs::write(tmp.path().join(n), "x".repeat(size)).unwrap();
+        }
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        let shown = |app: &App| match &app.mode {
+            Mode::Stats(st) => st
+                .shown()
+                .map(|n| n.name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            _ => panic!("not in stats"),
+        };
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "AM");
+        assert_eq!(shown(&app), ["gamma"]);
+        key(&mut app, KeyCode::Enter);
+        // delete acts on the shown row, not on the first child
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        app.tick();
+        assert!(!tmp.path().join("gamma").exists() && tmp.path().join("Alpha").exists());
+        assert!(shown(&app).is_empty());
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(shown(&app), ["Alpha", "beta"]);
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn stats_info_popup_and_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f"), "abc").unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::Char('i'));
+        let Mode::Message(text) = &app.mode else {
+            panic!("no popup")
+        };
+        assert!(
+            text.contains(&*tmp.path().join("f").to_string_lossy())
+                && text.contains("Files:       1")
+        );
+        key(&mut app, KeyCode::Char('x'));
+        app.tick();
+        assert!(matches!(app.mode, Mode::Stats(_)));
+    }
+
+    #[test]
+    fn stats_sorts_toggles_count_and_browses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let many = tmp.path().join("many");
+        std::fs::create_dir(&many).unwrap();
+        for n in ["a", "b", "c"] {
+            std::fs::write(many.join(n), "x").unwrap();
+        }
+        std::fs::write(tmp.path().join("big"), "x".repeat(100)).unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        let top = |app: &App| match &app.mode {
+            Mode::Stats(st) => st.current().children[st.sel].name.clone(),
+            _ => panic!("not in stats"),
+        };
+        assert_eq!(top(&app), "big");
+        key(&mut app, KeyCode::Tab); // only the shown value changes
+        assert_eq!(top(&app), "big");
+        key(&mut app, KeyCode::Char('s')); // active key again: smallest first
+        assert_eq!(top(&app), "big"); // cursor stays on its entry
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert_eq!(st.current().children[0].name, "many");
+        key(&mut app, KeyCode::Char('C'));
+        assert_eq!(top(&app), "big");
+        key(&mut app, KeyCode::Home);
+        assert_eq!(top(&app), "many");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(top(&app), "a");
+        key(&mut app, KeyCode::Backspace);
+        assert_eq!(top(&app), "many");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::F(3));
+        assert!(matches!(app.mode, Mode::View { .. }));
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        assert_eq!(top(&app), "a"); // back in stats after the viewer
+        key(&mut app, KeyCode::F(10));
+        assert!(matches!(app.mode, Mode::Normal) && !app.quit);
+    }
+
+    /// File Stats on a remote panel: scan, view, `:` over ssh and permanent delete.
+    #[test]
+    fn remote_stats_view_cmd_and_delete() {
+        let left = tempfile::tempdir().unwrap();
+        let mem = tc_core::vfs::mem::Mem::new();
+        mem.dir("/d");
+        mem.put("/d/f", b"xyz");
+        let mut app = two_panels(left.path(), left.path());
+        app.active = 1;
+        app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
+        settle(&mut app);
+        // `:` on the panel runs over ssh in the panel directory
+        key(&mut app, KeyCode::Char(':'));
+        type_keys(&mut app, "ls");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.run,
+            Some(("ls".into(), "/".into(), Some("mem://".into())))
+        );
+        app.run = None;
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        assert!(matches!(&app.mode, Mode::Stats(st) if (st.root.size, st.root.files) == (3, 1)));
+        key(&mut app, KeyCode::Enter); // into "d"
+        key(&mut app, KeyCode::F(3));
+        settle(&mut app);
+        assert!(matches!(&app.mode, Mode::View { title, .. } if title.ends_with("/d/f")));
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        // F4 edits a temp copy and uploads it on save
+        key(&mut app, KeyCode::F(4));
+        settle(&mut app);
+        assert!(matches!(app.mode, Mode::Edit { .. }));
+        key(&mut app, KeyCode::Char('x'));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Char('y'));
+        wait(&mut app);
+        app.tick();
+        assert_eq!(mem.get("/d/f").unwrap(), b"xxyz");
+        assert!(matches!(app.mode, Mode::Stats(_)) && app.edit_remote.is_none());
+        key(&mut app, KeyCode::Char(':'));
+        type_keys(&mut app, "ls");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.run, Some((c, _, Some(u))) if c == "ls" && u == "mem://"));
+        app.run = None;
+        app.tick();
+        key(&mut app, KeyCode::F(8));
+        assert!(
+            matches!(&app.mode, Mode::Stats(st) if st.confirm.as_ref().is_some_and(|t| t.contains("No trash")))
+        );
+        key(&mut app, KeyCode::Char('y')); // no trash: ignored
+        key(&mut app, KeyCode::Char('p'));
+        settle(&mut app);
+        app.tick();
+        assert!(mem.get("/d/f").is_none());
+        assert!(
+            matches!(&app.mode, Mode::Stats(st) if st.root.size == 0 && st.current().children.is_empty())
+        );
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+    }
+
+    #[test]
+    fn stats_ctrl_r_rescans_subtree_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        std::fs::write(tmp.path().join("sub/x"), "123").unwrap();
+        std::fs::write(tmp.path().join("y"), "12345").unwrap();
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Down); // sub (3 bytes) below y
+        key(&mut app, KeyCode::Enter);
+        std::fs::write(tmp.path().join("sub/z"), "x".repeat(10)).unwrap();
+        // Esc cancels and keeps the old tree
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(&app.mode, Mode::Stats(st) if !st.scanning() && st.root.size == 8));
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert_eq!((st.current().files, st.current().size), (2, 13));
+        assert_eq!((st.root.files, st.root.size), (3, 18));
+        key(&mut app, KeyCode::Backspace);
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert!(st.current().children.iter().any(|n| n.name == "y"));
+    }
+
+    #[test]
+    fn stats_ctrl_r_after_shrink_keeps_cursor_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "1234567").unwrap();
+        std::fs::write(tmp.path().join("b"), "12").unwrap();
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Down); // b, the last row
+        std::fs::remove_file(tmp.path().join("a")).unwrap();
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert_eq!((st.current().children.len(), st.root.size), (1, 2));
+        assert_eq!(st.selected().map(|n| n.name.clone()), Some("b".into()));
+    }
+}

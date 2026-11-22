@@ -119,3 +119,99 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::{App, ListRow, Mode};
+
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use tc_core::panel::Panel;
+
+    use super::super::tests::{key, two_panels, type_keys, with};
+    use tc_core::hotlist;
+
+    #[test]
+    fn slash_filters_bookmarks_and_enter_goes_to_the_shown_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("one"), tmp.path().join("two"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        app.hotlist = vec![hotlist::Bookmark::new(a), hotlist::Bookmark::new(b.clone())];
+        with(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "TW");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.panels[app.active].path(), b);
+    }
+
+    #[test]
+    fn hotlist_insert_alias_and_reorder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let mut app = two_panels(&a, &b);
+        let file = tmp.path().join("cfg").join("hotlist");
+        app.hotlist_file = Some(file.clone());
+        with(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert); // no duplicate
+        assert_eq!(app.hotlist.len(), 1);
+        app.hotlist = vec![hotlist::Bookmark::new(a), hotlist::Bookmark::new(b)];
+        key(&mut app, KeyCode::F(4));
+        type_keys(&mut app, "Work");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Hotlist(0)));
+        let saved = hotlist::load_bookmarks(&file).unwrap();
+        assert_eq!(saved[0].alias, "Work");
+        assert!(saved[0].label().starts_with("Work  "));
+        with(&mut app, KeyCode::Down, KeyModifiers::CONTROL);
+        assert!(matches!(app.mode, Mode::Hotlist(1)));
+        assert_eq!(hotlist::load_bookmarks(&file).unwrap()[1].alias, "Work");
+        // filter active: positions are ambiguous, nothing moves
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "work");
+        key(&mut app, KeyCode::Enter);
+        with(&mut app, KeyCode::Up, KeyModifiers::CONTROL);
+        assert_eq!(app.hotlist[1].alias, "Work");
+    }
+
+    #[test]
+    fn hotlist_add_jump_delete_and_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = App::new(Panel::open(&sub).unwrap(), Panel::open(tmp.path()).unwrap());
+        let file = tmp.path().join("cfg").join("hotlist");
+        app.hotlist_file = Some(file.clone());
+        let ctrl =
+            |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'd');
+        ctrl(&mut app, 'd'); // no duplicate
+        assert_eq!(
+            hotlist::load_bookmarks(&file).unwrap(),
+            [hotlist::Bookmark::new(app.panels[0].path().to_owned())]
+        );
+        key(&mut app, KeyCode::Tab);
+        ctrl(&mut app, 'b');
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.panels[1].path(), sub);
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(app.panels[1].path(), tmp.path());
+        // vanished dir: error popup, panel unchanged
+        std::fs::remove_dir(&sub).unwrap();
+        ctrl(&mut app, 'b');
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Message(_)));
+        assert_eq!(app.panels[1].path(), tmp.path());
+        key(&mut app, KeyCode::Esc);
+        ctrl(&mut app, 'b');
+        key(&mut app, KeyCode::Backspace); // same as Delete
+        assert!(app.hotlist.is_empty() && hotlist::load_bookmarks(&file).unwrap().is_empty());
+    }
+}

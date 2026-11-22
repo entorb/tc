@@ -188,3 +188,105 @@ impl Procs {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::menu::PROCS_FOOTER;
+
+    use super::Procs;
+
+    use super::super::{App, Mode};
+
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    use tc_core::procs::ProcSort;
+
+    use super::super::tests::{key, settle, two_panels, type_keys, with};
+
+    fn procs(app: &App) -> &Procs {
+        match &app.mode {
+            Mode::Procs(p) => p,
+            _ => panic!("not in the process monitor"),
+        }
+    }
+
+    /// Tick until the next snapshot arrives.
+    fn procs_wait(app: &mut App) {
+        let before = procs(app).snap.clone();
+        let t = std::time::Instant::now();
+        while procs(app).snap == before && t.elapsed() < std::time::Duration::from_secs(5) {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Ctrl+P: snapshot arrives, sort toggles, filter narrows and clears, Esc closes.
+    #[test]
+    fn process_monitor_sort_filter_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        while procs(&app).rows.is_empty() {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let all = procs(&app).rows.len();
+        assert!(app.idle());
+        assert_eq!(app.footer_keys(), &PROCS_FOOTER);
+        key(&mut app, KeyCode::Char('p'));
+        let p = procs(&app);
+        assert_eq!((p.sort, p.rev), (ProcSort::Pid, false));
+        let pids: Vec<u32> = p.rows.iter().map(|&i| p.snap.procs[i].pid).collect();
+        assert!(pids.is_sorted());
+        key(&mut app, KeyCode::Char('p'));
+        assert!(procs(&app).rev);
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, &std::process::id().to_string());
+        let p = procs(&app);
+        assert!(p.filter.editing && p.rows.len() < all);
+        assert_eq!(p.current().map(|c| c.pid), Some(std::process::id()));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(procs(&app).rows.len(), all);
+        // the cursor keeps its row across refreshes
+        key(&mut app, KeyCode::Down);
+        procs_wait(&mut app);
+        assert_eq!(procs(&app).sel, 1);
+        key(&mut app, KeyCode::Char('s'));
+        assert_eq!(procs(&app).every_edit.as_ref().unwrap().text, "2");
+        with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "0,5");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(procs(&app).every, std::time::Duration::from_millis(500));
+        key(&mut app, KeyCode::Char('s'));
+        with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "0");
+        key(&mut app, KeyCode::Enter);
+        let p = procs(&app);
+        assert_eq!(p.every, std::time::Duration::from_millis(500));
+        assert!(p.status.contains("0.5 to 3600"));
+        key(&mut app, KeyCode::F(8));
+        assert!(procs(&app).confirm.is_some());
+        key(&mut app, KeyCode::Char('n'));
+        assert!(procs(&app).confirm.is_none());
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    /// A connection that cannot run commands (FTP) reports it instead of an empty list.
+    #[test]
+    fn process_monitor_needs_commands_on_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        app.panels[0]
+            .open_remote(tc_core::vfs::mem::Mem::new(), "/".into())
+            .unwrap();
+        settle(&mut app);
+        with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        while matches!(app.mode, Mode::Procs(_)) {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(&app.mode, Mode::Message(m) if m.contains("no commands")));
+    }
+}

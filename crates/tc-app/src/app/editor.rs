@@ -680,3 +680,343 @@ impl App {
         self.finish(None);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::find_files::Found;
+
+    use super::super::{App, Filter, Mode, Step};
+
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use std::sync::Arc;
+    use std::sync::mpsc;
+
+    use tc_core::find;
+
+    use tc_core::panel::Panel;
+
+    use super::super::tests::{key, rows, two_panels, type_text, wait, with};
+
+    #[test]
+    fn edit_save_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi  \r\n").unwrap();
+        let p = Panel::open(dir.path()).unwrap();
+        let mut app = App::new(p, Panel::open(dir.path()).unwrap());
+        key(&mut app, KeyCode::Down); // skip ".."
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        assert!(matches!(app.mode, Mode::Edit { .. }));
+        key(&mut app, KeyCode::Char('x'));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::AskExit(_)));
+        key(&mut app, KeyCode::Char('y'));
+        assert!(matches!(
+            app.mode,
+            Mode::AskSave {
+                step: Step::Eol,
+                ..
+            }
+        ));
+        key(&mut app, KeyCode::Char('y')); // to LF
+        wait(&mut app);
+        assert!(matches!(app.mode, Mode::Normal));
+        let text = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
+        assert_eq!(text, "xhi\n");
+    }
+
+    #[test]
+    fn large_file_asks_for_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = std::fs::File::create(dir.path().join("big")).unwrap();
+        f.set_len((1 << 30) + 1).unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        assert!(matches!(app.mode, Mode::AskViewer { .. }));
+        key(&mut app, KeyCode::Char('y'));
+        assert!(matches!(app.mode, Mode::View { .. }));
+        app.mode = Mode::Normal;
+        key(&mut app, KeyCode::F(4));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn editor_shift_up_down_selects() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        with(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
+        with(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
+        assert_eq!(
+            app.mode.editor_mut().unwrap().copy().as_deref(),
+            Some("one\ntwo\n")
+        );
+        with(&mut app, KeyCode::Up, KeyModifiers::SHIFT);
+        assert_eq!(
+            app.mode.editor_mut().unwrap().copy().as_deref(),
+            Some("one\n")
+        );
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.mode.editor_mut().unwrap().copy(), None);
+    }
+
+    #[test]
+    fn editor_replace_each_and_reload_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "ab ab\nab\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::ALT);
+        type_text(&mut app, "ab");
+        type_text(&mut app, "X");
+        key(&mut app, KeyCode::Char('y')); // first ab -> X
+        key(&mut app, KeyCode::Char('n')); // second skipped
+        key(&mut app, KeyCode::Char('a')); // rest
+        assert!(app.replacing.is_none());
+        let ed = app.mode.editor_mut().unwrap();
+        assert_eq!(ed.visible(5, 9), ["X ab", "X", ""]);
+
+        // someone else writes the file: saving asks first
+        std::fs::write(&f, "other\n").unwrap();
+        let t = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        key(&mut app, KeyCode::F(2));
+        assert!(matches!(
+            app.mode,
+            Mode::AskSave {
+                step: Step::Changed,
+                ..
+            }
+        ));
+        key(&mut app, KeyCode::Char('n'));
+        assert!(matches!(app.mode, Mode::Edit { .. }));
+        key(&mut app, KeyCode::F(2));
+        key(&mut app, KeyCode::Char('y'));
+        wait(&mut app);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "X ab\nX\n");
+    }
+
+    #[test]
+    fn editor_find_replace_undo_clipboard() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo one\n").unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+
+        key(&mut app, KeyCode::F(7));
+        type_text(&mut app, "(");
+        assert_eq!(
+            app.input
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref()
+                .map(str::is_empty),
+            Some(false)
+        );
+        key(&mut app, KeyCode::Backspace);
+        assert!(app.input.as_ref().unwrap().error.is_none());
+        type_text(&mut app, "ONE"); // smart case: uppercase is exact, no match
+        assert!(app.input.is_none());
+        assert_eq!(app.note, "not found");
+        key(&mut app, KeyCode::F(3)); // next with the last search
+        key(&mut app, KeyCode::F(7));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::F(7));
+        type_text(&mut app, "one");
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (0, 0));
+        key(&mut app, KeyCode::F(3));
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (1, 4));
+        key(&mut app, KeyCode::F(3));
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (0, 0));
+
+        let ctrl =
+            |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'c'); // match is selected
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::End);
+        ctrl(&mut app, 'v');
+        assert_eq!(rows(&mut app), ["one", "two oneone", ""]);
+        ctrl(&mut app, 'z');
+        assert_eq!(rows(&mut app), ["one", "two one", ""]);
+
+        key(&mut app, KeyCode::F(4));
+        type_text(&mut app, "o(n)e");
+        assert!(app.input.is_some());
+        type_text(&mut app, "[${1}]");
+        assert_eq!(app.note, "2 replaced");
+        assert_eq!(rows(&mut app), ["[n]", "two [n]", ""]);
+
+        ctrl(&mut app, 'g');
+        type_text(&mut app, "2");
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (1, 0));
+    }
+
+    #[test]
+    fn viewer_next_prev_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a.txt", "b.png", "c.txt"] {
+            std::fs::write(dir.path().join(n), "x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        let a = app.panels[0]
+            .entries()
+            .iter()
+            .position(|e| e.name == "a.txt")
+            .unwrap();
+        app.panels[0].set_cursor(a);
+        key(&mut app, KeyCode::F(3));
+        key(&mut app, KeyCode::Char('h'));
+        let alt = |app: &mut App, code| with(app, code, KeyModifiers::ALT);
+        let title = |app: &App| match &app.mode {
+            Mode::View { title, view } => (title.clone(), view.hex()),
+            _ => panic!("not in viewer"),
+        };
+        alt(&mut app, KeyCode::Right);
+        assert!(title(&app).0.ends_with("c.txt") && title(&app).1);
+        assert_eq!(app.panels[0].current().unwrap().name, "c.txt");
+        alt(&mut app, KeyCode::Right);
+        assert_eq!(app.note, "no next file");
+        assert!(title(&app).0.ends_with("c.txt"));
+        alt(&mut app, KeyCode::Left);
+        assert!(title(&app).0.ends_with("a.txt"));
+        alt(&mut app, KeyCode::Left);
+        assert_eq!(app.note, "no previous file");
+
+        alt(&mut app, KeyCode::Char('b'));
+        assert!(title(&app).0.ends_with("a.txt"));
+        alt(&mut app, KeyCode::Char('f'));
+        assert!(title(&app).0.ends_with("c.txt"));
+        // Ctrl+H (some terminals' Backspace) is not the hex toggle
+        with(&mut app, KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert!(title(&app).1);
+
+        app.open_viewer(dir.path().join("c.txt"));
+        app.panels[0].set_cursor(a);
+        alt(&mut app, KeyCode::Right);
+        assert_eq!(app.note, "next / previous file: panel files only");
+
+        // viewer opened from a dialog: panel cursor may match, still no stepping
+        app.note.clear();
+        app.panels[0].set_cursor(a);
+        app.open_viewer(dir.path().join("a.txt"));
+        app.found = Some(Found {
+            list: Vec::new(),
+            view: Vec::new(),
+            filter: Filter::default(),
+            sort: None,
+            sel: 0,
+            running: false,
+            remote: false,
+            error: Arc::default(),
+            re: None,
+            query: find::Query::default(),
+            rx: mpsc::channel().1,
+            cancel: Arc::default(),
+        });
+        alt(&mut app, KeyCode::Right);
+        assert_eq!(app.note, "next / previous file: panel files only");
+    }
+
+    #[test]
+    fn viewer_hex_goto_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.bin"), [b'a'; 64]).unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        key(&mut app, KeyCode::Char('h'));
+        key(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "0x20");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode_view_percent(), 50);
+    }
+
+    #[test]
+    fn viewer_search_and_goto() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a\nb\nfoo\nc\nfoo\n").unwrap();
+        let mut app = App::new(
+            Panel::open(dir.path()).unwrap(),
+            Panel::open(dir.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        key(&mut app, KeyCode::Char('f')); // same as '/'
+        type_text(&mut app, "foo");
+        let top = |app: &mut App| match &mut app.mode {
+            Mode::View { view, .. } => view.lines(1, 10).unwrap(),
+            _ => panic!("not in viewer"),
+        };
+        assert_eq!(top(&mut app), ["foo"]);
+        assert_eq!(app.mode_view_percent(), 28);
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.mode_view_percent(), 71);
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.note, "not found");
+        key(&mut app, KeyCode::Char('N'));
+        assert_eq!(app.mode_view_percent(), 28);
+        key(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "1");
+        assert_eq!(app.mode_view_percent(), 0);
+        key(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "x%");
+        assert!(app.input.as_ref().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn viewer_f4_edits_at_top_line_and_shared_keys_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "a\nb\nFoo\nc\nfoo\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        with(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        type_text(&mut app, "foo");
+        assert_eq!(app.mode_view_percent(), 28);
+        with(&mut app, KeyCode::F(7), KeyModifiers::SHIFT);
+        assert_eq!(app.mode_view_percent(), 71);
+        with(&mut app, KeyCode::Char('c'), KeyModifiers::ALT);
+        assert_eq!(app.note, "case sensitive");
+        with(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        type_text(&mut app, "2");
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        assert_eq!(app.mode.editor_mut().unwrap().cursor.0, 1);
+        // Ctrl+S saves like F2
+        key(&mut app, KeyCode::Char('x'));
+        with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(std::fs::read_to_string(&file).unwrap().starts_with("a\nxb"));
+    }
+}

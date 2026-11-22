@@ -114,3 +114,104 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::{App, Mode};
+    use crate::fmt;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use tc_core::panel::Panel;
+
+    use super::super::tests::{key, type_keys};
+
+    #[test]
+    fn f1_help_opens_on_forms_and_lists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        for (code, mods) in [
+            (KeyCode::Char('f'), KeyModifiers::CONTROL),
+            (KeyCode::Char('b'), KeyModifiers::CONTROL),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL),
+            (KeyCode::F(1), KeyModifiers::ALT),
+        ] {
+            app.on_key(KeyEvent::new(code, mods));
+            let title = fmt::help(&app.mode).0;
+            key(&mut app, KeyCode::F(1));
+            assert!(app.help && title != "Help", "{title} {code:?}");
+            key(&mut app, KeyCode::Esc);
+            assert!(!app.help && !matches!(app.mode, Mode::Normal));
+            key(&mut app, KeyCode::Esc);
+            assert!(matches!(app.mode, Mode::Normal));
+        }
+    }
+
+    #[test]
+    fn help_line_click_runs_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        key(&mut app, KeyCode::F(1));
+        let line = fmt::HELP_MAIN
+            .lines()
+            .position(|l| l.starts_with("Ctrl+B "))
+            .unwrap();
+        app.help_click(line);
+        assert!(!app.help && matches!(app.mode, Mode::Hotlist(_)));
+    }
+
+    #[test]
+    fn f1_help_esc_closes_typing_filters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        key(&mut app, KeyCode::F(1));
+        assert!(app.help);
+        for c in "ncdu".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        let e = app.help_entries();
+        // section title, the entry and its continuation line
+        assert_eq!(e[0].0, "== Highlights ==");
+        assert!(e[1].0.contains("FILE STATS") && e[2].0.starts_with(' '));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.help && app.help_filter.is_empty());
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.help && matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn help_down_scrolls_without_key_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        key(&mut app, KeyCode::F(1));
+        type_keys(&mut app, "type to filter");
+        assert!(app.help_entries().iter().all(|e| e.1.is_none()));
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.help_scroll, 1);
+    }
+
+    #[test]
+    fn help_filter_and_enter_runs_selected_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        key(&mut app, KeyCode::F(1));
+        // first key line is selected; Down moves to the next key line
+        let first = app.help_sel;
+        key(&mut app, KeyCode::Down);
+        assert!(app.help_sel > first && app.help_action_at(app.help_sel).is_some());
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.help_sel, first);
+        // filter to Ctrl+B bookmarks, Enter runs it
+        for c in "bookmarks".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        assert!(app.help_action_at(app.help_sel).is_some());
+        key(&mut app, KeyCode::Enter);
+        assert!(!app.help && matches!(app.mode, Mode::Hotlist(_)));
+    }
+}

@@ -3,17 +3,22 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{io, thread};
+use std::time::{Duration, SystemTime};
 
 use crate::archive::Archive;
 use crate::vfs::{Remote, Side, rpath};
 use crate::{Result, io_err};
+
+mod entries;
+mod load;
+mod select;
+
+pub(crate) use entries::{entry_for, entry_with};
+use entries::{read_entries, sort_entries};
+use load::{Pending, Then};
 
 const PARENT: &str = "..";
 /// Directory history entries kept per panel.
@@ -74,32 +79,6 @@ pub fn compare(a: &[Entry], b: &[Entry]) -> (HashSet<OsString>, HashSet<OsString
             .collect()
     };
     (pick(a, b), pick(b, a))
-}
-
-/// What to do once a listing read in the background arrives.
-#[derive(Debug)]
-enum Then {
-    /// Show the new directory: set history position `pos` or record a `visit`, then focus a name.
-    Show {
-        pos: Option<usize>,
-        visit: bool,
-        focus: Option<OsString>,
-    },
-    /// Re-read of the shown directory: keep cursor and selection.
-    Reload,
-    /// Re-stat of a virtual list: like `Reload`, vanished entries drop out.
-    Restat,
-}
-
-/// A directory listing read in a worker; the panel shows the old list until it arrives.
-#[derive(Debug)]
-struct Pending {
-    path: PathBuf,
-    sort: (SortKey, bool),
-    then: Then,
-    rx: Receiver<Result<Vec<Entry>>>,
-    cancel: Arc<AtomicBool>,
-    remote: Option<Arc<dyn Remote>>,
 }
 
 #[derive(Debug)]
@@ -485,140 +464,6 @@ impl Panel {
         self.load(parent.to_owned(), then)
     }
 
-    /// Select entries `a..=b` (any order), not "..", and put the cursor on `b`.
-    pub fn select_range(&mut self, a: usize, b: usize) {
-        let last = self.entries.len().saturating_sub(1);
-        let (lo, hi) = (a.min(b).min(last), a.max(b).min(last));
-        let names = self.entries.get(lo..=hi).unwrap_or_default();
-        let names: Vec<_> = names
-            .iter()
-            .filter(|e| !e.is_parent())
-            .map(|e| e.name.clone())
-            .collect();
-        self.selected.extend(names);
-        self.sel_sum.set(None);
-        self.cursor = b.min(last);
-    }
-
-    /// Active name filter (lowercased), empty if none.
-    pub fn filter(&self) -> &str {
-        &self.filter
-    }
-
-    /// Show only ".." and entries whose name contains `text` (case-insensitive); in memory, no re-read.
-    pub fn apply_filter(&mut self, text: &str) {
-        let keep = self.current().map(|e| e.name.clone());
-        let all = self
-            .all
-            .take()
-            .unwrap_or_else(|| std::mem::take(&mut self.entries));
-        self.filter = text.to_lowercase();
-        self.entries = if self.filter.is_empty() {
-            all.clone()
-        } else {
-            let f = &self.filter;
-            let hit =
-                |e: &&Entry| e.is_parent() || e.name.to_string_lossy().to_lowercase().contains(f);
-            all.iter().filter(hit).cloned().collect()
-        };
-        if !self.filter.is_empty() {
-            self.all = Some(all);
-        }
-        self.sel_sum.set(None);
-        self.cursor = 0;
-        if let Some(name) = keep {
-            self.focus(&name);
-        }
-    }
-
-    /// Quick search: move the cursor to the next entry (from `cursor + skip`, wrapping) whose name contains `text`.
-    pub fn search(&mut self, text: &str, skip: usize) -> bool {
-        let text = text.to_lowercase();
-        let n = self.entries.len();
-        let hit = (0..n).map(|k| (self.cursor + skip + k) % n).find(|&i| {
-            self.entries[i]
-                .name
-                .to_string_lossy()
-                .to_lowercase()
-                .contains(&text)
-        });
-        hit.inspect(|&i| self.cursor = i).is_some()
-    }
-
-    /// Put the cursor on entry `i`, clamped to the list.
-    pub fn set_cursor(&mut self, i: usize) {
-        self.cursor = i.min(self.entries.len().saturating_sub(1));
-    }
-
-    /// Toggle selection of the cursor entry and move down.
-    pub fn toggle_select(&mut self) {
-        if let Some(entry) = self.current().filter(|e| !e.is_parent()) {
-            let name = entry.name.clone();
-            if !self.selected.remove(&name) {
-                self.selected.insert(name);
-            }
-            self.sel_sum.set(None);
-        }
-        self.move_cursor(1);
-    }
-
-    /// Select (`on`) or deselect visible files matching `masks`; directories are left alone.
-    pub fn select_mask(&mut self, masks: &str, on: bool) {
-        self.sel_sum.set(None);
-        let masks = crate::search::Masks::new(masks);
-        for e in self
-            .entries
-            .iter()
-            .filter(|e| !e.is_dir && masks.matches(&e.name.to_string_lossy()))
-        {
-            if on {
-                self.selected.insert(e.name.clone());
-            } else {
-                self.selected.remove(&e.name);
-            }
-        }
-    }
-
-    /// Replace the selection of both panels with their differences (see [`compare`]); visible entries only.
-    pub fn compare_with(&mut self, other: &mut Panel) {
-        let (sa, sb) = compare(&self.entries, &other.entries);
-        self.selected = sa;
-        other.selected = sb;
-        self.sel_sum.set(None);
-        other.sel_sum.set(None);
-    }
-
-    /// Invert the selection of visible files; directories are left alone.
-    pub fn invert_selection(&mut self) {
-        self.sel_sum.set(None);
-        for e in self.entries.iter().filter(|e| !e.is_dir) {
-            if !self.selected.remove(&e.name) {
-                self.selected.insert(e.name.clone());
-            }
-        }
-    }
-
-    /// Entries an operation acts on: the selection, else the cursor entry.
-    pub fn target_entries(&self) -> Vec<&Entry> {
-        if self.selected.is_empty() {
-            self.current()
-                .filter(|e| !e.is_parent())
-                .into_iter()
-                .collect()
-        } else {
-            self.entries
-                .iter()
-                .filter(|e| self.is_selected(e))
-                .collect()
-        }
-    }
-
-    /// Paths an operation acts on: the selection, else the cursor entry.
-    pub fn targets(&self) -> Vec<PathBuf> {
-        let list = self.target_entries();
-        list.into_iter().map(|e| self.path.join(&e.name)).collect()
-    }
-
     /// Jump to local `path` (e.g. a bookmark), leaving a remote; a failure leaves the panel unchanged.
     pub fn go(&mut self, path: PathBuf) -> Result<()> {
         let then = Then::Show {
@@ -687,119 +532,6 @@ impl Panel {
         }
     }
 
-    /// Read `path` in a worker; fast directories are applied before returning, slow ones by [`Panel::poll`].
-    /// A failure leaves the panel unchanged.
-    fn load(&mut self, path: PathBuf, then: Then) -> Result<()> {
-        self.load_on(self.remote.clone(), path, then)
-    }
-
-    /// Like [`Panel::load`] on `remote` (`None` = local disk).
-    fn load_on(
-        &mut self,
-        remote: Option<Arc<dyn Remote>>,
-        path: PathBuf,
-        then: Then,
-    ) -> Result<()> {
-        let (dir, sort) = (path.clone(), self.sort);
-        let r = remote.clone();
-        self.start(remote, path, then, move |c| match r {
-            Some(r) => remote_entries(&*r, &dir, sort),
-            None => read_entries(&dir, sort, c),
-        })
-    }
-
-    /// Run `job` in a worker; fast results are applied before returning, slow ones by [`Panel::poll`].
-    fn start(
-        &mut self,
-        remote: Option<Arc<dyn Remote>>,
-        path: PathBuf,
-        then: Then,
-        job: impl FnOnce(&AtomicBool) -> Result<Vec<Entry>> + Send + 'static,
-    ) -> Result<()> {
-        self.cancel_load();
-        let (tx, rx) = mpsc::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (c, sort) = (cancel.clone(), self.sort);
-        // a hung network mount or server blocks this thread, not the UI; cancel only drops its result
-        thread::spawn(move || drop(tx.send(job(&c))));
-        self.pending = Some(Pending {
-            path,
-            sort,
-            then,
-            rx,
-            cancel,
-            remote,
-        });
-        self.wait(LOAD_WAIT).unwrap_or(Ok(()))
-    }
-
-    /// Apply a finished background listing; `None` while it is still read or nothing is pending.
-    pub fn poll(&mut self) -> Option<Result<()>> {
-        self.wait(Duration::ZERO)
-    }
-
-    fn wait(&mut self, timeout: Duration) -> Option<Result<()>> {
-        let pending = self.pending.as_ref()?;
-        let res = match pending.rx.recv_timeout(timeout) {
-            Err(RecvTimeoutError::Timeout) => return None,
-            Ok(res) => res,
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(io_err(&pending.path)(io::Error::other("listing failed")))
-            }
-        };
-        let p = self.pending.take()?;
-        Some(res.map(|mut entries| {
-            if p.sort != self.sort {
-                let start = usize::from(entries.first().is_some_and(Entry::is_parent));
-                sort_entries(&mut entries[start..], self.sort);
-            }
-            match p.then {
-                Then::Reload | Then::Restat => self.reloaded(entries),
-                Then::Show { pos, visit, focus } => {
-                    self.show(p.path, entries);
-                    self.remote = p.remote;
-                    if let Some(i) = pos {
-                        self.pos = i;
-                    }
-                    // remote directories are not in the (local) history
-                    if visit && self.remote.is_none() {
-                        self.visit(&self.path.clone());
-                    }
-                    if let Some(name) = focus {
-                        self.focus(&name);
-                    }
-                }
-            }
-        }))
-    }
-
-    /// Directory whose listing is still being read.
-    pub fn loading(&self) -> Option<&Path> {
-        self.pending.as_ref().map(|p| p.path.as_path())
-    }
-
-    /// Stop waiting for a pending listing; true if there was one.
-    pub fn cancel_load(&mut self) -> bool {
-        self.pending
-            .take()
-            .inspect(|p| p.cancel.store(true, Ordering::Relaxed))
-            .is_some()
-    }
-
-    fn show(&mut self, path: PathBuf, entries: Vec<Entry>) {
-        self.entries = entries;
-        self.dir_sizes.clear();
-        self.sel_sum.set(None);
-        self.all = None;
-        self.filter.clear();
-        self.virt = false;
-        self.hits.clear();
-        self.archive = None;
-        self.path = path;
-        self.cursor = 0;
-        self.selected.clear();
-    }
-
     pub fn focus(&mut self, name: &OsStr) -> bool {
         match self.entries.iter().position(|e| e.name == name) {
             Some(i) => {
@@ -811,94 +543,10 @@ impl Panel {
     }
 }
 
-/// Entry named `name` for `path`; None if it cannot be stat'ed.
-pub(crate) fn entry_for(name: OsString, path: &Path) -> Option<Entry> {
-    Some(entry_with(name, path, fs::symlink_metadata(path).ok()?))
-}
-
-/// Entry from the not-followed metadata `link_meta`; only symlinks cost extra syscalls.
-pub(crate) fn entry_with(name: OsString, path: &Path, link_meta: fs::Metadata) -> Entry {
-    let is_symlink = link_meta.file_type().is_symlink();
-    // dangling symlink: fall back to link metadata
-    let meta = if is_symlink {
-        fs::metadata(path).unwrap_or(link_meta)
-    } else {
-        link_meta
-    };
-    Entry {
-        name,
-        is_dir: meta.is_dir(),
-        is_symlink,
-        size: meta.len(),
-        modified: meta.modified().ok(),
-        link: if is_symlink {
-            fs::read_link(path).ok()
-        } else {
-            None
-        },
-    }
-}
-
-/// Lowercase text after the last dot; none for `.name` and names without a dot.
-fn ext(lower: &str) -> &str {
-    match lower.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => ext,
-        _ => "",
-    }
-}
-
-/// Directories first (also when reversed), then by `sort`, ties by case-insensitive name.
-fn sort_entries(entries: &mut [Entry], (key, reverse): (SortKey, bool)) {
-    entries.sort_by_cached_key(|e| {
-        let lower = e.name.to_string_lossy().to_lowercase();
-        let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let (primary, lower) = match key {
-            SortKey::Name => (0, lower),
-            SortKey::Ext => (0, format!("{}\0{lower}", ext(&lower))),
-            SortKey::Size if !e.is_dir => (e.size, lower),
-            SortKey::Size => (0, lower),
-            SortKey::Date => (e.modified.map_or(0, secs), lower),
-        };
-        (!e.is_dir, primary, lower, e.name.clone())
-    });
-    if reverse {
-        let dirs = entries.partition_point(|e| e.is_dir);
-        entries[..dirs].reverse();
-        entries[dirs..].reverse();
-    }
-}
-
-/// Remote listing; always has "..", at the root it leaves the remote.
-fn remote_entries(r: &dyn Remote, dir: &Path, sort: (SortKey, bool)) -> Result<Vec<Entry>> {
-    let mut entries = r.list(&rpath(dir))?;
-    sort_entries(&mut entries, sort);
-    entries.insert(0, Entry::parent());
-    Ok(entries)
-}
-
-/// Stops early (partial list) once `cancel` is set.
-fn read_entries(dir: &Path, sort: (SortKey, bool), cancel: &AtomicBool) -> Result<Vec<Entry>> {
-    let mut entries = Vec::new();
-    for item in fs::read_dir(dir).map_err(io_err(dir))? {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(entries);
-        }
-        let item = item.map_err(io_err(dir))?;
-        // DirEntry::metadata does not follow symlinks and is free on Windows (part of the listing)
-        // Err: vanished between read_dir and stat
-        if let Ok(meta) = item.metadata() {
-            entries.push(entry_with(item.file_name(), &item.path(), meta));
-        }
-    }
-    sort_entries(&mut entries, sort);
-    if dir.parent().is_some() {
-        entries.insert(0, Entry::parent());
-    }
-    Ok(entries)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -1043,40 +691,6 @@ mod tests {
         fs::remove_dir(tmp.path().join("gone")).unwrap();
         assert!(p.enter().is_err());
         assert_eq!(p.path(), std::path::absolute(tmp.path()).unwrap());
-    }
-
-    #[test]
-    fn selection_drives_targets() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("a"), "").unwrap();
-        fs::write(tmp.path().join("b"), "").unwrap();
-        let mut p = Panel::open(tmp.path()).unwrap();
-        assert!(p.targets().is_empty()); // cursor on ".."
-        p.toggle_select(); // ".." not selectable, moves to "a"
-        assert_eq!(p.targets(), [p.path().join("a")]);
-        p.toggle_select(); // select "a"
-        p.toggle_select(); // select "b"
-        assert_eq!(p.targets(), [p.path().join("a"), p.path().join("b")]);
-        fs::remove_file(tmp.path().join("a")).unwrap();
-        p.reload().unwrap();
-        assert_eq!(p.targets(), [p.path().join("b")]);
-    }
-
-    #[test]
-    fn mask_and_invert() {
-        let tmp = tempfile::tempdir().unwrap();
-        for n in ["a.rs", "b.RS", "c.txt"] {
-            fs::write(tmp.path().join(n), "").unwrap();
-        }
-        fs::create_dir(tmp.path().join("d.rs")).unwrap();
-        let mut p = Panel::open(tmp.path()).unwrap();
-        p.select_mask("*.rs", true);
-        assert_eq!(p.targets(), [p.path().join("a.rs"), p.path().join("b.RS")]);
-        p.invert_selection();
-        assert_eq!(p.targets(), [p.path().join("c.txt")]);
-        p.select_mask("", true);
-        p.select_mask("c.*", false);
-        assert_eq!(p.targets().len(), 2);
     }
 
     #[test]
@@ -1238,66 +852,5 @@ mod tests {
         assert_eq!(p.selection_info(), (2, 13));
         p.reload().unwrap(); // stale after a re-read
         assert_eq!(p.selection_info(), (2, 3));
-    }
-
-    #[test]
-    fn slow_listing_keeps_old_list_until_it_arrives() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sub = tmp.path().join("sub");
-        fs::create_dir(&sub).unwrap();
-        fs::write(sub.join("f"), "x").unwrap();
-        let mut p = Panel::open(tmp.path()).unwrap();
-        // stand-in for a worker on a slow mount
-        let (tx, rx) = mpsc::channel();
-        let then = Then::Show {
-            pos: None,
-            visit: true,
-            focus: Some("f".into()),
-        };
-        let cancel = Arc::new(AtomicBool::new(false));
-        p.pending = Some(Pending {
-            path: sub.clone(),
-            sort: p.sort,
-            then,
-            rx,
-            cancel,
-            remote: None,
-        });
-        assert!(p.poll().is_none());
-        assert_eq!(p.path(), tmp.path()); // still the old directory
-        assert_eq!(p.loading(), Some(sub.as_path()));
-        let never = AtomicBool::new(false);
-        tx.send(read_entries(&sub, p.sort, &never)).unwrap();
-        assert!(p.poll().unwrap().is_ok());
-        assert_eq!((p.path(), p.loading()), (sub.as_path(), None));
-        assert_eq!(p.current().unwrap().name, "f");
-        p.history_step(-1).unwrap();
-        assert_eq!(p.path(), tmp.path()); // visit was recorded
-    }
-
-    #[test]
-    fn cancel_drops_pending_listing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut p = Panel::open(tmp.path()).unwrap();
-        let (_tx, rx) = mpsc::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let then = Then::Reload;
-        let path = tmp.path().join("x");
-        p.pending = Some(Pending {
-            path,
-            sort: p.sort,
-            then,
-            rx,
-            cancel: cancel.clone(),
-            remote: None,
-        });
-        assert!(p.cancel_load());
-        assert!(cancel.load(Ordering::Relaxed) && p.loading().is_none() && !p.cancel_load());
-        fs::write(tmp.path().join("a"), "").unwrap();
-        assert!(
-            read_entries(tmp.path(), p.sort, &cancel)
-                .unwrap()
-                .is_empty()
-        );
     }
 }

@@ -380,3 +380,64 @@ impl App {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::menu::{FIND_FORM_FOOTER, FOOTER, MENUS, N, menu_x};
+
+    use super::super::{App, Mode};
+
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+
+    use tc_core::panel::Panel;
+
+    use super::super::tests::key;
+
+    #[test]
+    fn footer_follows_screen_and_f10_closes_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        assert_eq!(app.footer_keys(), &FOOTER);
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(matches!(app.mode, Mode::FindForm(_)));
+        assert_eq!(app.footer_keys(), &FIND_FORM_FOOTER);
+        key(&mut app, KeyCode::F(10));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn f9_menu_runs_the_chosen_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let open = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(open(), open());
+        app.on_key(KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Menu(..)));
+        let i = MENUS[0]
+            .1
+            .iter()
+            .position(|m| m.1 == KeyCode::F(7) && m.2 == N)
+            .unwrap();
+        for _ in 0..i {
+            app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Mkdir(_)));
+
+        // click the "Go" title, then its first entry (home directory)
+        app.mode = Mode::Normal;
+        let click = |col, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(click(menu_x(1), 0));
+        assert!(matches!(app.mode, Mode::Menu(1, _)));
+        app.on_mouse(click(menu_x(1) + 2, 2));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+}

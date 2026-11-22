@@ -418,3 +418,241 @@ impl App {
         form.error = Some(note);
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::multi_rename::{R_NAME, R_PRESET, RENAME_NAMES_FILE};
+    use super::super::widgets::form_text;
+    use super::rename_rows;
+
+    use super::super::{App, Mode, Op};
+
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    use super::super::tests::{key, two_panels, type_keys, wait, with};
+
+    #[test]
+    fn f2_renames_one_or_multi_renames_several() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a", "b"] {
+            std::fs::write(dir.path().join(n), "").unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(2));
+        assert!(matches!(app.mode, Mode::Transfer(Op::Move, _, _)));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::F(2));
+        assert!(matches!(app.mode, Mode::MultiRename(_)));
+    }
+
+    #[test]
+    fn multi_rename_counter_history_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // skip ".."
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Backspace); // "[N]"
+        }
+        for c in "x_[Q]".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert!(f.error.as_deref().is_some_and(|e| e.contains("[Q]")));
+        key(&mut app, KeyCode::Enter); // refused, form stays
+        assert!(matches!(app.mode, Mode::MultiRename(_)));
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Char('C'));
+        key(&mut app, KeyCode::Char(']'));
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(f.preview[1].1.as_deref(), Ok("x_2.txt"));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        let read = |n: &str| std::fs::read_to_string(dir.path().join(n)).unwrap();
+        assert_eq!(
+            (read("x_1.txt"), read("x_2.txt")),
+            ("a.txt".into(), "b.txt".into())
+        );
+        assert!(dir.path().join("c.txt").exists() && !dir.path().join("a.txt").exists());
+        // reopens with the last settings; Alt+Down past the history gives the defaults
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(form_text(&f.rows, R_NAME), "x_[C]");
+        with(&mut app, KeyCode::Down, KeyModifiers::ALT);
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(form_text(&f.rows, R_NAME), "[N]");
+        assert_eq!(f.preview[0].1.as_deref(), Ok(f.preview[0].0.as_str()));
+        key(&mut app, KeyCode::Enter); // nothing changes: refused
+        assert!(matches!(&app.mode, Mode::MultiRename(f) if f.error.is_some()));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn rename_presets_save_load_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        let file = dir.path().join("presets");
+        app.rename_presets_file = Some(file.clone());
+        key(&mut app, KeyCode::Down); // skip ".."
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Backspace);
+        }
+        type_keys(&mut app, "x[N]");
+        let preset_row = |app: &mut App| {
+            let Mode::MultiRename(f) = &mut app.mode else {
+                panic!("no form");
+            };
+            f.focus = f.rows.len() - 1;
+        };
+        preset_row(&mut app);
+        key(&mut app, KeyCode::F(2)); // no name yet
+        assert!(
+            matches!(&app.mode, Mode::MultiRename(f) if f.error.as_deref().is_some_and(|e| e.contains("name")))
+        );
+        type_keys(&mut app, "p1");
+        key(&mut app, KeyCode::F(2));
+        assert!(std::fs::read_to_string(&file).unwrap().starts_with("p1\t"));
+        let Mode::MultiRename(f) = &mut app.mode else {
+            panic!("no form");
+        };
+        f.rows = rename_rows();
+        key(&mut app, KeyCode::F(3));
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(
+            (form_text(&f.rows, R_NAME), form_text(&f.rows, R_PRESET)),
+            ("x[N]", "p1")
+        );
+        assert_eq!(f.preview[0].1.as_deref(), Ok("xa.txt"));
+        key(&mut app, KeyCode::F(8));
+        assert!(app.rename_presets.is_empty());
+        assert!(std::fs::read_to_string(&file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rename_pasted_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // skip ".."
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        app.on_paste("x\ny\n".into());
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(f.preview[1].1.as_deref(), Ok("y"));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(dir.path().join("x").exists() && dir.path().join("y").exists());
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        app.on_paste("z".into()); // one line: into the field
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert!(f.names.is_none() && form_text(&f.rows, R_NAME).ends_with('z'));
+        app.on_paste("x\ny\nz".into());
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert!(f.names.is_none() && f.error.as_deref().is_some_and(|e| e.contains("names for")));
+    }
+
+    #[test]
+    fn rename_f4_edits_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // skip ".."
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::F(4));
+        let names_file = |app: &App| {
+            let (_, tmp) = app.rename_back.as_ref().expect("no form stashed");
+            tmp.path().join(RENAME_NAMES_FILE)
+        };
+        assert_eq!(std::fs::read_to_string(names_file(&app)).unwrap(), "a\nb\n");
+        assert!(!matches!(app.mode, Mode::MultiRename(_)));
+        for (text, ok) in [("p\nq\nr\n", false), ("p\nq\n", true)] {
+            let file = names_file(&app);
+            std::fs::write(&file, text).unwrap();
+            app.mode = Mode::Normal; // the editor closed
+            app.tick();
+            let Mode::MultiRename(f) = &app.mode else {
+                panic!("no form");
+            };
+            assert_eq!(f.names.is_some(), ok);
+            if ok {
+                assert_eq!(f.preview[1].1.as_deref(), Ok("q"));
+            } else {
+                assert!(f.error.as_deref().is_some_and(|e| e.contains("names for")));
+                key(&mut app, KeyCode::F(4)); // again, for the good list
+            }
+        }
+    }
+
+    #[test]
+    fn rename_ctrl_z_undoes() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        let other = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), other.path());
+        let open = |app: &mut App| {
+            key(app, KeyCode::Down); // skip ".."
+            key(app, KeyCode::Insert);
+            key(app, KeyCode::Insert);
+            with(app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        };
+        open(&mut app);
+        app.on_paste("x\ny\n".into());
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(dir.path().join("x").exists());
+        // an unrelated transfer keeps the undo memory
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(other.path().join("x").exists() || other.path().join("y").exists());
+        open(&mut app);
+        with(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(dir.path().join("a").exists() && dir.path().join("b").exists());
+        assert!(!dir.path().join("x").exists());
+        open(&mut app);
+        with(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert!(
+            matches!(&app.mode, Mode::MultiRename(f) if f.error.as_deref() == Some("Nothing to undo."))
+        );
+    }
+}
