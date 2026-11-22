@@ -63,14 +63,7 @@ fn popup_edit(frame: &mut Frame, title: &str, head: &str, l: &LineEdit, tail: &s
 }
 
 /// Bookmark-like list: up to 4 rows around the selection.
-fn list_popup(
-    frame: &mut Frame,
-    title: &str,
-    rows: &[String],
-    sel: usize,
-    empty: &str,
-    footer: &str,
-) {
+fn list_popup(frame: &mut Frame, title: &str, rows: &[String], sel: usize, empty: &str) {
     let start = (sel + 1).saturating_sub(4);
     let mut text: String = rows
         .iter()
@@ -83,8 +76,6 @@ fn list_popup(
         text.push_str(empty);
         text.push('\n');
     }
-    text.push('\n');
-    text.push_str(footer);
     popup(frame, title, &text);
 }
 
@@ -102,7 +93,6 @@ pub(super) fn draw_dialog(frame: &mut Frame, d: &Dialog) {
             rows,
             sel,
             empty,
-            keys,
-        } => list_popup(frame, title, rows, *sel, empty, keys),
+        } => list_popup(frame, title, rows, *sel, empty),
     }
 }

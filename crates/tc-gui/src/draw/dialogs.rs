@@ -31,7 +31,6 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
             ctx,
             ("search", "Search"),
             (&form.rows, form.focus, form.error.as_deref()),
-            fmt::SEARCH_FORM_KEYS,
             Some("OK"),
         ),
         (None, Mode::FindForm(form)) => show_find_form(ctx, form),
@@ -130,7 +129,6 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) -> Option<FormAct> {
                     rows,
                     sel,
                     empty,
-                    keys,
                 } => {
                     ui.heading(title);
                     ui.separator();
@@ -138,7 +136,6 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) -> Option<FormAct> {
                     if rows.is_empty() {
                         ui.label(*empty);
                     }
-                    ui.label(RichText::new(*keys).color(MUTED));
                     act
                 }
             }
@@ -227,12 +224,10 @@ fn text_with_keys(ui: &mut Ui, text: &str) -> Option<KeyCode> {
 /// Find files form: fields and checkboxes, the focused one highlighted; keys go through the app.
 fn show_find_form(ctx: &Context, form: &FindForm) -> Option<FormAct> {
     let (rows, err) = (&form.rows, form.error.as_deref());
-    let keys = fmt::FIND_FORM_KEYS;
     show_form(
         ctx,
         ("find-form", "Find files"),
         (rows, form.focus, err),
-        keys,
         Some("Search"),
     )
 }
@@ -240,33 +235,28 @@ fn show_find_form(ctx: &Context, form: &FindForm) -> Option<FormAct> {
 fn show_sync_form(ctx: &Context, form: &SyncForm) -> Option<FormAct> {
     let title = "Synchronize directories (left <-> right panel)";
     let (rows, err) = (&form.rows, form.error.as_deref());
-    let keys = fmt::SYNC_FORM_KEYS;
     show_form(
         ctx,
         ("sync-form", title),
         (rows, form.focus, err),
-        keys,
         Some("Compare"),
     )
 }
 
 fn show_settings(ctx: &Context, form: &SettingsForm) -> Option<FormAct> {
-    let keys = fmt::SETTINGS_FORM_KEYS;
     show_form(
         ctx,
         ("settings", "Settings"),
         (&form.rows, form.focus, None),
-        keys,
         None,
     )
 }
 
-/// Modal form: (id, title), (rows, focus, error), key help, then OK / Cancel (none when `ok` is None).
+/// Modal form: (id, title), (rows, focus, error), then OK / Cancel (none when `ok` is None).
 fn show_form(
     ctx: &Context,
     (id, title): (&str, &str),
     (rows, focus, error): (&[FormRow], usize, Option<&str>),
-    keys: &str,
     ok: Option<&str>,
 ) -> Option<FormAct> {
     modal(id)
@@ -275,7 +265,6 @@ fn show_form(
             ui.heading(title);
             ui.separator();
             let act = form_rows(ui, rows, focus, error);
-            ui.label(RichText::new(keys).color(MUTED));
             act.or(ok.and_then(|ok| ok_cancel(ui, ok)))
         })
         .inner

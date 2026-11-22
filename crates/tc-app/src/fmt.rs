@@ -145,7 +145,6 @@ pub enum Dialog<'a> {
         /// Position in `rows`.
         sel: usize,
         empty: &'static str,
-        keys: &'static str,
     },
 }
 
@@ -165,7 +164,6 @@ fn list_dialog<'a>(
     list: (&str, &[impl ListRow], usize),
     filter: &Filter,
     empty: &'static str,
-    keys: &'static str,
 ) -> Option<Dialog<'a>> {
     let (title, rows, sel) = list;
     let view = list_rows(rows, filter);
@@ -174,7 +172,6 @@ fn list_dialog<'a>(
         sel: view.iter().position(|&i| i == sel).unwrap_or(0),
         rows: view.iter().map(|&i| rows[i].label().into_owned()).collect(),
         empty,
-        keys,
     })
 }
 
@@ -216,19 +213,16 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             ("Hotlist", &app.hotlist, *sel),
             &app.list_filter,
             "(empty, Insert or Ctrl+D adds the current directory)",
-            "Enter go  Insert add  F4 alias  Ctrl+Up/Dn move  Del/Bksp remove  / filter  Esc close",
         ),
         Mode::Drives(rows, sel, _) => list_dialog(
             ("Drives", rows, *sel),
             &Filter::default(),
             "(no drives found)",
-            "Enter go  Esc close",
         ),
         Mode::Connections(sel) => list_dialog(
             ("Connections", &app.connections, *sel),
             &app.list_filter,
             "(empty, Insert adds one)",
-            "Enter connect  Insert add  F4 edit  Del/Bksp remove  / filter  Esc close",
         ),
         Mode::HotlistAlias(row, l) => edit(
             "Bookmark alias",
@@ -468,13 +462,6 @@ pub fn found_row(h: &Hit) -> String {
     }
 }
 
-/// Keys shown under the settings form.
-pub const SETTINGS_FORM_KEYS: &str = "Space checkbox  Esc close";
-
-/// Keys shown under the sync form.
-pub const SYNC_FORM_KEYS: &str =
-    "Tab/Up/Down field  Alt+Up/Down history  Space checkbox  Enter compare  Esc cancel";
-
 /// Sync screen title: both directories and the options.
 pub fn sync_title(s: &Sync) -> String {
     let side = |i: usize| {
@@ -579,23 +566,11 @@ pub fn sync_footer(s: &Sync) -> String {
     )
 }
 
-/// Keys shown under the viewer / editor search dialog.
-pub const SEARCH_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter run  Esc close
-Alt+Up/Down earlier patterns  F1 regex syntax";
-
-/// Keys shown under the find form.
-pub const FIND_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter search  Esc cancel
-F2 save as \"Saved search\"  F3 load next saved  F8 delete saved
-Alt+Up/Down earlier searches";
-
 /// Preview rows under the multi-rename form; PgUp/PgDn scroll by this.
 pub const RENAME_PREVIEW_ROWS: usize = 12;
 
-/// Keys shown under the multi-rename form.
-pub const RENAME_FORM_KEYS: &str = "Tab/Up/Down field  Space/Left/Right option  PgUp/PgDn list
-Enter rename  Esc cancel  Alt+Up/Down earlier settings
-F2 save preset  F3 load next  F8 delete  F4 edit names  Ctrl+Z undo last
-[N] name [E] ext ([N2-5] [N2,3] [N-3-] chars)  [C] counter
+/// Placeholder legend under the multi-rename form.
+pub const RENAME_FORM_KEYS: &str = "[N] name [E] ext ([N2-5] [N2,3] [N-3-] chars)  [C] counter
 [Y] [M] [D] [h] [n] [s] modified date/time  [[] = [";
 
 /// Form lines as (text, focused), the caret after the focused field's text.

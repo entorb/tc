@@ -239,10 +239,7 @@ fn draw_input(frame: &mut Frame, app: &mut App) {
         let block = Block::bordered()
             .border_type(BorderType::Double)
             .title(title)
-            .title_bottom(format!(
-                " Find: {}_  Up/Down select  Enter run  Esc close ",
-                app.help_filter
-            ));
+            .title_bottom(format!(" Find: {}_ ", app.help_filter));
         let shown: Vec<Line> = text
             .into_iter()
             .enumerate()

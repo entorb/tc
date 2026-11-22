@@ -12,7 +12,7 @@ use tc_app::fmt::{self, found_title, sync_footer, sync_row, sync_title};
 /// Search dialog over the viewer or editor.
 pub(super) fn draw_search_form(frame: &mut Frame, form: &SearchForm) -> (Rect, usize) {
     let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
-    draw_form(frame, " Search ", lines, form.focus, fmt::SEARCH_FORM_KEYS)
+    draw_form(frame, " Search ", lines, form.focus)
 }
 
 pub(super) fn draw_found(frame: &mut Frame, f: &Found, area: Rect) {
@@ -32,32 +32,20 @@ pub(super) fn draw_found(frame: &mut Frame, f: &Found, area: Rect) {
 /// Find files form popup over the panels: fields, checkboxes, the error and the keys.
 pub(super) fn draw_find_form(frame: &mut Frame, form: &FindForm) -> (Rect, usize) {
     let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
-    draw_form(
-        frame,
-        " Find files ",
-        lines,
-        form.focus,
-        fmt::FIND_FORM_KEYS,
-    )
+    draw_form(frame, " Find files ", lines, form.focus)
 }
 
 /// Synchronize directories options popup over the panels.
 pub(super) fn draw_sync_form(frame: &mut Frame, form: &SyncForm) -> (Rect, usize) {
     let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
     let title = " Synchronize directories (left <-> right panel) ";
-    draw_form(frame, title, lines, form.focus, fmt::SYNC_FORM_KEYS)
+    draw_form(frame, title, lines, form.focus)
 }
 
 /// Settings popup over the panels (F9 Tools).
 pub(super) fn draw_settings(frame: &mut Frame, form: &SettingsForm) -> (Rect, usize) {
     let lines = form_lines(&form.rows, form.focus, None);
-    draw_form(
-        frame,
-        " Settings ",
-        lines,
-        form.focus,
-        fmt::SETTINGS_FORM_KEYS,
-    )
+    draw_form(frame, " Settings ", lines, form.focus)
 }
 
 /// Synchronize directories: page of compared rows holding the cursor, status line, question.
@@ -97,13 +85,13 @@ pub(super) fn draw_multi_rename(frame: &mut Frame, form: &RenameForm) -> (Rect, 
             PANEL
         })
     }));
-    draw_form(
-        frame,
-        " Multi-rename ",
-        lines,
-        form.focus,
-        fmt::RENAME_FORM_KEYS,
-    )
+    lines.push(Line::raw(""));
+    lines.extend(
+        fmt::RENAME_FORM_KEYS
+            .lines()
+            .map(|k| Line::raw(k).style(PANEL)),
+    );
+    draw_form(frame, " Multi-rename ", lines, form.focus)
 }
 
 /// Form rows (focused one highlighted) and the error under them.
@@ -122,16 +110,8 @@ fn form_lines(
     lines
 }
 
-/// Centered form popup: `lines`, then the key help; returns the inner area and its first line shown.
-fn draw_form(
-    frame: &mut Frame,
-    title: &str,
-    mut lines: Vec<Line>,
-    focus: usize,
-    keys: &'static str,
-) -> (Rect, usize) {
-    lines.push(Line::raw(""));
-    lines.extend(keys.lines().map(|k| Line::raw(k).style(PANEL)));
+/// Centered form popup of `lines`; returns the inner area and its first line shown.
+fn draw_form(frame: &mut Frame, title: &str, lines: Vec<Line>, focus: usize) -> (Rect, usize) {
     let area = frame.area();
     let w = area.width.min(76);
     let h = (lines.len() as u16 + 2).min(area.height);
