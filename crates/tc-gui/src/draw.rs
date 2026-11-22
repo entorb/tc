@@ -12,7 +12,7 @@ use tc::app::{
 };
 use tc::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
-    panel_title, stats_footer, stats_row, sync_footer, sync_row, sync_title,
+    panel_title, stats_footer, stats_row, stats_title, sync_footer, sync_row, sync_title,
 };
 use tc::fmt::{
     PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
@@ -631,11 +631,7 @@ fn draw_stats(ui: &mut Ui, app: &mut App) {
         (Mode::Cmd(l), Some(st)) => (st, Some(&*l)),
         _ => return,
     };
-    ui.label(
-        RichText::new(format!("Stats: {}{}", st.path().display(), st.filter.tag()))
-            .strong()
-            .color(ACCENT),
-    );
+    ui.label(RichText::new(stats_title(st)).strong().color(ACCENT));
     let h = page_rows(ui);
     let start = st.sel / h * h;
     let mut clicked = None;

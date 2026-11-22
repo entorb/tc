@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use tc::app::{App, FindForm, Found, MENUS, Mode, RenameForm, Stats, Sync, SyncForm, menu_drop};
 use tc::fmt::{
     self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
-    help, input_dialog, panel_info, panel_title, stats_footer, stats_row, sync_footer, sync_row,
-    sync_title,
+    help, input_dialog, panel_info, panel_title, stats_footer, stats_row, stats_title, sync_footer,
+    sync_row, sync_title,
 };
 use tc::fmt::{
     PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
@@ -379,11 +379,7 @@ fn draw_stats(frame: &mut Frame, st: &Stats, cmd: Option<&LineEdit>, area: Rect)
     let footer = stats_footer(st);
     let list = List::new(items)
         .style(PANEL)
-        .block(themed_block().title(format!(
-            " Stats: {}{} ",
-            st.path().display(),
-            st.filter.tag()
-        )))
+        .block(themed_block().title(format!(" {} ", stats_title(st))))
         .highlight_style(BAR);
     let mut state = ListState::default().with_selected(Some(st.sel.saturating_sub(start)));
     let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);

@@ -2,13 +2,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::SystemTime;
 
 use regex::Regex;
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::{Editor, Eol, human};
 use tc_core::find::{Hit, MAX_RESULTS};
 use tc_core::panel::{Entry, SortKey};
-use tc_core::stats::Node;
+use tc_core::stats::{self, Node, Order};
 use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -219,8 +220,11 @@ Enter           open directory
 Right           open directory
 Backspace       parent directory
 Left            parent directory
-Tab             toggle size / file count
-Ctrl+R          scan the browsed directory again
+Tab             show size / file count
+n               sort by name (again: reverse)
+s               sort by size (again: reverse)
+C               sort by file count (again: reverse)
+Ctrl+R          rescan the browsed directory, totals above update
 /               filter the entries by name: Enter keeps,
                 Esc clears
 
@@ -228,7 +232,11 @@ Ctrl+R          scan the browsed directory again
 F3              view file
 F4              edit file
 Shift+F4        edit in external editor
-F8              delete entry (also d), tree updates without rescan:
+i               info: path, size, files, directories, date
+p               feed marked / shown entries to the panel
+Insert / Space  mark entry, move down
+F8              delete marked entries, else the selected one (also d),
+                tree updates without rescan:
                 y / Enter trash, p permanent, n / Esc cancel
 :               command line in this directory
 Esc / q / F10   close (while scanning: cancel)";
@@ -965,10 +973,50 @@ pub fn stats_row(st: &Stats, n: &Node) -> String {
         human(value(n))
     };
     let slash = if n.is_dir { "/" } else { "" };
+    let mark = if st.is_marked(n) { '*' } else { ' ' };
     format!(
-        "{shown:>11} {:>5.1}% [{bar}] {}{slash}",
+        "{mark}{shown:>11} {:>5.1}% [{bar}] {}{slash}",
         share * 100.0,
         n.name.to_string_lossy()
+    )
+}
+
+/// File Stats info popup text; `modified` only when known without a network round trip.
+pub fn stats_info(path: &Path, n: &Node, modified: Option<SystemTime>) -> String {
+    let (kind, dirs) = if n.is_dir {
+        (
+            "directory",
+            format!("\nDirectories: {}", thousands(stats::dirs(n))),
+        )
+    } else {
+        ("file", String::new())
+    };
+    let date = modified
+        .and_then(|t| jiff::ZonedDateTime::try_from(t).ok())
+        .map_or_else(String::new, |z| {
+            format!("\nModified:    {}", z.strftime("%Y-%m-%d %H:%M"))
+        });
+    format!(
+        "Path:        {}\nType:        {kind}\nSize:        {} ({} bytes)\nFiles:       {}{dirs}{date}",
+        path.display(),
+        human(n.size),
+        thousands(n.size),
+        thousands(n.files)
+    )
+}
+
+/// File Stats title: directory, sort and filter.
+pub fn stats_title(st: &Stats) -> String {
+    let key = match st.order {
+        Order::Name => "name",
+        Order::Size => "size",
+        Order::Count => "count",
+    };
+    let rev = if st.rev { " rev" } else { "" };
+    format!(
+        "Stats: {} [{key}{rev}]{}",
+        st.path().display(),
+        st.filter.tag()
     )
 }
 
@@ -985,7 +1033,7 @@ pub fn stats_footer(st: &Stats) -> String {
     let dir = st.current();
     let mode = if st.by_files { "count" } else { "size" };
     format!(
-        "{}, {} files  Tab size/count ({mode})  Enter open  Backspace up",
+        "{}, {} files  Tab size/count ({mode})  n/s/C sort  p panel  Enter open  Backspace up",
         human(dir.size),
         thousands(dir.files)
     )

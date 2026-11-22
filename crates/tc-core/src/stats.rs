@@ -154,7 +154,7 @@ fn scan_dir(dir: &Path, p: &Progress, free: &AtomicUsize, list: &List) -> Node {
 fn finish(node: &mut Node) {
     node.size = node.children.iter().map(|c| c.size).sum();
     node.files = node.children.iter().map(|c| c.files).sum();
-    sort(&mut node.children, false);
+    sort(&mut node.children, Order::Size, false);
 }
 
 /// Most bytes of one `find` record; a longer one ends the parse as garbage.
@@ -261,10 +261,48 @@ pub fn remove(root: &mut Node, path: &[usize], idx: usize) {
     n.children.remove(idx);
 }
 
-/// Largest first by size or file count, ties by name.
-pub fn sort(children: &mut [Node], by_files: bool) {
-    let key = |n: &Node| if by_files { n.files } else { n.size };
-    children.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| a.name.cmp(&b.name)));
+/// Swap in a rescan `new` of the directory at `path` below `root` (keeping its name); every
+/// ancestor's size and file count change by the difference.
+pub fn replace(root: &mut Node, path: &[usize], new: Node) {
+    let old = path.iter().fold(&*root, |n, &i| &n.children[i]);
+    let (size, files) = (old.size, old.files);
+    let mut n = root;
+    for &i in path {
+        // the old subtree is part of this ancestor, so subtracting first cannot underflow
+        n.size = n.size - size + new.size;
+        n.files = n.files - files + new.files;
+        n = &mut n.children[i];
+    }
+    (n.size, n.files, n.children) = (new.size, new.files, new.children);
+}
+
+/// Directories below `n`, `n` itself not counted.
+pub fn dirs(n: &Node) -> u64 {
+    n.children
+        .iter()
+        .map(|c| u64::from(c.is_dir) + dirs(c))
+        .sum()
+}
+
+/// Sort key of a directory listing.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Order {
+    Name,
+    #[default]
+    Size,
+    Count,
+}
+
+/// Name A-Z, or largest first by size or file count (ties by name); `rev` reverses it all.
+pub fn sort(children: &mut [Node], order: Order, rev: bool) {
+    children.sort_by(|a, b| {
+        let o = match order {
+            Order::Name => a.name.cmp(&b.name),
+            Order::Size => b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)),
+            Order::Count => b.files.cmp(&a.files).then_with(|| a.name.cmp(&b.name)),
+        };
+        if rev { o.reverse() } else { o }
+    });
 }
 
 #[cfg(test)]
@@ -327,7 +365,7 @@ mod tests {
         assert_eq!((root.size, root.files), ((1 << 40) + 6, 4));
         assert_eq!(root.children[0].name, "big");
         assert_eq!((root.children[1].size, root.children[1].files), (6, 3));
-        sort(&mut root.children, true);
+        sort(&mut root.children, Order::Count, false);
         assert_eq!(root.children[0].name, "many");
     }
 
@@ -359,5 +397,90 @@ mod tests {
         );
         remove(&mut root, &[], 0);
         assert_eq!((root.size, root.children.len()), (57, 19));
+    }
+
+    #[test]
+    fn sort_orders_and_reverse() {
+        let n = |name: &str, size, files| Node {
+            name: name.into(),
+            size,
+            files,
+            ..Node::default()
+        };
+        let mut v = vec![n("b", 5, 1), n("a", 5, 9), n("c", 7, 2)];
+        let names = |v: &[Node]| {
+            v.iter()
+                .map(|n| n.name.to_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        sort(&mut v, Order::Name, false);
+        assert_eq!(names(&v), ["a", "b", "c"]);
+        sort(&mut v, Order::Size, false);
+        assert_eq!(names(&v), ["c", "a", "b"]);
+        sort(&mut v, Order::Count, false);
+        assert_eq!(names(&v), ["a", "c", "b"]);
+        sort(&mut v, Order::Count, true);
+        assert_eq!(names(&v), ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn dirs_counts_subtree() {
+        let leaf = |is_dir| Node {
+            is_dir,
+            ..Node::default()
+        };
+        let sub = Node {
+            is_dir: true,
+            children: vec![leaf(true), leaf(false)],
+            ..Node::default()
+        };
+        let root = Node {
+            is_dir: true,
+            children: vec![sub, leaf(false)],
+            ..Node::default()
+        };
+        assert_eq!(
+            (
+                dirs(&root),
+                dirs(&root.children[0]),
+                dirs(&root.children[1])
+            ),
+            (2, 1, 0)
+        );
+    }
+
+    #[test]
+    fn replace_updates_ancestors() {
+        let file = |name: &str, size| Node {
+            name: name.into(),
+            size,
+            files: 1,
+            ..Node::default()
+        };
+        let dir = |name: &str, children: Vec<Node>| Node {
+            name: name.into(),
+            is_dir: true,
+            size: children.iter().map(|c| c.size).sum(),
+            files: children.iter().map(|c| c.files).sum(),
+            children,
+        };
+        let mut root = dir("r", vec![dir("sub", vec![file("x", 3)]), file("y", 5)]);
+        replace(
+            &mut root,
+            &[0],
+            dir("other", vec![file("x", 3), file("z", 10)]),
+        );
+        assert_eq!((root.size, root.files), (18, 3));
+        assert_eq!(
+            (root.children[0].size, root.children[0].name.to_str()),
+            (13, Some("sub"))
+        );
+        replace(&mut root, &[0], dir("sub", vec![]));
+        assert_eq!((root.size, root.files), (5, 1));
+        replace(&mut root, &[], dir("new", vec![file("a", 1)]));
+        assert_eq!(
+            (root.size, root.files, root.name.to_str()),
+            (1, 1, Some("r"))
+        );
     }
 }

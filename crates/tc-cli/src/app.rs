@@ -1,10 +1,12 @@
 //! App state and key handling, independent of the terminal.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,7 +24,7 @@ use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::eta::Estimator;
 use tc_core::find::Hit;
-use tc_core::panel::{Panel, SortKey};
+use tc_core::panel::{Entry, Panel, SortKey};
 use tc_core::procs::{self, Proc, ProcSort, Sampler, Snapshot};
 use tc_core::stats::{self, Node};
 use tc_core::vfs::{self, Remote, Side};
@@ -693,8 +695,13 @@ pub struct Stats {
     /// Indices into the browsed directory's children shown (all, or those matching `filter`).
     view: Vec<usize>,
     pub filter: Filter,
-    /// Show and sort by file count instead of size.
+    /// Show file count (value, share, bar) instead of size.
     pub by_files: bool,
+    pub order: stats::Order,
+    /// Reversed `order`.
+    pub rev: bool,
+    /// Path of the running rescan to swap into `root`; `None` for the first scan.
+    splice: Option<Vec<usize>>,
     /// Running scan; `root` is empty until it finishes.
     job: Option<thread::JoinHandle<Node>>,
     pub progress: Arc<ops::Progress>,
@@ -702,8 +709,11 @@ pub struct Stats {
     pub confirm: Option<String>,
     /// Connection of a remote panel the tree was scanned on.
     remote: Option<Arc<dyn Remote>>,
-    /// Child of the browsed directory a running remote delete removes from the tree on success.
-    deleting: Option<usize>,
+    /// Names in the browsed directory a running remote delete removes, and how many it has
+    /// deleted so far.
+    deleting: Option<(Vec<OsString>, Arc<AtomicUsize>)>,
+    /// Marked names of the browsed directory.
+    marked: HashSet<OsString>,
 }
 
 impl Stats {
@@ -741,6 +751,56 @@ impl Stats {
         self.view.get(self.sel).copied()
     }
 
+    pub fn is_marked(&self, n: &Node) -> bool {
+        self.marked.contains(&n.name)
+    }
+
+    /// Children indices a delete acts on: the shown marked entries, else the selected one.
+    fn targets(&self) -> Vec<usize> {
+        let dir = self.current();
+        let marked: Vec<_> = (self.view.iter().copied())
+            .filter(|&i| self.marked.contains(&dir.children[i].name))
+            .collect();
+        if marked.is_empty() {
+            self.selected_index().into_iter().collect()
+        } else {
+            marked
+        }
+    }
+
+    /// Ask to delete the targets.
+    fn delete_ask(&mut self) {
+        let dir = self.current();
+        let nodes: Vec<_> = self
+            .targets()
+            .into_iter()
+            .map(|i| &dir.children[i])
+            .collect();
+        if nodes.is_empty() {
+            return;
+        }
+        let names: Vec<_> = nodes
+            .iter()
+            .take(3)
+            .map(|n| n.name.to_string_lossy())
+            .collect();
+        let size = nodes.iter().map(|n| n.size).sum();
+        let question = delete_question(&names, nodes.len(), Some(size));
+        let recursive = nodes.iter().any(|n| n.is_dir);
+        self.confirm = Some(delete_text(question, recursive, self.remote.is_some()));
+    }
+
+    /// Remove deleted entries of the browsed directory from the tree.
+    fn drop_names(&mut self, names: &[OsString]) {
+        for name in names {
+            if let Some(i) = self.current().children.iter().position(|n| &n.name == name) {
+                stats::remove(&mut self.root, &self.path, i);
+            }
+        }
+        self.marked.retain(|m| !names.contains(m));
+        self.rebuild();
+    }
+
     /// Recompute the shown entries after a sort, a filter or a change of the tree.
     fn rebuild(&mut self) {
         let filter = &self.filter;
@@ -772,6 +832,7 @@ impl Stats {
             KeyCode::Home => self.sel = 0,
             KeyCode::End => self.sel = last,
             KeyCode::Enter | KeyCode::Right if self.selected().is_some_and(|n| n.is_dir) => {
+                self.marked.clear();
                 if let Some(i) = self.selected_index() {
                     self.path.push(i);
                 }
@@ -779,6 +840,7 @@ impl Stats {
                 self.resort();
             }
             KeyCode::Backspace | KeyCode::Left => {
+                self.marked.clear();
                 if let Some(i) = self.path.pop() {
                     let name = self.current().children[i].name.clone();
                     self.filter = Filter::default();
@@ -791,21 +853,90 @@ impl Stats {
                         .unwrap_or(0);
                 }
             }
-            KeyCode::Tab => {
-                self.by_files = !self.by_files;
-                self.resort();
-            }
+            KeyCode::Tab => self.by_files = !self.by_files,
+            KeyCode::Insert | KeyCode::Char(' ') => self.toggle_mark(last),
+            KeyCode::Char('n') => self.set_order(stats::Order::Name),
+            KeyCode::Char('s') => self.set_order(stats::Order::Size),
+            KeyCode::Char('C') => self.set_order(stats::Order::Count),
             _ => {}
+        }
+    }
+
+    /// Ctrl+R: scan the browsed directory again in a worker and swap it into the tree.
+    fn rescan(&mut self) {
+        self.progress = Arc::new(ops::Progress::default());
+        self.splice = Some(self.path.clone());
+        self.job = Some(spawn_scan(
+            self.path(),
+            self.remote.clone(),
+            self.progress.clone(),
+        ));
+        self.marked.clear();
+    }
+
+    /// A finished scan: the first one is the tree, a rescan replaces the browsed directory.
+    fn scanned(&mut self, node: Node) {
+        let Some(path) = self.splice.take() else {
+            self.root = node;
+            self.rebuild();
+            return;
+        };
+        // the cursor row indexes the old children, so read its name before they are replaced
+        let name = self.selected().map(|n| n.name.clone());
+        stats::replace(&mut self.root, &path, node);
+        self.resort();
+        self.select_name(name);
+    }
+
+    /// Mark or unmark the selected entry and move down.
+    fn toggle_mark(&mut self, last: usize) {
+        if let Some(name) = self.selected().map(|n| n.name.clone())
+            && !self.marked.remove(&name)
+        {
+            self.marked.insert(name);
+        }
+        self.sel = (self.sel + 1).min(last);
+    }
+
+    /// Same order again reverses it; the cursor stays on its entry.
+    fn set_order(&mut self, order: stats::Order) {
+        let name = self.selected().map(|n| n.name.clone());
+        self.rev = self.order == order && !self.rev;
+        self.order = order;
+        self.resort();
+        self.select_name(name);
+    }
+
+    /// Puts the cursor on the shown entry called `name`, if any.
+    fn select_name(&mut self, name: Option<OsString>) {
+        if let Some(i) = name.and_then(|name| {
+            self.view
+                .iter()
+                .position(|&i| self.current().children[i].name == name)
+        }) {
+            self.sel = i;
         }
     }
 
     /// Sorts the browsed directory and puts the cursor on its first shown entry.
     fn resort(&mut self) {
-        let by_files = self.by_files;
-        stats::sort(&mut self.current_mut().children, by_files);
+        let (order, rev) = (self.order, self.rev);
+        stats::sort(&mut self.current_mut().children, order, rev);
         self.sel = 0;
         self.rebuild();
     }
+}
+
+/// Scan `dir` (on `remote` if set) in a worker.
+fn spawn_scan(
+    dir: PathBuf,
+    remote: Option<Arc<dyn Remote>>,
+    p: Arc<ops::Progress>,
+) -> thread::JoinHandle<Node> {
+    thread::spawn(move || match remote {
+        Some(r) => stats::scan_remote(r.as_ref(), &dir, &p),
+        None => stats::scan(&dir, &p),
+    })
 }
 
 /// Process monitor (Ctrl+P): latest snapshot, sorted and filtered, refreshed by a worker.
@@ -1172,6 +1303,16 @@ impl Filter {
 }
 
 /// Delete question with its answers; remote panels have no trash.
+/// "Delete a?" or "Delete n items (size): a, b, c…?" from the first names and the total count.
+fn delete_question(names: &[Cow<str>], count: usize, size: Option<u64>) -> String {
+    if count == 1 {
+        return format!("Delete {}?", names[0]);
+    }
+    let more = if count > names.len() { "…" } else { "" };
+    let size = size.map_or_else(String::new, |s| format!(" ({})", edit::human(s)));
+    format!("Delete {count} items{size}: {}{more}?", names.join(", "))
+}
+
 fn delete_text(mut question: String, recursive: bool, remote: bool) -> String {
     if recursive {
         question.push_str("\nDirectories are deleted recursively.");
@@ -2908,10 +3049,11 @@ impl App {
     /// Scan `dir` in a worker and show its File Stats.
     fn scan_stats(&mut self, dir: PathBuf, remote: Option<Arc<dyn Remote>>) {
         let progress = Arc::new(ops::Progress::default());
-        let (p, d, r) = (progress.clone(), dir.clone(), remote);
+        let job = spawn_scan(dir.clone(), remote.clone(), progress.clone());
         self.mode = Mode::Stats(Stats {
-            remote: r.clone(),
+            remote,
             deleting: None,
+            marked: HashSet::new(),
             dir,
             root: Node::default(),
             path: Vec::new(),
@@ -2919,10 +3061,10 @@ impl App {
             view: Vec::new(),
             filter: Filter::default(),
             by_files: false,
-            job: Some(thread::spawn(move || match r {
-                Some(r) => stats::scan_remote(r.as_ref(), &d, &p),
-                None => stats::scan(&d, &p),
-            })),
+            order: stats::Order::default(),
+            rev: false,
+            splice: None,
+            job: Some(job),
             progress,
             confirm: None,
         });
@@ -2941,29 +3083,79 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(10) => {
                 st.progress.cancel.store(true, Ordering::Relaxed);
+                // a cancelled rescan keeps the old tree; the first scan closes the screen
+                if st.splice.take().is_some() {
+                    st.job = None;
+                    self.mode = Mode::Stats(st);
+                }
                 return;
             }
             _ if st.scanning() => {}
             KeyCode::F(3 | 4) => return self.stats_open(st, key),
-            // the browsed directory becomes the root of the new scan
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return self.scan_stats(st.path(), st.remote.clone());
-            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => st.rescan(),
             KeyCode::F(8) | KeyCode::Char('d') => {
-                let remote = st.remote.is_some();
-                st.confirm = st.selected().map(|n| {
-                    let question = format!("Delete {}?", n.name.to_string_lossy());
-                    delete_text(question, n.is_dir, remote)
-                });
+                st.delete_ask();
             }
+            // Ctrl+Space opened the stats, it does not mark
+            KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
             KeyCode::Char(':') => {
                 self.stats = Some(st);
                 self.mode = Mode::Cmd(LineEdit::default());
                 return;
             }
+            KeyCode::Char('i') => return self.stats_info(st),
+            KeyCode::Char('p') => return self.stats_panelize(st),
             code => st.key(code, self.page),
         }
         self.mode = Mode::Stats(st);
+    }
+
+    /// `i`: message popup for the selected entry, the stats come back when it closes.
+    fn stats_info(&mut self, st: Stats) {
+        let Some(n) = st.selected() else {
+            self.mode = Mode::Stats(st);
+            return;
+        };
+        let path = st.path().join(&n.name);
+        // a remote stat would block the UI thread
+        let modified = match st.remote {
+            Some(_) => None,
+            None => fs::symlink_metadata(&path).and_then(|m| m.modified()).ok(),
+        };
+        let text = fmt::stats_info(&path, n, modified);
+        self.stats = Some(st);
+        self.mode = Mode::Message(text);
+    }
+
+    /// `p`: the marked entries, else all shown ones, become a virtual panel in the active panel.
+    fn stats_panelize(&mut self, st: Stats) {
+        if st.remote.is_some() {
+            // the list's re-stat is local only
+            self.stats = Some(st);
+            self.mode = Mode::Message(REMOTE.into());
+            return;
+        }
+        let dir = st.path();
+        let marked = st.marked.iter().any(|m| st.shown().any(|n| &n.name == m));
+        let entries = (st.shown())
+            .filter(|n| !marked || st.is_marked(n))
+            .map(|n| Entry {
+                name: dir.join(&n.name).into_os_string(),
+                is_dir: n.is_dir,
+                is_symlink: false,
+                size: n.size,
+                modified: None,
+                link: None,
+            })
+            .collect();
+        let panel = &mut self.panels[self.active];
+        panel.panelize(entries, HashMap::new());
+        // dates come from a re-stat in a worker
+        if let Err(e) = panel.reload() {
+            self.mode = Mode::Message(e.to_string());
+        } else {
+            self.mode = Mode::Normal;
+        }
     }
 
     /// Answer to the File Stats delete question: the entry leaves the tree without a rescan.
@@ -2983,33 +3175,43 @@ impl App {
             }
         };
         st.confirm = None;
-        let (Some(name), Some(index)) =
-            (st.selected().map(|n| n.name.clone()), st.selected_index())
-        else {
-            self.mode = Mode::Stats(st);
-            return;
-        };
-        let target = st.path().join(name);
+        let dir = st.path();
+        let names: Vec<OsString> = (st.targets().into_iter())
+            .map(|i| st.current().children[i].name.clone())
+            .collect();
         if let Some(r) = st.remote.clone() {
-            st.deleting = Some(index);
+            let count = Arc::new(AtomicUsize::new(0));
+            st.deleting = Some((names.clone(), count.clone()));
             self.stats = Some(st);
             let side = Side::Remote(r);
             return self.spawn_xfer((side.clone(), side.clone()), move |_, _| {
-                side.delete(&target)
+                names.iter().try_for_each(|n| {
+                    side.delete(&dir.join(n))?;
+                    count.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                })
             });
         }
-        let result = if to_trash {
-            ops::trash(&target)
-        } else {
-            ops::delete(&target)
-        };
-        if result.is_ok() {
-            stats::remove(&mut st.root, &st.path, index);
-            st.rebuild();
+        // in order, the first error stops the batch
+        let mut done = Vec::new();
+        let mut error = None;
+        for name in names {
+            let target = dir.join(&name);
+            let result = if to_trash {
+                ops::trash(&target)
+            } else {
+                ops::delete(&target)
+            };
+            if let Err(e) = result {
+                error = Some(e.to_string());
+                break;
+            }
+            done.push(name);
         }
+        st.drop_names(&done);
         // `tick` brings the stats back once any error message is closed
         self.stats = Some(st);
-        self.finish(result.err().map(|e| e.to_string()));
+        self.finish(error);
     }
 
     /// F3 view, F4 edit, Shift+F4 external editor on the selected file of File Stats.
@@ -3446,11 +3648,7 @@ impl App {
             .take(3)
             .map(|e| e.name.to_string_lossy())
             .collect();
-        let more = if entries.len() > 3 { "…" } else { "" };
-        let question = match entries.len() {
-            1 => format!("Delete {}?", names[0]),
-            n => format!("Delete {n} items: {}{more}?", names.join(", ")),
-        };
+        let question = delete_question(&names, entries.len(), None);
         // a symlink is removed as a link, not recursed into
         let recursive = entries.iter().any(|e| e.is_dir && !e.is_symlink);
         delete_text(
@@ -4304,11 +4502,11 @@ impl App {
                     self.file_clip = None;
                 }
                 if let Some(st) = &mut self.stats
-                    && let Some(i) = st.deleting.take()
-                    && error.is_none()
+                    && let Some((names, count)) = st.deleting.take()
                 {
-                    stats::remove(&mut st.root, &st.path, i);
-                    st.rebuild();
+                    // whatever the error: what was deleted leaves the tree
+                    let n = count.load(Ordering::Relaxed).min(names.len());
+                    st.drop_names(&names[..n]);
                 }
                 self.finish(error);
             }
@@ -4376,9 +4574,16 @@ impl App {
             && let Some(job) = st.job.take()
         {
             match job.join() {
-                Ok(root) => {
-                    st.root = root;
-                    st.rebuild();
+                Ok(root) => st.scanned(root),
+                // a failed rescan keeps the old tree
+                Err(_) if st.splice.is_some() => {
+                    st.splice = None;
+                    if let Mode::Stats(st) = mem::replace(
+                        &mut self.mode,
+                        Mode::Message("File Stats scan failed.".into()),
+                    ) {
+                        self.stats = Some(st);
+                    }
                 }
                 Err(_) => self.mode = Mode::Message("File Stats scan failed.".into()),
             }
@@ -4717,6 +4922,136 @@ mod tests {
         assert!(matches!(app.mode, Mode::Stats(_)));
     }
 
+    fn stats_app(dir: &Path) -> App {
+        let mut app = two_panels(dir, dir);
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        app
+    }
+
+    #[test]
+    fn stats_feeds_entries_to_panel() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "x".repeat(30)).unwrap();
+        std::fs::write(tmp.path().join("b"), "x".repeat(20)).unwrap();
+        std::fs::create_dir(tmp.path().join("c")).unwrap();
+        let names = |app: &App| -> Vec<PathBuf> {
+            let p = &app.panels[app.active];
+            assert!(p.is_virtual());
+            p.entries().iter().map(|e| PathBuf::from(&e.name)).collect()
+        };
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Insert); // b
+        key(&mut app, KeyCode::Char('p'));
+        assert!(matches!(app.mode, Mode::Normal));
+        settle(&mut app);
+        assert_eq!(names(&app), [tmp.path().join("b")]);
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Char('p'));
+        settle(&mut app);
+        let mut all = names(&app);
+        all.sort();
+        assert_eq!(all, ["a", "b", "c"].map(|n| tmp.path().join(n)));
+    }
+
+    #[test]
+    fn stats_marks_and_deletes_all_marked() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (n, size) in [("a", 30), ("b", 20), ("c", 10)] {
+            std::fs::write(tmp.path().join(n), "x".repeat(size)).unwrap();
+        }
+        #[cfg(unix)]
+        let odd = {
+            use std::os::unix::ffi::OsStrExt;
+            let odd = OsStr::from_bytes(b"f\xff");
+            std::fs::write(tmp.path().join(odd), "x").unwrap();
+            odd
+        };
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Char(' ')); // a, moves down
+        key(&mut app, KeyCode::Insert); // b
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Insert); // b unmarked again, moves down
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Insert); // b marked
+        key(&mut app, KeyCode::F(8));
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert!(st.confirm.as_ref().is_some_and(|t| t.contains("2 items (")));
+        key(&mut app, KeyCode::Char('p'));
+        app.tick();
+        assert!(!tmp.path().join("a").exists() && !tmp.path().join("b").exists());
+        assert!(tmp.path().join("c").exists());
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert_eq!(st.root.size, if cfg!(unix) { 11 } else { 10 });
+        assert!(st.marked.is_empty());
+        #[cfg(unix)]
+        {
+            assert!(tmp.path().join(odd).exists());
+            assert_eq!(st.root.files, 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stats_batch_stops_at_first_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "x".repeat(30)).unwrap();
+        let ro = tmp.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::write(ro.join("f"), "x".repeat(20)).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let restore = || std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755));
+        if std::fs::write(ro.join("probe"), "").is_ok() {
+            return restore().unwrap(); // root ignores permissions
+        }
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Insert); // a
+        key(&mut app, KeyCode::Insert); // ro
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        assert!(matches!(app.mode, Mode::Message(_)));
+        app.tick();
+        key(&mut app, KeyCode::Esc);
+        app.tick();
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert!(!tmp.path().join("a").exists() && ro.join("f").exists());
+        let names: Vec<_> = st.root.children.iter().map(|n| n.name.clone()).collect();
+        assert_eq!(names, ["ro"]);
+        assert!(st.marked.contains(OsStr::new("ro")));
+        restore().unwrap();
+    }
+
+    #[test]
+    fn remote_stats_deletes_all_marked() {
+        let left = tempfile::tempdir().unwrap();
+        let mem = tc_core::vfs::mem::Mem::new();
+        for (n, size) in [("/a", 3), ("/b", 2), ("/c", 1)] {
+            mem.put(n, &b"x".repeat(size));
+        }
+        let mut app = two_panels(left.path(), left.path());
+        app.active = 1;
+        app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
+        settle(&mut app);
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        settle(&mut app);
+        app.tick();
+        assert!(mem.get("/a").is_none() && mem.get("/b").is_none() && mem.get("/c").is_some());
+        assert!(
+            matches!(&app.mode, Mode::Stats(st) if st.root.size == 1 && st.current().children.len() == 1)
+        );
+    }
+
     #[test]
     fn slash_filters_stats_and_acts_on_shown_rows_only() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4769,6 +5104,28 @@ mod tests {
     }
 
     #[test]
+    fn stats_info_popup_and_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f"), "abc").unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        key(&mut app, KeyCode::Char('i'));
+        let Mode::Message(text) = &app.mode else {
+            panic!("no popup")
+        };
+        assert!(
+            text.contains(&*tmp.path().join("f").to_string_lossy())
+                && text.contains("Files:       1")
+        );
+        key(&mut app, KeyCode::Char('x'));
+        app.tick();
+        assert!(matches!(app.mode, Mode::Stats(_)));
+    }
+
+    #[test]
     fn stats_sorts_toggles_count_and_browses() {
         let tmp = tempfile::tempdir().unwrap();
         let many = tmp.path().join("many");
@@ -4787,7 +5144,15 @@ mod tests {
             _ => panic!("not in stats"),
         };
         assert_eq!(top(&app), "big");
-        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Tab); // only the shown value changes
+        assert_eq!(top(&app), "big");
+        key(&mut app, KeyCode::Char('s')); // active key again: smallest first
+        assert_eq!(top(&app), "big"); // cursor stays on its entry
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert_eq!(st.current().children[0].name, "many");
+        key(&mut app, KeyCode::Char('C'));
+        assert_eq!(top(&app), "big");
+        key(&mut app, KeyCode::Home);
         assert_eq!(top(&app), "many");
         key(&mut app, KeyCode::Enter);
         assert_eq!(top(&app), "a");
@@ -5775,25 +6140,46 @@ mod tests {
     }
 
     #[test]
-    fn stats_ctrl_r_scans_the_browsed_directory_again() {
+    fn stats_ctrl_r_rescans_subtree_in_place() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("d")).unwrap();
-        std::fs::write(tmp.path().join("d/a"), "x").unwrap();
-        let mut app = two_panels(tmp.path(), tmp.path());
-        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
-        let wait = |app: &mut App| {
-            while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
-                app.tick();
-            }
-        };
-        wait(&mut app);
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        std::fs::write(tmp.path().join("sub/x"), "123").unwrap();
+        std::fs::write(tmp.path().join("y"), "12345").unwrap();
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Down); // sub (3 bytes) below y
         key(&mut app, KeyCode::Enter);
-        std::fs::write(tmp.path().join("d/b"), "x").unwrap();
+        std::fs::write(tmp.path().join("sub/z"), "x".repeat(10)).unwrap();
+        // Esc cancels and keeps the old tree
         with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
-        wait(&mut app);
-        assert!(
-            matches!(&app.mode, Mode::Stats(st) if st.root.files == 2 && st.dir == tmp.path().join("d"))
-        );
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(&app.mode, Mode::Stats(st) if !st.scanning() && st.root.size == 8));
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert_eq!((st.current().files, st.current().size), (2, 13));
+        assert_eq!((st.root.files, st.root.size), (3, 18));
+        key(&mut app, KeyCode::Backspace);
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert!(st.current().children.iter().any(|n| n.name == "y"));
+    }
+
+    #[test]
+    fn stats_ctrl_r_after_shrink_keeps_cursor_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "1234567").unwrap();
+        std::fs::write(tmp.path().join("b"), "12").unwrap();
+        let mut app = stats_app(tmp.path());
+        key(&mut app, KeyCode::Down); // b, the last row
+        std::fs::remove_file(tmp.path().join("a")).unwrap();
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        let Mode::Stats(st) = &app.mode else { panic!() };
+        assert_eq!((st.current().children.len(), st.root.size), (1, 2));
+        assert_eq!(st.selected().map(|n| n.name.clone()), Some("b".into()));
     }
 
     #[test]
