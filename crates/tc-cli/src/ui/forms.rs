@@ -24,7 +24,7 @@ pub(super) fn draw_found(frame: &mut Frame, f: &Found, area: Rect) {
 }
 
 /// Find files form popup over the panels: fields, checkboxes, the error and the keys.
-pub(super) fn draw_find_form(frame: &mut Frame, form: &FindForm) {
+pub(super) fn draw_find_form(frame: &mut Frame, form: &FindForm) -> (Rect, usize) {
     let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
     draw_form(
         frame,
@@ -32,18 +32,18 @@ pub(super) fn draw_find_form(frame: &mut Frame, form: &FindForm) {
         lines,
         form.focus,
         fmt::FIND_FORM_KEYS,
-    );
+    )
 }
 
 /// Synchronize directories options popup over the panels.
-pub(super) fn draw_sync_form(frame: &mut Frame, form: &SyncForm) {
+pub(super) fn draw_sync_form(frame: &mut Frame, form: &SyncForm) -> (Rect, usize) {
     let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
     let title = " Synchronize directories (left <-> right panel) ";
-    draw_form(frame, title, lines, form.focus, fmt::SYNC_FORM_KEYS);
+    draw_form(frame, title, lines, form.focus, fmt::SYNC_FORM_KEYS)
 }
 
 /// Settings popup over the panels (F9 Tools).
-pub(super) fn draw_settings(frame: &mut Frame, form: &SettingsForm) {
+pub(super) fn draw_settings(frame: &mut Frame, form: &SettingsForm) -> (Rect, usize) {
     let lines = form_lines(&form.rows, form.focus, None);
     draw_form(
         frame,
@@ -51,7 +51,7 @@ pub(super) fn draw_settings(frame: &mut Frame, form: &SettingsForm) {
         lines,
         form.focus,
         fmt::SETTINGS_FORM_KEYS,
-    );
+    )
 }
 
 /// Synchronize directories: page of compared rows holding the cursor, status line, question.
@@ -75,7 +75,7 @@ pub(super) fn draw_sync(frame: &mut Frame, s: &Sync, area: Rect) {
 }
 
 /// Multi-rename: the form, then the visible part of the old -> new list.
-pub(super) fn draw_multi_rename(frame: &mut Frame, form: &RenameForm) {
+pub(super) fn draw_multi_rename(frame: &mut Frame, form: &RenameForm) -> (Rect, usize) {
     let mut lines = form_lines(&form.rows, form.focus, form.error.as_deref());
     lines.push(Line::raw(format!("{} files:", form.preview.len())).style(PANEL));
     let rows = form
@@ -97,7 +97,7 @@ pub(super) fn draw_multi_rename(frame: &mut Frame, form: &RenameForm) {
         lines,
         form.focus,
         fmt::RENAME_FORM_KEYS,
-    );
+    )
 }
 
 /// Form rows (focused one highlighted) and the error under them.
@@ -116,14 +116,14 @@ fn form_lines(
     lines
 }
 
-/// Centered form popup: `lines`, then the key help.
+/// Centered form popup: `lines`, then the key help; returns the inner area and its first line shown.
 fn draw_form(
     frame: &mut Frame,
     title: &str,
     mut lines: Vec<Line>,
     focus: usize,
     keys: &'static str,
-) {
+) -> (Rect, usize) {
     lines.push(Line::raw(""));
     lines.extend(keys.lines().map(|k| Line::raw(k).style(PANEL)));
     let area = frame.area();
@@ -145,4 +145,5 @@ fn draw_form(
         .block(block)
         .scroll((off, 0));
     frame.render_widget(text, popup);
+    (themed_block().inner(popup), usize::from(off))
 }

@@ -111,7 +111,9 @@ impl App {
             return;
         }
         if ev.kind == MouseEventKind::Down(MouseButton::Left)
-            && (self.footer_click(ev) || self.stats_click(ev.column, ev.row))
+            && (self.footer_click(ev)
+                || self.stats_click(ev.column, ev.row)
+                || self.form_mouse(ev.column, ev.row))
         {
             return;
         }

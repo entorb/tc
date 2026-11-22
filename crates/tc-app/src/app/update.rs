@@ -136,10 +136,13 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::Rect;
     use tc_core::panel::Panel;
 
-    use super::{App, Mode, due, is_newer, parse_version};
+    use super::{App, CHECK_DAILY, Mode, due, form_checked, is_newer, parse_version};
 
     #[test]
     fn versions_compare() {
@@ -183,6 +186,29 @@ mod tests {
         key(&mut a, KeyCode::Esc);
         assert!(matches!(a.mode, Mode::Normal));
         assert!(!a.update_check);
+    }
+
+    #[test]
+    fn click_toggles_checkbox_cli_and_gui() {
+        let mut a = app();
+        a.open_settings();
+        // GUI reports the row
+        a.form_click(0);
+        assert!(matches!(&a.mode, Mode::Settings(f) if !form_checked(&f.rows, CHECK_DAILY)));
+        a.form_click(5); // past the rows: ignored
+        // CLI: click inside the drawn rows
+        (a.form_area, a.form_scroll) = (Rect::new(10, 5, 40, 3), 0);
+        let click = |row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        a.on_mouse(click(5));
+        assert!(matches!(&a.mode, Mode::Settings(f) if form_checked(&f.rows, CHECK_DAILY)));
+        a.on_mouse(click(9)); // outside
+        key(&mut a, KeyCode::Enter);
+        assert!(a.update_check);
     }
 
     #[test]

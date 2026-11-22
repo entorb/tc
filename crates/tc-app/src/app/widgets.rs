@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::hotlist;
 
+use super::{App, Mode};
+
 /// One line of a form: a text field, a checkbox or a choice (options, selected).
 #[derive(Clone)]
 pub enum FormRow {
@@ -75,6 +77,43 @@ pub(super) fn rows_from_line(rows: &mut [FormRow], line: &str) {
                 *i = v.parse().ok().filter(|&v| v < opts.len()).unwrap_or(0);
             }
         }
+    }
+}
+
+impl Mode {
+    /// Rows and focus of an open form.
+    fn form_mut(&mut self) -> Option<(&[FormRow], &mut usize)> {
+        match self {
+            Mode::FindForm(f) => Some((&f.rows, &mut f.focus)),
+            Mode::SyncForm(f) => Some((&f.rows, &mut f.focus)),
+            Mode::MultiRename(f) => Some((&f.rows, &mut f.focus)),
+            Mode::Settings(f) => Some((&f.rows, &mut f.focus)),
+            _ => None,
+        }
+    }
+}
+
+impl App {
+    /// Click on form row `row`: focuses it; a checkbox toggles, a choice cycles (as Space would).
+    pub fn form_click(&mut self, row: usize) {
+        let Some((rows, focus)) = self.mode.form_mut() else {
+            return;
+        };
+        let Some(r) = rows.get(row) else { return };
+        let toggle = !matches!(r, FormRow::Text(..));
+        *focus = row;
+        if toggle {
+            self.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        }
+    }
+
+    /// Terminal click inside the form rows drawn at `form_area` (first row shown: `form_scroll`).
+    pub(super) fn form_mouse(&mut self, col: u16, row: u16) -> bool {
+        if self.mode.form_mut().is_none() || !self.form_area.contains((col, row).into()) {
+            return false;
+        }
+        self.form_click(self.form_scroll + usize::from(row - self.form_area.y));
+        true
     }
 }
 

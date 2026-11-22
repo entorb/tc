@@ -188,6 +188,9 @@ pub struct App {
     pub footer: Rect,
     /// Screen area of the help text (set by the CLI UI), for clicks.
     pub help_area: Rect,
+    /// Form rows on screen (set by the CLI UI) and the first row shown there, for clicks.
+    pub form_area: Rect,
+    pub form_scroll: usize,
     /// Inner area of the File Stats treemap on screen (empty when hidden), for mouse clicks.
     pub stats_map: Rect,
     pub active: usize,
@@ -304,6 +307,8 @@ impl App {
             areas: Default::default(),
             footer: Rect::default(),
             help_area: Rect::default(),
+            form_area: Rect::default(),
+            form_scroll: 0,
             stats_map: Rect::default(),
             active: 0,
             mode: Mode::Normal,
