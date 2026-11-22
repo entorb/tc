@@ -371,6 +371,21 @@ Applied to the name part. Find is a regex: `$1` or
 is off by default. Case: unchanged, lower, UPPER,
 First letter, Every Word.
 
+== Names from a list ==
+Paste (several lines)  new names, one per line
+(as many as files; edit a field to use the masks again)
+
+== Undo ==
+Ctrl+Z         undo the last multi-rename (this session)
+
+== Edit names ==
+F4              edit new names in the editor (line count must match)
+
+== Presets ==
+F2              save as \"Preset\"
+F3              load next preset
+F8              delete preset
+
 == Run ==
 Enter           rename (the preview shows every new name)
 Esc / F10       close";
@@ -921,6 +936,7 @@ pub const RENAME_PREVIEW_ROWS: usize = 12;
 /// Keys shown under the multi-rename form.
 pub const RENAME_FORM_KEYS: &str = "Tab/Up/Down field  Space/Left/Right option  PgUp/PgDn list
 Enter rename  Esc cancel  Alt+Up/Down earlier settings
+F2 save preset  F3 load next  F8 delete  F4 edit names  Ctrl+Z undo last
 [N] name [E] ext ([N2-5] [N2,3] [N-3-] chars)  [C] counter
 [Y] [M] [D] [h] [n] [s] modified date/time  [[] = [";
 

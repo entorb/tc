@@ -141,6 +141,14 @@ impl Rule {
     }
 }
 
+/// `new` as the explicit new name of `old` (from a list), or why it cannot be one.
+pub fn explicit(old: &std::ffi::OsStr, new: &str) -> std::result::Result<String, String> {
+    old.to_str().ok_or("name is not valid UTF-8")?;
+    let new = new.trim_end_matches('\r');
+    check_name(new)?;
+    Ok(new.to_owned())
+}
+
 /// Uppercase the first letter (of every word with `words`), lowercase the rest.
 fn capitalize(s: &str, words: bool) -> String {
     let mut out = String::with_capacity(s.len());
@@ -279,6 +287,18 @@ pub fn plan(old: &[String], new: &[String]) -> std::result::Result<Vec<(String, 
         .collect())
 }
 
+/// Rename the `pairs` of an earlier [`apply`] back. Refused before anything moves when a new
+/// name is gone; an old name taken by another file is refused by [`apply`].
+pub fn undo(side: &Side, dir: &Path, pairs: &[(String, String)], p: &Progress) -> Result<()> {
+    let back: Vec<_> = pairs.iter().map(|(o, n)| (n.clone(), o.clone())).collect();
+    for (n, _) in &back {
+        if !side.exists(&dir.join(n))? {
+            return Err(Error::Remote(format!("{n}: gone, cannot undo")));
+        }
+    }
+    apply(side, dir, &back, p)
+}
+
 /// Rename `pairs` (names inside `dir`) on `side`. Targets that exist and are not held by the
 /// batch are refused before anything is renamed. On error or cancel, items parked under
 /// temp names are moved back; one that cannot be is named in the error.
@@ -351,8 +371,20 @@ mod tests {
     use std::fs;
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::{Case, Progress, Side, Spec, apply, plan, range};
+    use super::{Case, Progress, Side, Spec, apply, plan, range, undo};
     use crate::vfs::mem::Mem;
+
+    #[test]
+    fn explicit_checks_names() {
+        assert!(super::explicit(OsStr::new("a"), "a/b").is_err());
+        assert!(super::explicit(OsStr::new("a"), "").is_err());
+        assert_eq!(super::explicit(OsStr::new("a"), "b\r"), Ok("b".into()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(super::explicit(OsStr::from_bytes(b"a\xff"), "b").is_err());
+        }
+    }
 
     fn rule(f: impl FnOnce(&mut Spec)) -> super::Rule {
         let mut s = Spec::default();
@@ -484,6 +516,32 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["a", "b", "d", "keep"]);
+    }
+
+    #[test]
+    fn undo_reverses_and_refuses_when_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let (p, pairs) = (
+            Progress::default(),
+            plan(&s(&["a", "b"]), &s(&["x", "y"])).unwrap(),
+        );
+        let read = |f: &str| fs::read_to_string(d.join(f)).ok();
+        fs::write(d.join("a"), "A").unwrap();
+        fs::write(d.join("b"), "B").unwrap();
+        apply(&Side::Local, d, &pairs, &p).unwrap();
+        undo(&Side::Local, d, &pairs, &p).unwrap();
+        assert_eq!((read("a"), read("b")), (Some("A".into()), Some("B".into())));
+        // a new name is gone: nothing moves
+        apply(&Side::Local, d, &pairs, &p).unwrap();
+        fs::remove_file(d.join("x")).unwrap();
+        assert!(undo(&Side::Local, d, &pairs, &p).is_err());
+        assert_eq!((read("y"), read("b")), (Some("B".into()), None));
+        // an old name is taken: nothing moves
+        fs::write(d.join("x"), "X").unwrap();
+        fs::write(d.join("a"), "other").unwrap();
+        assert!(undo(&Side::Local, d, &pairs, &p).is_err());
+        assert_eq!((read("x"), read("y")), (Some("X".into()), Some("B".into())));
     }
 
     #[test]

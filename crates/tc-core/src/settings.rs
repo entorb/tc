@@ -39,7 +39,7 @@ pub fn save(file: &Path, kv: &[(String, OsString)]) -> Result<()> {
 }
 
 /// Every file tc keeps in its config directory.
-pub const FILES: [&str; 8] = [
+pub const FILES: [&str; 9] = [
     "hotlist",
     "connections",
     "searches",
@@ -48,6 +48,7 @@ pub const FILES: [&str; 8] = [
     "find-forms",
     "find-history",
     "rename-history",
+    "rename-presets",
 ];
 
 /// Delete tc's [`FILES`] in `dir` (other files stay), then `dir` if it is empty; returns how many.

@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{BufRead, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -238,6 +239,9 @@ const R_CASE: &str = "Case";
 const R_START: &str = "Counter start";
 const R_STEP: &str = "Counter step";
 const R_WIDTH: &str = "Counter digits";
+const R_PRESET: &str = "Preset";
+const RENAME_NAMES_FILE: &str = "new-names.txt";
+const NAMES_NOTE: &str = "New names from the list; edit a field to use the masks again.";
 const CASES: [(&str, rename::Case); 5] = [
     ("unchanged", rename::Case::Keep),
     ("lower", rename::Case::Lower),
@@ -246,6 +250,82 @@ const CASES: [(&str, rename::Case); 5] = [
     ("Every Word", rename::Case::Words),
 ];
 const CASE_NAMES: [&str; 5] = [CASES[0].0, CASES[1].0, CASES[2].0, CASES[3].0, CASES[4].0];
+
+/// A finished multi-rename: where it ran and what it renamed, for Ctrl+Z.
+#[derive(Clone)]
+struct RenameBatch {
+    // shortcut: a remote side's session stays open in the undo memory, upgrade by clearing it on disconnect
+    side: Side,
+    dir: PathBuf,
+    pairs: Vec<(String, String)>,
+}
+
+/// Wording of one kind of saved form lines (see [`preset_key`]).
+struct PresetKind {
+    /// Note when the list is empty.
+    none: &'static str,
+    /// Label of the name row.
+    label: &'static str,
+    /// What one entry is called in "No ... x.".
+    one: &'static str,
+    /// What the file holds in "Cannot save ...".
+    all: &'static str,
+}
+
+const SEARCH_KIND: PresetKind = PresetKind {
+    none: "No saved searches yet: F2 saves one.",
+    label: "Saved search",
+    one: "saved search",
+    all: "searches",
+};
+
+const RENAME_KIND: PresetKind = PresetKind {
+    none: "No presets yet: F2 saves one.",
+    label: R_PRESET,
+    one: "preset",
+    all: "presets",
+};
+
+/// F2 saves `line` (`name\t...`) under `name`, F3 returns the line after `name`'s (cycling),
+/// F8 deletes `name`; the file is written at once. Returns the line to load and the note.
+fn preset_key(
+    list: &mut Vec<String>,
+    file: Option<&Path>,
+    code: KeyCode,
+    name: &str,
+    line: String,
+    kind: &PresetKind,
+) -> (Option<String>, String) {
+    let pos = list.iter().position(|l| l.split('\t').next() == Some(name));
+    let (load, note) = match (code, pos) {
+        (KeyCode::F(3), _) if list.is_empty() => (None, kind.none.to_owned()),
+        (KeyCode::F(3), _) => {
+            let next = list[pos.map_or(0, |i| (i + 1) % list.len())].clone();
+            let note = format!("Loaded {}.", next.split('\t').next().unwrap_or_default());
+            (Some(next), note)
+        }
+        _ if name.is_empty() => (None, format!("Type a name in \"{}\" first.", kind.label)),
+        (KeyCode::F(2), Some(i)) => {
+            list[i] = line;
+            (None, format!("Saved {name}."))
+        }
+        (KeyCode::F(2), None) => {
+            list.push(line);
+            (None, format!("Saved {name}."))
+        }
+        (_, Some(i)) => {
+            list.remove(i);
+            (None, format!("Deleted {name}."))
+        }
+        (_, None) => (None, format!("No {} {name}.", kind.one)),
+    };
+    if let Some(Err(e)) = file.map(|f| cmdline::save_history(f, list))
+        && code != KeyCode::F(3)
+    {
+        return (None, format!("Cannot save {}: {e}", kind.all));
+    }
+    (load, note)
+}
 
 /// Multi-rename form rows in focus order, with the defaults (name unchanged).
 fn rename_rows() -> Vec<FormRow> {
@@ -261,6 +341,7 @@ fn rename_rows() -> Vec<FormRow> {
         text(R_START, "1"),
         text(R_STEP, "1"),
         text(R_WIDTH, "1"),
+        text(R_PRESET, ""),
     ]
 }
 
@@ -277,6 +358,8 @@ pub struct RenameForm {
     pub error: Option<String>,
     /// Position in the settings history for Alt+Up/Down (= its length: not from history).
     hist: usize,
+    /// New names pasted as a list, one per item; they replace the masks.
+    names: Option<Vec<String>>,
 }
 
 impl RenameForm {
@@ -314,14 +397,16 @@ impl RenameForm {
         let rule = self.spec().and_then(rename::Spec::compile);
         self.preview = (self.items.iter().enumerate())
             .map(|(i, (name, modified))| {
-                let new = match &rule {
-                    Ok(r) => r.new_name(name, *modified, i),
-                    Err(_) => Err(String::new()),
+                let new = match (&self.names, &rule) {
+                    (Some(n), _) => rename::explicit(name, &n[i]),
+                    (None, Ok(r)) => r.new_name(name, *modified, i),
+                    (None, Err(_)) => Err(String::new()),
                 };
                 (name.to_string_lossy().into_owned(), new)
             })
             .collect();
         self.error = match rule {
+            _ if self.names.is_some() => self.pairs().err().or(Some(NAMES_NOTE.into())),
             Err(e) => Some(e),
             Ok(_) => self.pairs().err(),
         };
@@ -342,11 +427,54 @@ impl RenameForm {
         rename::plan(&old, &new)
     }
 
+    /// One line of the presets file: `name`, then the [`rows_to_line`] of the form.
+    fn to_line(&self, name: &str) -> String {
+        format!(
+            "{}\t{}",
+            name.replace('\t', " "),
+            rows_to_line(&self.rows, R_PRESET)
+        )
+    }
+
+    /// Set the rows from a preset line (name first); the focus stays.
+    fn load_line(&mut self, line: &str) {
+        self.names = None;
+        self.rows = rename_rows();
+        rows_from_line(&mut self.rows, line);
+        if let Some((name, _)) = line.split_once('\t')
+            && let Some(FormRow::Text(_, l)) = self.rows.last_mut()
+        {
+            l.text = name.into();
+            l.end();
+        }
+        self.refresh();
+    }
+
+    /// Pasted text with line breaks is a list of new names; else it goes into the field.
     fn paste(&mut self, text: &str) {
+        if text.contains('\n') {
+            let lines = text.lines().take(self.items.len() + 1);
+            return self.set_names(lines.map(str::to_owned).collect());
+        }
         if let FormRow::Text(_, l) = &mut self.rows[self.focus] {
             paste_line(l, text);
         }
+        self.names = None;
         self.refresh();
+    }
+
+    /// Use `lines` as the new names, one per item; a wrong count is an error and changes nothing.
+    fn set_names(&mut self, lines: Vec<String>) {
+        if lines.len() == self.items.len() {
+            self.names = Some(lines);
+            self.refresh();
+        } else {
+            self.error = Some(format!(
+                "Pasted {} names for {} files.",
+                lines.len(),
+                self.items.len()
+            ));
+        }
     }
 }
 
@@ -1670,9 +1798,16 @@ pub struct App {
     found: Option<Found>,
     /// Sync rows while a file is open in the viewer or editor; shown again after it.
     sync_back: Option<Box<Sync>>,
+    /// Multi-rename form while its new names are edited in the editor, and the temp file's dir.
+    rename_back: Option<(RenameForm, TempDir)>,
+    /// The batch being renamed, and the last one that finished completely (undo, until quit).
+    rename_running: Option<RenameBatch>,
+    rename_undo: Option<RenameBatch>,
     /// Saved find forms, one line each (see `FindForm::to_line`), and their file.
     searches: Vec<String>,
     searches_file: Option<PathBuf>,
+    rename_presets: Vec<String>,
+    rename_presets_file: Option<PathBuf>,
     /// The running transfer pastes a cut: `file_clip` is dropped once it succeeds.
     cut_pending: bool,
     /// Size calculation in a worker thread: directory and its progress (`scanned` = result ready).
@@ -1746,8 +1881,13 @@ impl App {
             sync_again: None,
             found: None,
             sync_back: None,
+            rename_back: None,
+            rename_running: None,
+            rename_undo: None,
             searches: Vec::new(),
             searches_file: None,
+            rename_presets: Vec::new(),
+            rename_presets_file: None,
             cut_pending: false,
             dir_job: None,
             view_numbers: false,
@@ -2998,42 +3138,42 @@ impl App {
     /// F8 deletes the named one; the file is written at once.
     fn saved_search_key(&mut self, code: KeyCode, form: FindForm) -> FindForm {
         let name = form.text(F_SAVED).trim().to_owned();
-        let pos = (self.searches.iter()).position(|l| l.split('\t').next() == Some(name.as_str()));
-        let (mut form, note) = match (code, pos) {
-            (KeyCode::F(3), _) if self.searches.is_empty() => {
-                (form, "No saved searches yet: F2 saves one.".to_owned())
-            }
-            (KeyCode::F(3), _) => {
-                let next = pos.map_or(0, |i| (i + 1) % self.searches.len());
-                let mut f = FindForm::from_line(&self.searches[next]);
-                f.focus = form.focus;
-                let note = format!("Loaded {}.", f.text(F_SAVED));
-                (f, note)
-            }
-            _ if name.is_empty() => (form, "Type a name in \"Saved search\" first.".into()),
-            (KeyCode::F(2), Some(i)) => {
-                self.searches[i] = form.to_line(&name);
-                (form, format!("Saved {name}."))
-            }
-            (KeyCode::F(2), None) => {
-                self.searches.push(form.to_line(&name));
-                (form, format!("Saved {name}."))
-            }
-            (_, Some(i)) => {
-                self.searches.remove(i);
-                (form, format!("Deleted {name}."))
-            }
-            (_, None) => (form, format!("No saved search {name}.")),
+        let line = form.to_line(&name);
+        let (load, note) = preset_key(
+            &mut self.searches,
+            self.searches_file.as_deref(),
+            code,
+            &name,
+            line,
+            &SEARCH_KIND,
+        );
+        let mut form = match load {
+            Some(l) => FindForm {
+                focus: form.focus,
+                ..FindForm::from_line(&l)
+            },
+            None => form,
         };
-        let saved = self
-            .searches_file
-            .as_ref()
-            .map(|f| cmdline::save_history(f, &self.searches));
-        form.error = Some(match saved {
-            Some(Err(e)) if code != KeyCode::F(3) => format!("Cannot save searches: {e}"),
-            _ => note,
-        });
+        form.error = Some(note);
         form
+    }
+
+    /// F2/F3/F8 in the multi-rename form: presets, as for the find form.
+    fn rename_preset_key(&mut self, code: KeyCode, form: &mut RenameForm) {
+        let name = form_text(&form.rows, R_PRESET).trim().to_owned();
+        let line = form.to_line(&name);
+        let (load, note) = preset_key(
+            &mut self.rename_presets,
+            self.rename_presets_file.as_deref(),
+            code,
+            &name,
+            line,
+            &RENAME_KIND,
+        );
+        if let Some(l) = load {
+            form.load_line(&l);
+        }
+        form.error = Some(note);
     }
 
     /// Ctrl+Space: File Stats of the active panel's directory.
@@ -3266,6 +3406,45 @@ impl App {
             && let Some(s) = self.sync_back.take()
         {
             self.mode = Mode::Sync(s);
+        }
+    }
+
+    /// Back to the multi-rename form after the editor of its new names closed.
+    fn restore_rename_back(&mut self) {
+        if matches!(self.mode, Mode::Normal)
+            && let Some((mut form, dir)) = self.rename_back.take()
+        {
+            let file =
+                fs::File::open(dir.path().join(RENAME_NAMES_FILE)).map(std::io::BufReader::new);
+            // bounded: one line more than items is already a count error
+            match file.and_then(|r| r.lines().take(form.items.len() + 1).collect()) {
+                Ok(lines) => form.set_names(lines),
+                Err(e) => form.error = Some(format!("Cannot read the names: {e}")),
+            }
+            self.mode = Mode::MultiRename(form);
+        }
+    }
+
+    /// F4 in the multi-rename form: the new names, one per line, in the internal editor.
+    fn rename_edit_names(&mut self, mut form: RenameForm) {
+        let written = TempDir::new().and_then(|dir| {
+            let path = dir.path().join(RENAME_NAMES_FILE);
+            let mut w = std::io::BufWriter::new(fs::File::create(&path)?);
+            for (old, new) in &form.preview {
+                writeln!(w, "{}", new.as_ref().unwrap_or(old))?;
+            }
+            w.flush()?;
+            Ok((dir, path))
+        });
+        match written {
+            Ok((dir, path)) => {
+                self.rename_back = Some((form, dir));
+                self.edit_path_at(path, None);
+            }
+            Err(e) => {
+                form.error = Some(format!("Cannot write the names: {e}"));
+                self.mode = Mode::MultiRename(form);
+            }
         }
     }
 
@@ -3749,6 +3928,7 @@ impl App {
             scroll: 0,
             error: None,
             hist: self.rename_history.len(),
+            names: None,
         };
         form.refresh();
         self.mode = Mode::MultiRename(form);
@@ -3767,7 +3947,13 @@ impl App {
                     _ => (form.hist + 1).min(len),
                 };
                 form.rows = self.rename_hist(form.hist);
+                form.names = None;
                 form.refresh();
+            }
+            KeyCode::F(2 | 3 | 8) => self.rename_preset_key(key.code, &mut form),
+            KeyCode::F(4) => return self.rename_edit_names(form),
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return self.rename_undo_run(form);
             }
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
@@ -3781,6 +3967,7 @@ impl App {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
                 form.rows[form.focus].key(code, ctrl);
+                form.names = None;
                 form.refresh();
             }
         }
@@ -3801,11 +3988,41 @@ impl App {
                 return;
             }
         };
-        self.note = self.remember("rename-history", &rows_to_line(&form.rows, ""));
+        if form.names.is_none() {
+            self.note = self.remember("rename-history", &rows_to_line(&form.rows, R_PRESET));
+        }
         let side = self.panels[self.active].side();
         let dir = form.dir;
         let sides = (side.clone(), side.clone());
+        self.rename_running = Some(RenameBatch {
+            side: side.clone(),
+            dir: dir.clone(),
+            pairs: pairs.clone(),
+        });
         self.spawn_xfer(sides, move |p, _| rename::apply(&side, &dir, &pairs, p));
+    }
+
+    /// Ctrl+Z in the form: rename the last finished batch back in a worker.
+    fn rename_undo_run(&mut self, mut form: RenameForm) {
+        let Some(RenameBatch { side, dir, pairs }) = self.rename_undo.take() else {
+            form.error = Some("Nothing to undo.".into());
+            self.mode = Mode::MultiRename(form);
+            return;
+        };
+        let sides = (side.clone(), side.clone());
+        self.spawn_xfer(sides, move |p, _| rename::undo(&side, &dir, &pairs, p));
+    }
+
+    /// A multi-rename that renamed every pair becomes the one Ctrl+Z undoes (a cancel or an
+    /// error leaves `files` short of the total).
+    fn rename_done(&mut self, error: Option<&String>, progress: &ops::Progress) {
+        if let Some(batch) = self.rename_running.take()
+            && error.is_none()
+            && progress.files.load(Ordering::Relaxed)
+                == progress.files_total.load(Ordering::Relaxed)
+        {
+            self.rename_undo = Some(batch);
+        }
     }
 
     /// Ctrl+Insert: paths of the selection or cursor entry to the system clipboard.
@@ -4496,7 +4713,9 @@ impl App {
         match x.rx.try_recv() {
             Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
             Ok(XMsg::Done(error)) => {
+                let progress = x.progress.clone();
                 self.mode = Mode::Normal;
+                self.rename_done(error.as_ref(), &progress);
                 // a failed cut keeps its clipboard, so Ctrl+V can retry
                 if mem::take(&mut self.cut_pending) && error.is_none() {
                     self.file_clip = None;
@@ -4512,6 +4731,7 @@ impl App {
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
+                self.rename_running = None;
                 self.mode = Mode::Message("worker thread failed".into())
             }
         }
@@ -4538,6 +4758,7 @@ impl App {
             self.mode = Mode::Found(f);
         }
         self.restore_sync_back();
+        self.restore_rename_back();
         if matches!(self.mode, Mode::Normal)
             && let Some(setup) = self.sync_again.take()
         {
@@ -4599,6 +4820,7 @@ impl App {
             Err(TryRecvError::Empty) => return,
             Ok(done) => done,
             Err(TryRecvError::Disconnected) => {
+                self.rename_running = None;
                 self.mode = Mode::Message("worker thread failed".into());
                 return;
             }
@@ -6242,6 +6464,156 @@ mod tests {
         let p = &app.panels[0];
         assert!(!p.is_virtual() && p.path() == d.join("sub"));
         assert_eq!(p.current().unwrap().name, "b.txt");
+    }
+
+    #[test]
+    fn rename_presets_save_load_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        let file = dir.path().join("presets");
+        app.rename_presets_file = Some(file.clone());
+        key(&mut app, KeyCode::Down); // skip ".."
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Backspace);
+        }
+        type_keys(&mut app, "x[N]");
+        let preset_row = |app: &mut App| {
+            let Mode::MultiRename(f) = &mut app.mode else {
+                panic!("no form");
+            };
+            f.focus = f.rows.len() - 1;
+        };
+        preset_row(&mut app);
+        key(&mut app, KeyCode::F(2)); // no name yet
+        assert!(
+            matches!(&app.mode, Mode::MultiRename(f) if f.error.as_deref().is_some_and(|e| e.contains("name")))
+        );
+        type_keys(&mut app, "p1");
+        key(&mut app, KeyCode::F(2));
+        assert!(std::fs::read_to_string(&file).unwrap().starts_with("p1\t"));
+        let Mode::MultiRename(f) = &mut app.mode else {
+            panic!("no form");
+        };
+        f.rows = rename_rows();
+        key(&mut app, KeyCode::F(3));
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(
+            (form_text(&f.rows, R_NAME), form_text(&f.rows, R_PRESET)),
+            ("x[N]", "p1")
+        );
+        assert_eq!(f.preview[0].1.as_deref(), Ok("xa.txt"));
+        key(&mut app, KeyCode::F(8));
+        assert!(app.rename_presets.is_empty());
+        assert!(std::fs::read_to_string(&file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rename_pasted_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // skip ".."
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        app.on_paste("x\ny\n".into());
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(f.preview[1].1.as_deref(), Ok("y"));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(dir.path().join("x").exists() && dir.path().join("y").exists());
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        app.on_paste("z".into()); // one line: into the field
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert!(f.names.is_none() && form_text(&f.rows, R_NAME).ends_with('z'));
+        app.on_paste("x\ny\nz".into());
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert!(f.names.is_none() && f.error.as_deref().is_some_and(|e| e.contains("names for")));
+    }
+
+    #[test]
+    fn rename_f4_edits_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // skip ".."
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::F(4));
+        let names_file = |app: &App| {
+            let (_, tmp) = app.rename_back.as_ref().expect("no form stashed");
+            tmp.path().join(RENAME_NAMES_FILE)
+        };
+        assert_eq!(std::fs::read_to_string(names_file(&app)).unwrap(), "a\nb\n");
+        assert!(!matches!(app.mode, Mode::MultiRename(_)));
+        for (text, ok) in [("p\nq\nr\n", false), ("p\nq\n", true)] {
+            let file = names_file(&app);
+            std::fs::write(&file, text).unwrap();
+            app.mode = Mode::Normal; // the editor closed
+            app.tick();
+            let Mode::MultiRename(f) = &app.mode else {
+                panic!("no form");
+            };
+            assert_eq!(f.names.is_some(), ok);
+            if ok {
+                assert_eq!(f.preview[1].1.as_deref(), Ok("q"));
+            } else {
+                assert!(f.error.as_deref().is_some_and(|e| e.contains("names for")));
+                key(&mut app, KeyCode::F(4)); // again, for the good list
+            }
+        }
+    }
+
+    #[test]
+    fn rename_ctrl_z_undoes() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        let other = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), other.path());
+        let open = |app: &mut App| {
+            key(app, KeyCode::Down); // skip ".."
+            key(app, KeyCode::Insert);
+            key(app, KeyCode::Insert);
+            with(app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        };
+        open(&mut app);
+        app.on_paste("x\ny\n".into());
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(dir.path().join("x").exists());
+        // an unrelated transfer keeps the undo memory
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(other.path().join("x").exists() || other.path().join("y").exists());
+        open(&mut app);
+        with(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(dir.path().join("a").exists() && dir.path().join("b").exists());
+        assert!(!dir.path().join("x").exists());
+        open(&mut app);
+        with(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert!(
+            matches!(&app.mode, Mode::MultiRename(f) if f.error.as_deref() == Some("Nothing to undo."))
+        );
     }
 
     #[test]
