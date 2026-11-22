@@ -27,5 +27,12 @@ opt-level = 3
 [profile.release.package.encoding_rs]
 opt-level = 3
 
+# local run scripts: release speed without fat LTO; ships via `release`
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 [profile.dev]
 debug = "line-tables-only"
