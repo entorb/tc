@@ -29,7 +29,7 @@ Alt+Left        history back
 Alt+Right       history forward
 ~               home directory
 Ctrl+\\          root directory
-Ctrl+R          refresh
+Ctrl+R          refresh (also the free space shown in the status line)
 Alt+F1          drives for left panel
 Alt+F2          drives for right panel
 Ctrl+D          add this directory to the bookmarks

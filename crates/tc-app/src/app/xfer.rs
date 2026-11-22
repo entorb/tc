@@ -426,6 +426,7 @@ impl App {
 
     pub(super) fn finish(&mut self, error: Option<String>) {
         let mut errors: Vec<String> = error.into_iter().collect();
+        self.free = Default::default();
         for panel in &mut self.panels {
             if let Err(e) = panel.reload() {
                 errors.push(e.to_string());

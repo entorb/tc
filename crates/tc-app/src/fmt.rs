@@ -394,8 +394,12 @@ pub fn panel_title(app: &App, i: usize, sort_tag: bool) -> String {
 pub fn panel_info(app: &App, i: usize) -> String {
     let panel = &app.panels[i];
     let (count, bytes) = panel.selection_info();
-    match panel.current().filter(|e| !e.is_parent()) {
-        _ if count > 0 => format!(" {count} selected, {} ", human(bytes)),
+    let free = match app.free[i].1.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => String::new(),
+        f => format!("  free {} ", human(f - 1)),
+    };
+    let info = match panel.current().filter(|e| !e.is_parent()) {
+        _ if count > 0 => format!(" {count} selected, {}", human(bytes)),
         Some(e) => {
             let size = match dir_size(app, i, e) {
                 Some(s) => s,
@@ -410,9 +414,14 @@ pub fn panel_info(app: &App, i: usize) -> String {
                 .modified
                 .and_then(|t| jiff::ZonedDateTime::try_from(t).ok())
                 .map_or_else(String::new, |z| z.strftime("%y-%m-%d %H:%M:%S").to_string());
-            format!(" {}  {size}  {date}{link} ", e.name.to_string_lossy())
+            format!(" {}  {size}  {date}{link}", e.name.to_string_lossy())
         }
         None => String::new(),
+    };
+    if free.is_empty() {
+        info
+    } else {
+        format!("{info}{free}")
     }
 }
 

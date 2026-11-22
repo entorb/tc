@@ -176,6 +176,8 @@ enum Done {
 
 pub struct App {
     pub panels: [Panel; 2],
+    /// Free bytes + 1 per panel (0 = unknown), with the local directory they are measured for (see `free_tick`).
+    pub free: [(PathBuf, Arc<AtomicU64>); 2],
     /// Background tabs per side, in cycle order after the visible one in `panels`.
     pub tabs: [VecDeque<Panel>; 2],
     /// Position of the visible tab per side, for the title.
@@ -305,6 +307,7 @@ impl App {
     pub fn new(left: Panel, right: Panel) -> Self {
         Self {
             panels: [left, right],
+            free: Default::default(),
             tabs: Default::default(),
             tab: [0; 2],
             lists: Default::default(),
@@ -546,6 +549,26 @@ impl App {
         }
     }
 
+    /// Measure free space in a thread when a panel shows another local directory (a hung mount
+    /// must not freeze the UI); a stale thread writes into the replaced counter.
+    fn free_tick(&mut self) {
+        for (p, f) in self.panels.iter().zip(&mut self.free) {
+            let local = p.remote().is_none() && p.archive().is_none() && !p.is_virtual();
+            let dir = if local { p.path() } else { Path::new("") };
+            if f.0 != dir {
+                *f = (dir.to_owned(), Arc::default());
+                if local {
+                    let (dir, out) = (f.0.clone(), f.1.clone());
+                    thread::spawn(move || {
+                        if let Some(n) = hotlist::free_space(&dir) {
+                            out.store(n.saturating_add(1), Ordering::Relaxed);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
     fn dir_job_tick(&mut self) {
         if let Some((side, dir, p)) = &self.dir_job
             && p.scanned.load(Ordering::Acquire)
@@ -684,6 +707,7 @@ impl App {
                 }
             }
             KeyCode::Char('r') => {
+                self.free = Default::default();
                 if let Err(e) = self.panels[self.active].reload() {
                     self.mode = Mode::Message(e.to_string());
                 }
@@ -792,6 +816,7 @@ impl App {
 
     /// After a command ran: files may have changed in both panels.
     pub fn reload_all(&mut self) {
+        self.free = Default::default();
         for p in &mut self.panels {
             if let Err(e) = p.reload() {
                 self.mode = Mode::Message(e.to_string());
@@ -1193,6 +1218,7 @@ impl App {
 
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
+        self.free_tick();
         // dialogs keep a pending listing waiting so its error cannot replace them
         if matches!(self.mode, Mode::Normal) {
             for p in &mut self.panels {

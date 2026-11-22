@@ -31,6 +31,25 @@ pub fn mounts() -> Vec<PathBuf> {
     list
 }
 
+/// Index of the mount point that is the longest prefix of `path`.
+fn best_mount<'a>(mounts: impl IntoIterator<Item = &'a Path>, path: &Path) -> Option<usize> {
+    mounts
+        .into_iter()
+        .enumerate()
+        .filter(|(_, m)| path.starts_with(m))
+        .max_by_key(|(_, m)| m.components().count())
+        .map(|(i, _)| i)
+}
+
+/// Free bytes of the filesystem holding the absolute local `path`; lists the disks (slow), so
+/// never per frame.
+pub fn free_space(path: &Path) -> Option<u64> {
+    let disks = sysinfo::Disks::new_with_refreshed_list().ok()?;
+    let list: Vec<_> = disks.iter().collect();
+    let i = best_mount(list.iter().map(|d| d.mount_point()), path)?;
+    Some(list[i].available_space())
+}
+
 /// Missing file means empty list. Paths containing a newline cannot be stored.
 pub fn load(file: &Path) -> Result<Vec<PathBuf>> {
     let bytes = match fs::read(file) {
@@ -143,6 +162,15 @@ pub(crate) fn to_path(b: &[u8]) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn longest_mount_wins() {
+        let m = [Path::new("/"), Path::new("/home"), Path::new("/home/x")];
+        assert_eq!(best_mount(m, Path::new("/home/xy/a")), Some(1));
+        assert_eq!(best_mount(m, Path::new("/home/x/a")), Some(2));
+        assert_eq!(best_mount(m, Path::new("/etc")), Some(0));
+        assert_eq!(best_mount([Path::new("/mnt")], Path::new("/etc")), None);
+    }
 
     #[test]
     fn roundtrip_and_missing() {
