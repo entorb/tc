@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap
 use regex::Regex;
 
 use ratatui::widgets::ListState;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tc::app::{App, FindForm, Found, MENUS, Mode, RenameForm, Stats, Sync, SyncForm, menu_drop};
 use tc::fmt::{
     self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
@@ -685,7 +685,7 @@ fn popup_edit(frame: &mut Frame, title: &str, head: &str, l: &LineEdit, tail: &s
 fn list_popup(
     frame: &mut Frame,
     title: &str,
-    rows: &[&PathBuf],
+    rows: &[String],
     sel: usize,
     empty: &str,
     footer: &str,
@@ -696,7 +696,7 @@ fn list_popup(
         .enumerate()
         .skip(start)
         .take(4)
-        .map(|(i, p)| format!("{}{}\n", if i == sel { "> " } else { "  " }, p.display()))
+        .map(|(i, p)| format!("{}{p}\n", if i == sel { "> " } else { "  " }))
         .collect();
     if rows.is_empty() {
         text.push_str(empty);

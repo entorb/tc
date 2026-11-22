@@ -781,7 +781,7 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) {
                 ui.separator();
                 ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     for (k, p) in rows.iter().enumerate() {
-                        let mut t = RichText::new(p.display().to_string()).font(mono());
+                        let mut t = RichText::new(p.as_str()).font(mono());
                         if k == *sel {
                             t = t.background_color(SELECT_BG).color(Color32::WHITE);
                         }

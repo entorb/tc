@@ -1,4 +1,5 @@
-//! Bookmarked directories, stored as a plain-text file with one path per line.
+//! Bookmarked directories, stored as a plain-text file with one path per line (bookmarks:
+//! `alias<TAB>path` or `path`).
 
 use std::env;
 use std::fs;
@@ -66,6 +67,58 @@ pub fn save(file: &Path, list: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// A bookmarked directory with an optional alias (empty: none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookmark {
+    pub alias: String,
+    pub path: PathBuf,
+}
+
+impl Bookmark {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            alias: String::new(),
+            path,
+        }
+    }
+}
+
+/// Lines are `alias<TAB>path` or `path`, split at the first tab (shortcut: an old file with a
+/// tab inside a path and no alias misparses).
+pub fn load_bookmarks(file: &Path) -> Result<Vec<Bookmark>> {
+    Ok(load(file)?
+        .iter()
+        .filter_map(|l| {
+            let b = to_bytes(l);
+            let (alias, path) = match b.iter().position(|&c| c == b'\t') {
+                Some(i) => (String::from_utf8_lossy(&b[..i]).into_owned(), &b[i + 1..]),
+                None => (String::new(), &b[..]),
+            };
+            (!path.is_empty()).then(|| Bookmark {
+                alias,
+                path: to_path(path),
+            })
+        })
+        .collect())
+}
+
+/// Like [`save`]; a path with a tab and no alias gets an empty alias so the tab stays in the path.
+pub fn save_bookmarks(file: &Path, list: &[Bookmark]) -> Result<()> {
+    let lines: Vec<PathBuf> = list
+        .iter()
+        .map(|b| {
+            let path = to_bytes(&b.path);
+            let mut line = b.alias.replace(['\t', '\n'], "").into_bytes();
+            if !line.is_empty() || path.contains(&b'\t') {
+                line.push(b'\t');
+            }
+            line.extend_from_slice(&path);
+            to_path(&line)
+        })
+        .collect();
+    save(file, &lines)
+}
+
 #[cfg(unix)]
 pub(crate) fn to_bytes(p: &Path) -> Vec<u8> {
     std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()).to_vec()
@@ -127,5 +180,44 @@ mod tests {
         let p = to_path(b"/x/\xff\xfe");
         save(&file, std::slice::from_ref(&p)).unwrap();
         assert_eq!(load(&file).unwrap(), [p]);
+    }
+
+    #[test]
+    fn bookmarks_old_format_and_alias_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("h");
+        fs::write(&file, "/a\n/b\n").unwrap();
+        let mut list = load_bookmarks(&file).unwrap();
+        assert_eq!(
+            list,
+            [Bookmark::new("/a".into()), Bookmark::new("/b".into())]
+        );
+        list[0].alias = "Proj".into();
+        save_bookmarks(&file, &list).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"Proj\t/a\n/b\n");
+        assert_eq!(load_bookmarks(&file).unwrap(), list);
+    }
+
+    #[test]
+    fn bookmark_path_with_tab_survives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("h");
+        let list = [Bookmark::new("/x\ty".into())];
+        save_bookmarks(&file, &list).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"\t/x\ty\n");
+        assert_eq!(load_bookmarks(&file).unwrap(), list);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bookmark_non_utf8_path_with_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("h");
+        let list = [Bookmark {
+            alias: "Ä".into(),
+            path: to_path(b"/x/\xff"),
+        }];
+        save_bookmarks(&file, &list).unwrap();
+        assert_eq!(load_bookmarks(&file).unwrap(), list);
     }
 }

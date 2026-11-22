@@ -34,7 +34,8 @@ impl App {
         let paths = |name: &str| {
             hotlist::load(&dir.join(name)).with_context(|| format!("cannot read {name}"))
         };
-        self.hotlist = paths("hotlist")?;
+        self.hotlist =
+            hotlist::load_bookmarks(&dir.join("hotlist")).context("cannot read hotlist")?;
         self.connections = paths("connections")?;
         let kv = settings::load(&dir.join("settings")).context("cannot read settings")?;
         self.restore_session(&kv);

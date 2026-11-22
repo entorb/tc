@@ -1,6 +1,6 @@
 //! Frontend-neutral text: help, sizes, dates, progress.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
@@ -15,7 +15,7 @@ use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, Filter, FormRow, Found, Input, Mode, Procs, Stats, Step, Sync, Xfer, list_rows,
+    App, Filter, FormRow, Found, Input, ListRow, Mode, Procs, Stats, Step, Sync, Xfer, list_rows,
 };
 use tc_core::procs::{Proc, ProcSort};
 use tc_core::sync::Item;
@@ -405,7 +405,10 @@ pub const HELP_LISTS: &str = "\
 == Bookmarks (Ctrl+B) ==
 Up/Down         move
 Enter           go to the directory in the active panel
-Delete          remove the bookmark
+Insert / a      add the active panel's directory
+F4 / e          edit the alias (empty removes it)
+Ctrl+Up/Down    move the bookmark (also Shift+Up/Down), saved at once
+Delete/Bksp     remove the bookmark
 /               filter: Enter keeps, Esc clears
 Esc / q / F10   close
 
@@ -414,7 +417,7 @@ Up/Down         move
 Enter           connect
 Insert / a      add a connection
 F4 / e          edit the connection
-Delete          remove the connection
+Delete/Bksp     remove the connection
 /               filter: Enter keeps, Esc clears
 Esc / q / F10   close
 
@@ -540,7 +543,7 @@ pub enum Dialog<'a> {
     /// List with the selected row, `empty` shown when there are no rows.
     List {
         title: String,
-        rows: Vec<&'a PathBuf>,
+        rows: Vec<String>,
         /// Position in `rows`.
         sel: usize,
         empty: &'static str,
@@ -561,7 +564,7 @@ fn edit<'a>(title: &'a str, head: &str, l: &LineEdit, tail: &str) -> Option<Dial
 
 /// List of paths with the rows `filter` keeps; `list.2` is a row of `list.1`.
 fn list_dialog<'a>(
-    list: (&str, &'a [PathBuf], usize),
+    list: (&str, &[impl ListRow], usize),
     filter: &Filter,
     empty: &'static str,
     keys: &'static str,
@@ -571,7 +574,7 @@ fn list_dialog<'a>(
     Some(Dialog::List {
         title: format!("{title}{}", filter.tag()),
         sel: view.iter().position(|&i| i == sel).unwrap_or(0),
-        rows: view.iter().map(|&i| &rows[i]).collect(),
+        rows: view.iter().map(|&i| rows[i].label().into_owned()).collect(),
         empty,
         keys,
     })
@@ -614,8 +617,8 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
         Mode::Hotlist(sel) => list_dialog(
             ("Hotlist", &app.hotlist, *sel),
             &app.list_filter,
-            "(empty, Ctrl+D adds the current directory)",
-            "Enter go  Delete remove  / filter  Esc close",
+            "(empty, Insert or Ctrl+D adds the current directory)",
+            "Enter go  Insert add  F4 alias  Ctrl+Up/Dn move  Del/Bksp remove  / filter  Esc close",
         ),
         Mode::Drives(rows, sel, _) => list_dialog(
             ("Drives", rows, *sel),
@@ -627,7 +630,16 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             ("Connections", &app.connections, *sel),
             &app.list_filter,
             "(empty, Insert adds one)",
-            "Enter connect  Insert add  F4 edit  Delete remove  / filter  Esc close",
+            "Enter connect  Insert add  F4 edit  Del/Bksp remove  / filter  Esc close",
+        ),
+        Mode::HotlistAlias(row, l) => edit(
+            "Bookmark alias",
+            &format!(
+                "{}\n(empty removes the alias)",
+                app.hotlist[*row].path.to_string_lossy()
+            ),
+            l,
+            "[Enter] Save   [Esc] Cancel",
         ),
         Mode::ConnEdit(_, l) => edit(
             "Connection",

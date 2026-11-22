@@ -121,6 +121,8 @@ pub enum Mode {
     Connections(usize),
     /// Connection URL being added (`None`) or edited (row).
     ConnEdit(Option<usize>, LineEdit),
+    /// Alias of the bookmark in this row being edited.
+    HotlistAlias(usize, LineEdit),
     /// Connect running in a worker; may ask for a host key or password.
     Connecting(Connecting),
     /// Asks before deleting tc's files in this config directory.
@@ -1519,15 +1521,37 @@ fn delete_text(mut question: String, recursive: bool, remote: bool) -> String {
     question + "\n\n[y] Trash   [p] Delete permanently   [Esc] Cancel"
 }
 
+/// A row of a path list (drives, bookmarks, connections).
+pub trait ListRow {
+    /// Text shown, and matched by the `/` filter.
+    fn label(&self) -> Cow<'_, str>;
+}
+
+impl ListRow for PathBuf {
+    fn label(&self) -> Cow<'_, str> {
+        self.to_string_lossy()
+    }
+}
+
+impl ListRow for hotlist::Bookmark {
+    fn label(&self) -> Cow<'_, str> {
+        if self.alias.is_empty() {
+            self.path.to_string_lossy()
+        } else {
+            format!("{}  {}", self.alias, self.path.to_string_lossy()).into()
+        }
+    }
+}
+
 /// Indices of the `rows` a list shows.
-pub fn list_rows(rows: &[PathBuf], filter: &Filter) -> Vec<usize> {
+pub fn list_rows(rows: &[impl ListRow], filter: &Filter) -> Vec<usize> {
     (0..rows.len())
-        .filter(|&i| filter.matches(&rows[i].to_string_lossy()))
+        .filter(|&i| filter.matches(&rows[i].label()))
         .collect()
 }
 
 /// Filter and Up/Down keys of a path list; `sel` is a row of `rows`. True when `key` was used.
-fn list_nav(filter: &mut Filter, rows: &[PathBuf], sel: &mut usize, key: KeyEvent) -> bool {
+fn list_nav(filter: &mut Filter, rows: &[impl ListRow], sel: &mut usize, key: KeyEvent) -> bool {
     if filter.key(key) {
         *sel = list_rows(rows, filter).first().copied().unwrap_or(0);
         return true;
@@ -1884,7 +1908,7 @@ pub struct App {
     /// Viewer line numbers on (`l`).
     pub view_numbers: bool,
     /// Bookmarked directories and the file they are saved to (none: not persisted).
-    pub hotlist: Vec<PathBuf>,
+    pub hotlist: Vec<hotlist::Bookmark>,
     /// `/` filter of the open bookmark or connection list.
     pub list_filter: Filter,
     pub hotlist_file: Option<PathBuf>,
@@ -2235,6 +2259,7 @@ impl App {
                     self.mode = Mode::ConnEdit(row, l);
                 }
             },
+            Mode::HotlistAlias(row, l) => self.hotlist_alias_key(key, row, l),
             Mode::Connecting(c) => self.connecting_key(c, key),
             Mode::Confirm(op, targets, text) => self.confirm_key(op, targets, text, key.code),
             Mode::ResetConfig(dir) => self.reset_config_key(key.code, dir),
@@ -2579,10 +2604,9 @@ impl App {
                 };
                 self.mode = Mode::FindForm(form);
             }
-            KeyCode::Char('d') if self.panels[self.active].remote().is_some() => {
-                self.mode = Mode::Message(REMOTE.into())
+            KeyCode::Char('d') => {
+                self.hotlist_add();
             }
-            KeyCode::Char('d') => self.hotlist_add(),
             KeyCode::Char('g') => {
                 let panel = &mut self.panels[self.active];
                 let file = (panel.current())
@@ -3018,17 +3042,35 @@ impl App {
         }
     }
 
-    fn hotlist_add(&mut self) {
+    /// Bookmarks the active panel's directory; the row of the new or existing entry.
+    fn hotlist_add(&mut self) -> Option<usize> {
+        if self.panels[self.active].remote().is_some() {
+            self.mode = Mode::Message(REMOTE.into());
+            return None;
+        }
         let path = self.panels[self.active].path().to_owned();
-        if !self.hotlist.contains(&path) {
-            self.hotlist.push(path);
+        let row = self.hotlist.iter().position(|b| b.path == path);
+        if row.is_none() {
+            self.hotlist.push(hotlist::Bookmark::new(path));
             self.hotlist_save();
         }
+        row.or(Some(self.hotlist.len() - 1))
+    }
+
+    /// Ctrl/Shift+Up/Down: swaps bookmark `sel` with its neighbour and saves; the new row.
+    fn hotlist_move(&mut self, sel: usize, down: bool) -> usize {
+        let to = if down { sel + 1 } else { sel.wrapping_sub(1) };
+        if to >= self.hotlist.len() || sel >= self.hotlist.len() {
+            return sel;
+        }
+        self.hotlist.swap(sel, to);
+        self.hotlist_save();
+        to
     }
 
     fn hotlist_save(&mut self) {
         if let Some(file) = &self.hotlist_file
-            && let Err(e) = hotlist::save(file, &self.hotlist)
+            && let Err(e) = hotlist::save_bookmarks(file, &self.hotlist)
         {
             self.mode = Mode::Message(e.to_string());
         }
@@ -3098,6 +3140,18 @@ impl App {
 
     fn hotlist_key(&mut self, key: KeyEvent, sel: usize) {
         let mut sel = sel.min(self.hotlist.len().saturating_sub(1));
+        let moved = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        if let (true, KeyCode::Up | KeyCode::Down) = (moved, key.code) {
+            if !self.list_filter.active() && !self.list_filter.editing {
+                sel = self.hotlist_move(sel, key.code == KeyCode::Down);
+            }
+            if !matches!(self.mode, Mode::Message(_)) {
+                self.mode = Mode::Hotlist(sel);
+            }
+            return;
+        }
         if list_nav(&mut self.list_filter, &self.hotlist, &mut sel, key) {
             self.mode = Mode::Hotlist(sel);
             return;
@@ -3105,14 +3159,26 @@ impl App {
         let shown = list_rows(&self.hotlist, &self.list_filter).contains(&sel);
         match key.code {
             KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => return,
+            KeyCode::Insert | KeyCode::Char('a') => {
+                self.list_filter = Filter::default();
+                match self.hotlist_add() {
+                    Some(row) if !matches!(self.mode, Mode::Message(_)) => sel = row,
+                    _ => return,
+                }
+            }
+            KeyCode::F(4) | KeyCode::Char('e') if shown => {
+                let alias = self.hotlist[sel].alias.clone();
+                self.mode = Mode::HotlistAlias(sel, LineEdit::from(alias));
+                return;
+            }
             KeyCode::Enter if shown => {
-                let path = self.hotlist[sel].clone();
+                let path = self.hotlist[sel].path.clone();
                 if let Err(e) = self.panels[self.active].go(path) {
                     self.mode = Mode::Message(e.to_string());
                 }
                 return;
             }
-            KeyCode::Delete if shown => {
+            KeyCode::Delete | KeyCode::Backspace if shown => {
                 self.hotlist.remove(sel);
                 self.hotlist_save();
                 sel = list_rows(&self.hotlist, &self.list_filter)
@@ -4196,6 +4262,7 @@ impl App {
             | Mode::Transfer(_, _, l)
             | Mode::Mkdir(l)
             | Mode::NewFile(l)
+            | Mode::HotlistAlias(_, l)
             | Mode::ConnEdit(_, l) => paste_line(l, &text),
             Mode::Connecting(Connecting {
                 ask: Some((Prompt::Password(_), l)),
@@ -4519,6 +4586,23 @@ impl App {
         }
     }
 
+    fn hotlist_alias_key(&mut self, key: KeyEvent, row: usize, mut l: LineEdit) {
+        match key.code {
+            KeyCode::Enter => {
+                self.hotlist[row].alias = l.text.replace('\t', "").trim().to_owned();
+                self.hotlist_save();
+                if !matches!(self.mode, Mode::Message(_)) {
+                    self.mode = Mode::Hotlist(row);
+                }
+            }
+            KeyCode::Esc => self.mode = Mode::Hotlist(row),
+            _ => {
+                edit_key(&mut l, key);
+                self.mode = Mode::HotlistAlias(row, l);
+            }
+        }
+    }
+
     fn connections_key(&mut self, key: KeyEvent, sel: usize) {
         let mut sel = sel.min(self.connections.len().saturating_sub(1));
         if list_nav(&mut self.list_filter, &self.connections, &mut sel, key) {
@@ -4544,7 +4628,7 @@ impl App {
                 self.mode = Mode::ConnEdit(Some(sel), LineEdit::from(url));
                 return;
             }
-            (KeyCode::Delete, Some(_)) => {
+            (KeyCode::Delete | KeyCode::Backspace, Some(_)) => {
                 self.connections.remove(sel);
                 self.connections_save();
                 sel = list_rows(&self.connections, &self.list_filter)
@@ -5396,7 +5480,7 @@ mod tests {
         std::fs::create_dir(&a).unwrap();
         std::fs::create_dir(&b).unwrap();
         let mut app = two_panels(tmp.path(), tmp.path());
-        app.hotlist = vec![a, b.clone()];
+        app.hotlist = vec![hotlist::Bookmark::new(a), hotlist::Bookmark::new(b.clone())];
         with(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
         key(&mut app, KeyCode::Char('/'));
         type_keys(&mut app, "TW");
@@ -5675,6 +5759,38 @@ mod tests {
     }
 
     #[test]
+    fn hotlist_insert_alias_and_reorder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let mut app = two_panels(&a, &b);
+        let file = tmp.path().join("cfg").join("hotlist");
+        app.hotlist_file = Some(file.clone());
+        with(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert); // no duplicate
+        assert_eq!(app.hotlist.len(), 1);
+        app.hotlist = vec![hotlist::Bookmark::new(a), hotlist::Bookmark::new(b)];
+        key(&mut app, KeyCode::F(4));
+        type_keys(&mut app, "Work");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Hotlist(0)));
+        let saved = hotlist::load_bookmarks(&file).unwrap();
+        assert_eq!(saved[0].alias, "Work");
+        assert!(saved[0].label().starts_with("Work  "));
+        with(&mut app, KeyCode::Down, KeyModifiers::CONTROL);
+        assert!(matches!(app.mode, Mode::Hotlist(1)));
+        assert_eq!(hotlist::load_bookmarks(&file).unwrap()[1].alias, "Work");
+        // filter active: positions are ambiguous, nothing moves
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "work");
+        key(&mut app, KeyCode::Enter);
+        with(&mut app, KeyCode::Up, KeyModifiers::CONTROL);
+        assert_eq!(app.hotlist[1].alias, "Work");
+    }
+
+    #[test]
     fn hotlist_add_jump_delete_and_history() {
         let tmp = tempfile::tempdir().unwrap();
         let sub = tmp.path().join("sub");
@@ -5686,7 +5802,10 @@ mod tests {
             |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
         ctrl(&mut app, 'd');
         ctrl(&mut app, 'd'); // no duplicate
-        assert_eq!(hotlist::load(&file).unwrap(), [app.panels[0].path()]);
+        assert_eq!(
+            hotlist::load_bookmarks(&file).unwrap(),
+            [hotlist::Bookmark::new(app.panels[0].path().to_owned())]
+        );
         key(&mut app, KeyCode::Tab);
         ctrl(&mut app, 'b');
         key(&mut app, KeyCode::Enter);
@@ -5701,8 +5820,8 @@ mod tests {
         assert_eq!(app.panels[1].path(), tmp.path());
         key(&mut app, KeyCode::Esc);
         ctrl(&mut app, 'b');
-        key(&mut app, KeyCode::Delete);
-        assert!(app.hotlist.is_empty() && hotlist::load(&file).unwrap().is_empty());
+        key(&mut app, KeyCode::Backspace); // same as Delete
+        assert!(app.hotlist.is_empty() && hotlist::load_bookmarks(&file).unwrap().is_empty());
     }
 
     #[test]
@@ -6477,7 +6596,10 @@ mod tests {
         f.sel = 0;
         f.filter.line = LineEdit::from("n".to_owned());
         f.rebuild();
-        assert_eq!((f.sel, f.shown().next().map(|h| h.entry.size)), (0, Some(0)));
+        assert_eq!(
+            (f.sel, f.shown().next().map(|h| h.entry.size)),
+            (0, Some(0))
+        );
     }
 
     #[test]

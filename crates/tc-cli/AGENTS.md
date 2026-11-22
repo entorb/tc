@@ -14,8 +14,8 @@ Library = shared app logic for both front ends (TUI binary here, `tc-gui` reuses
 A user-facing feature is done when all apply:
 
 - Key binding works in TUI and GUI (shared logic, check `tc-gui/src/keys.rs` for GUI-only keys).
-- F1 help text updated (same help in both front ends).
-- F-key footer: screen shows its own keys, sub-screens end with `F10 Close`, panels with `F10 Quit`.
-- Menu entry; `tc-gui` toolbar icon if it is a tool (consistent icon style, tooltip shows the key).
-- List screens follow conventions: `/` filter, Ctrl+R refresh, F10 / `q` close.
-- README Highlights / key tables updated.
+- F1 help (`fmt.rs` `HELP_*`) lists every key and its behavior; same layout (`== Section ==`, key column), ends with the close key.
+- F-key footer: screen shows its own keys, sub-screens end with `F10 Close`, panels with `F10 Quit`; every footer key is in its help (test enforces).
+- F9 menu entry (terminals eat keys); `tc-gui` toolbar icon if it is a tool (same icon font, tooltip shows the key).
+- List screens follow conventions: `/` filter, Ctrl+R refresh, Esc / `q` / F10 close.
+- README: one overview line under the matching feature section, limits included; no key details.
