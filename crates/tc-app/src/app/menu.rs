@@ -159,6 +159,7 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Quick search        Ctrl+S", KeyCode::Char('s'), C),
             ("Quick filter        /", KeyCode::Char('/'), N),
             ("Command line        :", KeyCode::Char(':'), N),
+            ("Terminal here       Ctrl+O", KeyCode::Char('o'), C),
             // no shortcut: `Null` is never typed, only sent by these entries and F1 help
             ("Settings", KeyCode::Null, A),
             ("Delete config files", KeyCode::Null, N),

@@ -151,6 +151,57 @@ pub fn shell_command(cmd: &str, dir: &Path) -> Command {
     c
 }
 
+/// Terminal emulators tried in order when `$TERMINAL` is unset.
+#[cfg(all(unix, not(target_os = "macos")))]
+const TERMINALS: &[&str] = &[
+    "x-terminal-emulator",
+    "gnome-terminal",
+    "konsole",
+    "xfce4-terminal",
+    "alacritty",
+    "kitty",
+    "xterm",
+];
+
+/// First candidate for which `exists` holds.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn first_found<'a>(candidates: &[&'a str], exists: impl Fn(&str) -> bool) -> Option<&'a str> {
+    candidates.iter().copied().find(|c| exists(c))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+}
+
+/// The system terminal emulator opened in `dir`; `None` if none is installed.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn terminal_command(dir: &Path) -> Option<Command> {
+    let env = std::env::var("TERMINAL").ok().filter(|t| !t.is_empty());
+    let prog = match &env {
+        Some(t) => t.as_str(),
+        None => first_found(TERMINALS, on_path)?,
+    };
+    let mut c = Command::new(prog);
+    c.current_dir(dir);
+    Some(c)
+}
+
+#[cfg(target_os = "macos")]
+pub fn terminal_command(dir: &Path) -> Option<Command> {
+    let mut c = Command::new("open");
+    c.args(["-a", "Terminal"]).arg(dir);
+    Some(c)
+}
+
+#[cfg(windows)]
+pub fn terminal_command(dir: &Path) -> Option<Command> {
+    let mut c = Command::new("cmd");
+    c.args(["/C", "start", "", "cmd"]).current_dir(dir);
+    Some(c)
+}
+
 /// Media and office files: F3/F4 hand them to the desktop's default application, not the text viewer.
 pub fn opens_externally(path: &Path) -> bool {
     const EXT: &[&str] = &[
@@ -300,6 +351,14 @@ mod tests {
             "xdg-open"
         };
         assert_eq!(c.get_program(), prog);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn first_found_takes_first_existing() {
+        let have = |n: &str| n == "kitty" || n == "xterm";
+        assert_eq!(first_found(TERMINALS, have), Some("kitty"));
+        assert_eq!(first_found(TERMINALS, |_| false), None);
     }
 
     #[test]

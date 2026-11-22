@@ -80,6 +80,7 @@ Ctrl+S          quick search: type to jump to a match, Ctrl+S
 Ctrl+F          find files
 Ctrl+E          synchronize directories (left / right panel)
 :               command line (Up/Down: earlier commands)
+Ctrl+O          open a terminal in this directory (local panels only)
 
 == Files ==
 F3              view (media: preview)

@@ -661,6 +661,7 @@ impl App {
                 }
             }
             KeyCode::Char('m') => self.multi_rename(),
+            KeyCode::Char('o') => self.start_terminal(),
             KeyCode::Char('e') => self.sync_open(),
             KeyCode::Char('n') => self.open_list(Mode::Connections(0)),
             KeyCode::Char('b') => self.open_list(Mode::Hotlist(0)),
@@ -988,6 +989,32 @@ impl App {
             .spawn();
         if let Err(e) = spawned {
             self.mode = Mode::Message(format!("{}: {e}", path.display()));
+        }
+    }
+
+    /// Ctrl+O: system terminal in the active local directory, detached and reaped in the background.
+    fn start_terminal(&mut self) {
+        use std::process::Stdio;
+        let panel = &self.panels[self.active];
+        if panel.remote().is_some() || panel.archive().is_some() || panel.is_virtual() {
+            self.mode = Mode::Message("Terminal: local directories only.".into());
+            return;
+        }
+        let Some(mut cmd) = cmdline::terminal_command(panel.path()) else {
+            self.mode =
+                Mode::Message("Terminal: no terminal emulator found (set $TERMINAL).".into());
+            return;
+        };
+        match cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                std::thread::spawn(move || child.wait());
+            }
+            Err(e) => self.mode = Mode::Message(format!("Terminal: {e}")),
         }
     }
 
