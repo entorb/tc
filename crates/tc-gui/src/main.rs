@@ -108,7 +108,7 @@ impl Gui {
     }
 
     /// Run a `:` command without a terminal: output goes to a temp file shown in the viewer when done.
-    // shortcut: no interactive commands (vim, ssh password prompt) in tc-ui, upgrade by spawning a system terminal if wanted
+    // shortcut: no interactive commands (vim, ssh password prompt) in tc-gui, upgrade by spawning a system terminal if wanted
     fn start(&mut self, cmd: String, dir: &std::path::Path, url: Option<String>) {
         let command = match url {
             Some(url) => tc_remote::ssh_command(&url, &cmd, &tc_core::vfs::rpath(dir)),
