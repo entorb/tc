@@ -155,6 +155,10 @@ Ctrl+F          find files
 Ctrl+E          synchronize directories (left / right panel)
 :               command line
 
+== Config ==
+Delete config files  (F9 Tools) delete tc's saved files: hotlist,
+                connections, histories, searches, session
+
 == Files ==
 F3 / F4         view (media: preview) / edit
 Shift+F4        create file, edit in external editor
@@ -219,7 +223,7 @@ Left/Right  scroll sideways
 g  go to line or N%
 
 == Search ==
-/ or f or F7  find
+/ or f or F7  find (prompt: Up/Down earlier patterns)
 n  next match
 N  previous match
 
@@ -239,7 +243,7 @@ Ctrl+Home/End  start / end of file
 Ctrl+G  go to line
 
 == Search ==
-F7 / Ctrl+F  find
+F7 / Ctrl+F  find (prompt: Up/Down earlier patterns)
 F3  next match
 Shift+F3  previous match
 F4 / Ctrl+R  replace all
@@ -304,6 +308,14 @@ fn text<'a>(title: &'a str, text: String) -> Option<Dialog<'a>> {
 pub fn dialog(app: &App) -> Option<Dialog<'_>> {
     match &app.mode {
         Mode::Confirm(op, _, t) => text(op.verb(), t.clone()),
+        Mode::ResetConfig(dir) => text(
+            "Delete config files",
+            format!(
+                "Delete tc's files in {}?\n{}\nOther files there stay.\n\ny delete   n/Esc cancel",
+                dir.display(),
+                tc_core::settings::FILES.join(", ")
+            ),
+        ),
         Mode::Transfer(op, targets, l) => edit(
             op.verb(),
             &format!(
@@ -637,7 +649,8 @@ pub fn sync_footer(s: &Sync) -> String {
 
 /// Keys shown under the find form.
 pub const FIND_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter search  Esc cancel
-F2 save as \"Saved search\"  F3 load next saved  F8 delete saved";
+F2 save as \"Saved search\"  F3 load next saved  F8 delete saved
+Alt+Up/Down earlier searches";
 
 /// Preview rows under the multi-rename form; PgUp/PgDn scroll by this.
 pub const RENAME_PREVIEW_ROWS: usize = 12;

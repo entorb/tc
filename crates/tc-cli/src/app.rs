@@ -29,6 +29,7 @@ use tc_core::vfs::{self, Remote, Side};
 use tc_core::{Error, find, hotlist, ops, rename, search, view::Viewer};
 use tc_remote::Prompt;
 
+mod config;
 mod sync;
 pub use sync::{Sync, SyncForm};
 
@@ -118,6 +119,8 @@ pub enum Mode {
     ConnEdit(Option<usize>, LineEdit),
     /// Connect running in a worker; may ask for a host key or password.
     Connecting(Connecting),
+    /// Asks before deleting tc's files in this config directory.
+    ResetConfig(PathBuf),
 }
 
 enum CMsg {
@@ -428,6 +431,42 @@ impl FormRow {
     }
 }
 
+/// Form rows as tab separated `label=value` (checkboxes `1`/`0`, choices their index),
+/// without the `skip` row; tabs inside values become spaces.
+fn rows_to_line(rows: &[FormRow], skip: &str) -> String {
+    let parts: Vec<String> = (rows.iter().filter(|r| r.label() != skip))
+        .map(|row| {
+            let value = match row {
+                FormRow::Text(_, l) => l.text.replace('\t', " "),
+                FormRow::Check(_, on) => if *on { "1" } else { "0" }.into(),
+                FormRow::Choice(_, _, i) => i.to_string(),
+            };
+            format!("{}={value}", row.label())
+        })
+        .collect();
+    parts.join("\t")
+}
+
+/// Set rows from a [`rows_to_line`] line; unknown labels are ignored, missing ones keep their value.
+fn rows_from_line(rows: &mut [FormRow], line: &str) {
+    let values: HashMap<&str, &str> = line.split('\t').filter_map(|p| p.split_once('=')).collect();
+    for row in rows {
+        let Some(&v) = values.get(row.label()) else {
+            continue;
+        };
+        match row {
+            FormRow::Text(_, l) => {
+                l.text = v.into();
+                l.end();
+            }
+            FormRow::Check(_, on) => *on = v == "1",
+            FormRow::Choice(_, opts, i) => {
+                *i = v.parse().ok().filter(|&v| v < opts.len()).unwrap_or(0);
+            }
+        }
+    }
+}
+
 fn form_text<'a>(rows: &'a [FormRow], label: &str) -> &'a str {
     match rows.iter().find(|r| r.label() == label) {
         Some(FormRow::Text(_, l)) => &l.text,
@@ -446,6 +485,8 @@ pub struct FindForm {
     pub rows: Vec<FormRow>,
     pub focus: usize,
     pub error: Option<String>,
+    /// Position in the find history for Alt+Up/Down (= its length: not from history).
+    hist: usize,
 }
 
 impl FindForm {
@@ -454,6 +495,7 @@ impl FindForm {
             rows: find_rows(),
             focus: 0,
             error: None,
+            hist: 0,
         }
     }
 
@@ -491,40 +533,23 @@ impl FindForm {
         }
     }
 
-    /// One line of the saved searches file: `name`, then tab separated `label=value`
-    /// (checkboxes `1`/`0`); tabs inside values become spaces.
+    /// One line of the saved searches file: `name`, then the [`rows_to_line`] of the form.
     fn to_line(&self, name: &str) -> String {
-        let mut line = name.replace('\t', " ");
-        for row in self.rows.iter().filter(|r| r.label() != F_SAVED) {
-            let value = match row {
-                FormRow::Text(_, l) => l.text.replace('\t', " "),
-                FormRow::Check(_, on) => if *on { "1" } else { "0" }.into(),
-                FormRow::Choice(_, _, i) => i.to_string(),
-            };
-            line += &format!("\t{}={value}", row.label());
-        }
-        line
+        format!(
+            "{}\t{}",
+            name.replace('\t', " "),
+            rows_to_line(&self.rows, F_SAVED)
+        )
     }
 
     /// The form a saved line describes; unknown labels are ignored, missing ones stay empty.
     fn from_line(line: &str) -> Self {
         let mut form = FindForm::new();
-        let mut parts = line.split('\t');
-        let name = parts.next().unwrap_or_default();
-        let values: HashMap<&str, &str> = parts.filter_map(|p| p.split_once('=')).collect();
-        for row in &mut form.rows {
-            match row {
-                FormRow::Text(F_SAVED, l) => l.text = name.into(),
-                FormRow::Text(label, l) => l.text = values.get(label).unwrap_or(&"").to_string(),
-                FormRow::Check(label, on) => *on = values.get(label) == Some(&"1"),
-                FormRow::Choice(label, opts, i) => {
-                    let v = values.get(label).and_then(|v| v.parse().ok());
-                    *i = v.filter(|&v| v < opts.len()).unwrap_or(0);
-                }
-            }
-            if let FormRow::Text(_, l) = row {
-                l.end();
-            }
+        let (name, rest) = line.split_once('\t').unwrap_or((line, ""));
+        rows_from_line(&mut form.rows, rest);
+        if let Some(FormRow::Text(_, l)) = form.rows.iter_mut().find(|r| r.label() == F_SAVED) {
+            l.text = name.into();
+            l.end();
         }
         form
     }
@@ -1134,6 +1159,8 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Quick search        Ctrl+S", KeyCode::Char('s'), C),
             ("Quick filter        /", KeyCode::Char('/'), N),
             ("Command line        :", KeyCode::Char(':'), N),
+            // no shortcut: `Null` is never typed, only sent by this entry and F1 help
+            ("Delete config files", KeyCode::Null, N),
         ],
     ),
     (
@@ -1267,9 +1294,14 @@ pub struct App {
     last_host: Vec<PathBuf>,
     /// Find form as last searched or cancelled; Ctrl+F reopens it.
     last_find: Option<FindForm>,
-    /// Multi-rename settings of past runs, oldest first; Ctrl+M opens with the last.
-    // TODO: persist to a config file like the saved searches
-    rename_history: Vec<Vec<FormRow>>,
+    /// Multi-rename settings of past runs ([`rows_to_line`]), oldest first; Ctrl+M opens with the last.
+    rename_history: Vec<String>,
+    /// Find files forms of past searches ([`FindForm::to_line`]), oldest first.
+    finds: Vec<String>,
+    /// Patterns of the viewer / editor Find and Replace prompts, oldest first.
+    find_history: Vec<String>,
+    /// Directory of the settings and history files (none: not persisted).
+    config_dir: Option<PathBuf>,
     /// Sync form as last used; Ctrl+E reopens it.
     last_sync: Option<SyncForm>,
     /// A running sync compares again when it ends.
@@ -1343,6 +1375,9 @@ impl App {
             last_host: Vec::new(),
             last_find: None,
             rename_history: Vec::new(),
+            finds: Vec::new(),
+            find_history: Vec::new(),
+            config_dir: None,
             last_sync: None,
             sync_again: None,
             found: None,
@@ -1363,34 +1398,6 @@ impl App {
             connections_file: None,
             edit_remote: None,
         }
-    }
-
-    /// Load hotlist, connections and command history from the config directory.
-    pub fn load_config(&mut self) -> anyhow::Result<()> {
-        use anyhow::Context;
-        self.hotlist_file = hotlist::default_path();
-        if let Some(file) = &self.hotlist_file {
-            self.hotlist = hotlist::load(file).context("cannot read hotlist")?;
-        }
-        self.connections_file = self
-            .hotlist_file
-            .as_ref()
-            .map(|f| f.with_file_name("connections"));
-        if let Some(file) = &self.connections_file {
-            self.connections = hotlist::load(file).context("cannot read connections")?;
-        }
-        self.searches_file = self
-            .hotlist_file
-            .as_ref()
-            .map(|f| f.with_file_name("searches"));
-        if let Some(file) = &self.searches_file {
-            self.searches = cmdline::load_history(file).context("cannot read saved searches")?;
-        }
-        self.history_file = cmdline::history_path();
-        if let Some(file) = &self.history_file {
-            self.history = cmdline::load_history(file).context("cannot read history")?;
-        }
-        Ok(())
     }
 
     pub fn other_dir(&self) -> &Path {
@@ -1607,6 +1614,7 @@ impl App {
             },
             Mode::Connecting(c) => self.connecting_key(c, key),
             Mode::Confirm(op, targets, text) => self.confirm_key(op, targets, text, key.code),
+            Mode::ResetConfig(dir) => self.reset_config_key(key.code, dir),
             Mode::Transfer(op, targets, mut text) => match key.code {
                 KeyCode::Enter => self.run(op, &targets, &text.text),
                 KeyCode::Esc => {}
@@ -1940,7 +1948,12 @@ impl App {
             KeyCode::Char('x') => self.clip_files(Op::Move),
             KeyCode::Char('v') => self.paste(),
             KeyCode::Char('f') => {
-                self.mode = Mode::FindForm(self.last_find.take().unwrap_or_default());
+                let len = self.finds.len();
+                let form = match self.last_find.take() {
+                    Some(f) => FindForm { hist: len, ..f },
+                    None => self.find_hist(len.saturating_sub(1)),
+                };
+                self.mode = Mode::FindForm(form);
             }
             KeyCode::Char('d') if self.panels[self.active].remote().is_some() => {
                 self.mode = Mode::Message(REMOTE.into())
@@ -2496,11 +2509,24 @@ impl App {
             KeyCode::Esc => return self.last_find = Some(form),
             KeyCode::Enter => match form.query(self.exact, remote) {
                 Ok(q) => {
+                    let line = form.to_line(form.text(F_SAVED).trim());
+                    self.note = self.remember("find-forms", &line);
                     self.last_find = Some(form);
                     return self.spawn_find(q);
                 }
                 Err(e) => form.error = Some(e),
             },
+            KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                let i = match key.code {
+                    KeyCode::Up => form.hist.saturating_sub(1),
+                    _ => (form.hist + 1).min(self.finds.len()),
+                };
+                let focus = form.focus;
+                form = FindForm {
+                    focus,
+                    ..self.find_hist(i)
+                };
+            }
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
             KeyCode::F(2 | 3 | 8) => form = self.saved_search_key(key.code, form),
@@ -2870,6 +2896,12 @@ impl App {
         };
         match key.code {
             KeyCode::Esc => return,
+            KeyCode::Up if matches!(input.ask, Ask::Find | Ask::Replace) => {
+                input.text.prev(&self.find_history);
+            }
+            KeyCode::Down if matches!(input.ask, Ask::Find | Ask::Replace) => {
+                input.text.next(&self.find_history);
+            }
             KeyCode::Enter => match self.submit(&mut input) {
                 Ok(true) => return,
                 Ok(false) => {}
@@ -2899,6 +2931,7 @@ impl App {
                 // empty answer repeats the last search
                 if !text.is_empty() {
                     self.search = Some(compile(&text)?);
+                    self.note = self.remember("find-history", &text);
                 } else if self.search.is_none() {
                     return Err("empty pattern".into());
                 }
@@ -2906,6 +2939,7 @@ impl App {
             }
             Ask::Replace => {
                 compile(&text)?;
+                self.note = self.remember("find-history", &text);
                 input.pattern = text;
                 input.text.clear();
                 input.ask = Ask::With;
@@ -2936,6 +2970,7 @@ impl App {
         let panel = &mut self.panels[self.active];
         match code {
             KeyCode::Char('q') | KeyCode::F(10) => self.quit = true,
+            KeyCode::Null => self.ask_reset_config(),
             KeyCode::F(9) => self.mode = Mode::Menu(0, 0),
             KeyCode::Tab => self.active = 1 - self.active,
             KeyCode::Up => panel.move_cursor(-1),
@@ -3160,11 +3195,7 @@ impl App {
             return;
         }
         let mut form = RenameForm {
-            rows: self
-                .rename_history
-                .last()
-                .cloned()
-                .unwrap_or_else(rename_rows),
+            rows: self.rename_hist(self.rename_history.len().saturating_sub(1)),
             focus: 0,
             dir: panel.path().to_owned(),
             items,
@@ -3189,8 +3220,7 @@ impl App {
                     KeyCode::Up => form.hist.saturating_sub(1),
                     _ => (form.hist + 1).min(len),
                 };
-                form.rows =
-                    (self.rename_history.get(form.hist).cloned()).unwrap_or_else(rename_rows);
+                form.rows = self.rename_hist(form.hist);
                 form.refresh();
             }
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
@@ -3225,10 +3255,7 @@ impl App {
                 return;
             }
         };
-        self.rename_history.push(form.rows);
-        if self.rename_history.len() > 20 {
-            self.rename_history.remove(0);
-        }
+        self.note = self.remember("rename-history", &rows_to_line(&form.rows, ""));
         let side = self.panels[self.active].side();
         let dir = form.dir;
         let sides = (side.clone(), side.clone());

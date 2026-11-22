@@ -77,6 +77,13 @@ impl eframe::App for Gui {
         // worker results (copy progress, find, stats, dir loads) show up without input
         ctx.request_repaint_after(Duration::from_millis(100));
     }
+
+    /// Also runs when the window is closed, not only on F10.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Err(e) = self.app.save_session() {
+            eprintln!("tc: {e:#}");
+        }
+    }
 }
 
 impl Gui {

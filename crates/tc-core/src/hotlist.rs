@@ -67,23 +67,23 @@ pub fn save(file: &Path, list: &[PathBuf]) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn to_bytes(p: &Path) -> Vec<u8> {
+pub(crate) fn to_bytes(p: &Path) -> Vec<u8> {
     std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()).to_vec()
 }
 
 #[cfg(unix)]
-fn to_path(b: &[u8]) -> PathBuf {
+pub(crate) fn to_path(b: &[u8]) -> PathBuf {
     PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b))
 }
 
 // shortcut: non-UTF-8 paths are lossy off Unix, upgrade with WTF-8 if it matters
 #[cfg(not(unix))]
-fn to_bytes(p: &Path) -> Vec<u8> {
+pub(crate) fn to_bytes(p: &Path) -> Vec<u8> {
     p.to_string_lossy().into_owned().into_bytes()
 }
 
 #[cfg(not(unix))]
-fn to_path(b: &[u8]) -> PathBuf {
+pub(crate) fn to_path(b: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(b).into_owned())
 }
 

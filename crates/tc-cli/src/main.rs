@@ -61,6 +61,9 @@ fn main() -> anyhow::Result<()> {
         DisableBracketedPaste,
         DisableMouseCapture
     )?;
+    if let Err(e) = app.save_session() {
+        eprintln!("tc: {e:#}");
+    }
     result
 }
 

@@ -15,6 +15,7 @@ pub mod panel;
 pub mod procs;
 pub mod rename;
 pub mod search;
+pub mod settings;
 pub mod stats;
 pub mod sync;
 pub mod syntax;
