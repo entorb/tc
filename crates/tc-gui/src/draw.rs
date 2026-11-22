@@ -7,7 +7,7 @@ use eframe::egui::{
     ScrollArea, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob, vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{App, MENUS, Mode, Stats, help_action};
+use tc::app::{App, MENUS, Mode, Stats, TOOLBAR, help_action};
 use tc::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
     panel_title, stats_footer, stats_row,
@@ -45,6 +45,7 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         egui::CentralPanel::default().show(ui, |ui| draw_editor(ui, app));
     } else {
         egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, app));
+        egui::Panel::top("toolbar").show(ui, |ui| toolbar(ui, app));
         egui::Panel::bottom("footer").show(ui, |ui| footer(ui, app));
         // File Stats and processes have their own status / prompt line
         let own = app.stats.is_some() || matches!(app.mode, Mode::Stats(_) | Mode::Procs(_));
@@ -232,6 +233,18 @@ fn menu_bar(ui: &mut Ui, app: &mut App) {
     if let Some((g, i)) = run {
         app.menu_run(g, i);
     }
+}
+
+/// Icon toolbar under the menu bar; clicks send the key the menu lists.
+fn toolbar(ui: &mut Ui, app: &mut App) {
+    ui.horizontal(|ui| {
+        for &(icon, tip, code, mods) in &TOOLBAR {
+            let clicked = ui.add(Button::new(icon)).on_hover_text(tip).clicked();
+            if clicked && app.idle() {
+                app.on_key(KeyEvent::new(code, mods));
+            }
+        }
+    });
 }
 
 /// F-key bar; buttons are not focusable, so Tab and Space stay with the app.

@@ -771,6 +771,22 @@ pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 5] = [
     ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
 ];
 
+/// tc-gui toolbar: icon, tooltip and key sent when clicked; the rest stays in the F9 menu.
+pub const TOOLBAR: [(&str, &str, KeyCode, KeyModifiers); 7] = [
+    ("★", "Bookmarks (Ctrl+B)", KeyCode::Char('b'), C),
+    (":", "Run command (:)", KeyCode::Char(':'), N),
+    ("+", "New tab (Ctrl+T)", KeyCode::Char('t'), C),
+    ("🖧", "Connect to server (Ctrl+N)", KeyCode::Char('n'), C),
+    (
+        "du",
+        "Space usage, ncdu (Ctrl+Space)",
+        KeyCode::Char(' '),
+        C,
+    ),
+    ("top", "Process monitor (Ctrl+P)", KeyCode::Char('p'), C),
+    ("🔍", "Find files (Ctrl+F)", KeyCode::Char('f'), C),
+];
+
 pub struct App {
     pub panels: [Panel; 2],
     /// Background tabs per side, in cycle order after the visible one in `panels`.
