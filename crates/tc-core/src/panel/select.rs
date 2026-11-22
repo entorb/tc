@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::{Entry, Panel, compare};
+use super::{CompareKind, Entry, Panel, compare};
 
 impl Panel {
     /// Select entries `a..=b` (any order), not "..", and put the cursor on `b`.
@@ -97,9 +97,9 @@ impl Panel {
         }
     }
 
-    /// Replace the selection of both panels with their differences (see [`compare`]); visible entries only.
-    pub fn compare_with(&mut self, other: &mut Panel) {
-        let (sa, sb) = compare(&self.entries, &other.entries);
+    /// Replace the selection of both panels with the entries `kind` picks (see [`compare`]); visible entries only.
+    pub fn compare_with(&mut self, other: &mut Panel, kind: CompareKind) {
+        let (sa, sb) = compare(&self.entries, &other.entries, kind);
         self.selected = sa;
         other.selected = sb;
         self.sel_sum.set(None);

@@ -23,6 +23,7 @@ use tc_core::{Error, hotlist, ops, view::Viewer};
 use tc_remote::Prompt;
 
 mod bookmarks;
+mod compare;
 mod config;
 mod connect;
 mod editor;
@@ -96,6 +97,8 @@ pub enum Mode {
     Hotlist(usize),
     /// F9 menu bar: open group and selected entry.
     Menu(usize, usize),
+    /// Ctrl+Y: what to select, selected row.
+    Compare(usize),
     /// Mount points, selected row and the panel Enter jumps.
     Drives(Vec<PathBuf>, usize, usize),
     Message(String),
@@ -237,6 +240,8 @@ pub struct App {
     last_host: Vec<PathBuf>,
     /// Find form as last searched or cancelled; Ctrl+F reopens it.
     last_find: Option<FindForm>,
+    /// Row of the last Ctrl+Y choice.
+    compare_last: usize,
     /// Multi-rename settings of past runs ([`rows_to_line`]), oldest first; Ctrl+M opens with the last.
     rename_history: Vec<String>,
     /// Find files forms of past searches ([`FindForm::to_line`]), oldest first.
@@ -340,6 +345,7 @@ impl App {
             file_clip: None,
             last_host: Vec::new(),
             last_find: None,
+            compare_last: 0,
             rename_history: Vec::new(),
             finds: Vec::new(),
             syncs: Vec::new(),
@@ -465,6 +471,7 @@ impl App {
             },
             Mode::Cmd(l) => self.cmd_key(l, key),
             Mode::Hotlist(sel) => self.hotlist_key(key, sel),
+            Mode::Compare(sel) => self.compare_key(key.code, sel),
             Mode::Menu(group, sel) => self.menu_key(key.code, group, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
             Mode::Found(f) => self.found_key(key, f),
@@ -693,10 +700,7 @@ impl App {
                 let r = self.panels[self.active].remote().cloned();
                 self.mode = Mode::Procs(Box::new(Procs::new(r)));
             }
-            KeyCode::Char('y') => {
-                let [a, b] = &mut self.panels;
-                a.compare_with(b);
-            }
+            KeyCode::Char('y') => self.compare_open(),
             KeyCode::Char('u') => {
                 self.panels.swap(0, 1);
                 self.tabs.swap(0, 1);

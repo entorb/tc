@@ -10,7 +10,7 @@ use regex::Regex;
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::{Editor, Eol, human};
 use tc_core::find::{Hit, MAX_RESULTS};
-use tc_core::panel::{Entry, SortKey};
+use tc_core::panel::{CompareKind, Entry, SortKey};
 use tc_core::stats::treemap::Kind as TileKind;
 use tc_core::stats::{self, Node};
 use tc_core::syntax::{self, Kind, Lang};
@@ -213,6 +213,11 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             ("Hotlist", &app.hotlist, *sel),
             &app.list_filter,
             "(empty, Insert or Ctrl+D adds the current directory)",
+        ),
+        Mode::Compare(sel) => list_dialog(
+            ("Compare panels, select", &CompareKind::ALL, *sel),
+            &Filter::default(),
+            "",
         ),
         Mode::Drives(rows, sel, _) => list_dialog(
             ("Drives", rows, *sel),

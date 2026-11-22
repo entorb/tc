@@ -297,6 +297,12 @@ impl ListRow for PathBuf {
     }
 }
 
+impl ListRow for tc_core::panel::CompareKind {
+    fn label(&self) -> Cow<'_, str> {
+        Self::label(*self).into()
+    }
+}
+
 impl ListRow for hotlist::Bookmark {
     fn label(&self) -> Cow<'_, str> {
         if self.alias.is_empty() {

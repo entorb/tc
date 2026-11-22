@@ -70,7 +70,10 @@ Shift+Up/Down   select range
 +               select by mask
 -               deselect by mask
 *               invert selection
-Ctrl+Y          select differences to other panel
+Ctrl+Y          compare with the other panel and select, per
+                panel, its own: newer + single (default),
+                newer, single (only here), different + single,
+                different (size or date); Enter repeats the last
 
 == Search ==
 Ctrl+S          quick search: type to jump to a match, Ctrl+S
@@ -343,6 +346,11 @@ Delete/Bksp     remove the connection
 /               filter: Enter keeps, Esc clears
 Esc / q / F10   close
 
+== Compare (Ctrl+Y) ==
+Up/Down         move
+Enter           select by the row, both panels
+Esc / q / F10   close
+
 == Drives (Alt+F1 / Alt+F2) ==
 Up/Down         move
 Enter           go to the mount point
@@ -512,7 +520,9 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Settings(_) => ("Help: settings", HELP_SETTINGS),
         Mode::Found(_) => ("Help: found files", HELP_FOUND),
         Mode::MultiRename(_) => ("Help: multi-rename", HELP_RENAME),
-        Mode::Hotlist(_) | Mode::Connections(_) | Mode::Drives(..) => ("Help: lists", HELP_LISTS),
+        Mode::Hotlist(_) | Mode::Connections(_) | Mode::Drives(..) | Mode::Compare(_) => {
+            ("Help: lists", HELP_LISTS)
+        }
         Mode::Xfer(_) => ("Help: file exists", HELP_CONFLICT),
         _ => ("Help", HELP_MAIN),
     }

@@ -12,7 +12,10 @@ impl App {
             || (self.input.is_none()
                 && !self.help
                 && match &self.mode {
-                    Mode::Hotlist(_) | Mode::Connections(_) | Mode::Drives(..) => true,
+                    Mode::Hotlist(_)
+                    | Mode::Connections(_)
+                    | Mode::Drives(..)
+                    | Mode::Compare(_) => true,
                     Mode::Xfer(x) => x.ask.is_some() && x.rename.is_none(),
                     _ => false,
                 })

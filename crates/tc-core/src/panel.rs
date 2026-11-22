@@ -69,16 +69,63 @@ impl Entry {
     }
 }
 
-/// Names to select on each side: present only there, or (files) different size or newer than the same name on the other side.
-pub fn compare(a: &[Entry], b: &[Entry]) -> (HashSet<OsString>, HashSet<OsString>) {
+/// What Ctrl+Y selects. "Single" = present only on this side; the others need the name on both sides
+/// (directories on both sides never differ).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareKind {
+    Newer,
+    Single,
+    NewerSingle,
+    Different,
+    DifferentSingle,
+}
+
+impl CompareKind {
+    pub const ALL: [Self; 5] = [
+        Self::NewerSingle,
+        Self::Newer,
+        Self::Single,
+        Self::DifferentSingle,
+        Self::Different,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Newer => "Newer",
+            Self::Single => "Single (only here)",
+            Self::NewerSingle => "Newer + single",
+            Self::Different => "Different (size or date)",
+            Self::DifferentSingle => "Different + single",
+        }
+    }
+
+    fn picks(self, e: &Entry, other: Option<&Entry>) -> bool {
+        let Some(o) = other else {
+            return !matches!(self, Self::Newer | Self::Different);
+        };
+        if e.is_dir {
+            return false;
+        }
+        let newer = e.modified > o.modified;
+        match self {
+            Self::Newer | Self::NewerSingle => newer,
+            Self::Different | Self::DifferentSingle => e.size != o.size || newer,
+            Self::Single => false,
+        }
+    }
+}
+
+/// Names to select on each side for `kind`.
+pub fn compare(
+    a: &[Entry],
+    b: &[Entry],
+    kind: CompareKind,
+) -> (HashSet<OsString>, HashSet<OsString>) {
     let pick = |x: &[Entry], y: &[Entry]| {
         let other: HashMap<&OsString, &Entry> = y.iter().map(|e| (&e.name, e)).collect();
         x.iter()
             .filter(|e| !e.is_parent())
-            .filter(|e| match other.get(&e.name) {
-                None => true,
-                Some(o) => !e.is_dir && (e.size != o.size || e.modified > o.modified),
-            })
+            .filter(|e| kind.picks(e, other.get(&e.name).copied()))
             .map(|e| e.name.clone())
             .collect()
     };
@@ -581,10 +628,26 @@ mod tests {
             e("size", false, 3, 5),
             e("d", true, 0, 1),
         ];
-        let (sa, sb) = compare(&a, &b);
         let n = |v: &[&str]| v.iter().map(OsString::from).collect::<HashSet<_>>();
-        assert_eq!(sa, n(&["only_a", "newer", "size"]));
-        assert_eq!(sb, n(&["only_b", "older", "size"]));
+        let run = |k| compare(&a, &b, k);
+        use CompareKind::*;
+        assert_eq!(run(Newer), (n(&["newer"]), n(&["older"])));
+        assert_eq!(run(Single), (n(&["only_a"]), n(&["only_b"])));
+        assert_eq!(
+            run(NewerSingle),
+            (n(&["only_a", "newer"]), n(&["only_b", "older"]))
+        );
+        assert_eq!(
+            run(Different),
+            (n(&["newer", "size"]), n(&["older", "size"]))
+        );
+        assert_eq!(
+            run(DifferentSingle),
+            (
+                n(&["only_a", "newer", "size"]),
+                n(&["only_b", "older", "size"])
+            )
+        );
     }
 
     fn settle(p: &mut Panel) {

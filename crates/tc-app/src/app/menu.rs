@@ -144,7 +144,7 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Select by mask      +", KeyCode::Char('+'), N),
             ("Deselect by mask    -", KeyCode::Char('-'), N),
             ("Invert selection    *", KeyCode::Char('*'), N),
-            ("Select differences  Ctrl+Y", KeyCode::Char('y'), C),
+            ("Compare, select     Ctrl+Y", KeyCode::Char('y'), C),
         ],
     ),
     (
@@ -252,7 +252,7 @@ pub const TOOLBAR: [&[ToolItem]; 2] = [
         ("🔍", "Find files (Ctrl+F)", KeyCode::Char('f'), C),
         (
             "⚖",
-            "Compare panels, select differences (Ctrl+Y)",
+            "Compare panels, select newer / single / different (Ctrl+Y)",
             KeyCode::Char('y'),
             C,
         ),
