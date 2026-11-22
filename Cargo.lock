@@ -4535,7 +4535,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tc"
+name = "tc-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4590,7 +4590,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "jiff",
- "tc",
+ "tc-cli",
  "tc-core",
  "tc-remote",
  "tempfile",

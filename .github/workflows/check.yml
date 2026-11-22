@@ -136,7 +136,7 @@ jobs:
       # Linux/Windows release binaries only for releases; macOS always, thin LTO outside releases
       - name: Build release
         if: inputs.release || runner.os == 'macOS'
-        run: cargo build --release --locked -p tc -p tc-ui
+        run: cargo build --release --locked -p tc-cli -p tc-ui
         env:
           CARGO_PROFILE_RELEASE_LTO: ${{ inputs.release && 'true' || 'thin' }}
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.release && '1' || '16' }}
