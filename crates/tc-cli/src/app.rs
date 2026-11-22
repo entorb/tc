@@ -121,6 +121,8 @@ pub enum Mode {
     Connecting(Connecting),
     /// Asks before deleting tc's files in this config directory.
     ResetConfig(PathBuf),
+    /// Asks before leaving tc (F10 / q in the main panel).
+    AskQuit,
 }
 
 enum CMsg {
@@ -205,6 +207,10 @@ pub struct FileClip {
 /// Results of a running or finished file search.
 pub struct Found {
     pub list: Vec<Hit>,
+    /// Indices into `list` of the shown results (all, or those matching `filter`).
+    view: Vec<usize>,
+    pub filter: Filter,
+    /// Row in `view`.
     pub sel: usize,
     pub running: bool,
     /// Search on a remote panel: results are not panelized.
@@ -213,6 +219,8 @@ pub struct Found {
     pub error: Arc<Mutex<Option<String>>>,
     /// Content regex of the search: highlighted when a result opens in the viewer or editor.
     re: Option<Regex>,
+    /// What Ctrl+R searches again.
+    query: find::Query,
     rx: Receiver<Hit>,
     cancel: Arc<AtomicBool>,
 }
@@ -635,10 +643,35 @@ impl Default for FindForm {
 }
 
 impl Found {
+    /// Shown results.
+    pub fn shown(&self) -> impl Iterator<Item = &Hit> {
+        self.view.iter().map(|&i| &self.list[i])
+    }
+
+    pub fn shown_len(&self) -> usize {
+        self.view.len()
+    }
+
+    fn matches(&self, h: &Hit) -> bool {
+        self.filter.matches(&h.entry.name.to_string_lossy())
+    }
+
+    fn rebuild(&mut self) {
+        self.view = (0..self.list.len())
+            .filter(|&i| self.matches(&self.list[i]))
+            .collect();
+        self.sel = self.sel.min(self.view.len().saturating_sub(1));
+    }
+
     fn pump(&mut self) {
         for _ in 0..5000 {
             match self.rx.try_recv() {
-                Ok(e) => self.list.push(e),
+                Ok(e) => {
+                    if self.matches(&e) {
+                        self.view.push(self.list.len());
+                    }
+                    self.list.push(e);
+                }
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
                     self.running = false;
@@ -655,7 +688,11 @@ pub struct Stats {
     pub root: Node,
     /// Child indices from `root` down to the browsed directory.
     path: Vec<usize>,
+    /// Row in `view`.
     pub sel: usize,
+    /// Indices into the browsed directory's children shown (all, or those matching `filter`).
+    view: Vec<usize>,
+    pub filter: Filter,
     /// Show and sort by file count instead of size.
     pub by_files: bool,
     /// Running scan; `root` is empty until it finishes.
@@ -686,6 +723,34 @@ impl Stats {
         n
     }
 
+    /// Entry under the cursor.
+    pub fn selected(&self) -> Option<&Node> {
+        self.view
+            .get(self.sel)
+            .map(|&i| &self.current().children[i])
+    }
+
+    /// Shown entries of the browsed directory.
+    pub fn shown(&self) -> impl Iterator<Item = &Node> {
+        let dir = self.current();
+        self.view.iter().map(|&i| &dir.children[i])
+    }
+
+    /// Index in the browsed directory's children of the entry under the cursor.
+    fn selected_index(&self) -> Option<usize> {
+        self.view.get(self.sel).copied()
+    }
+
+    /// Recompute the shown entries after a sort, a filter or a change of the tree.
+    fn rebuild(&mut self) {
+        let filter = &self.filter;
+        self.view = (self.current().children.iter().enumerate())
+            .filter(|(_, n)| filter.matches(&n.name.to_string_lossy()))
+            .map(|(i, _)| i)
+            .collect();
+        self.sel = self.sel.min(self.view.len().saturating_sub(1));
+    }
+
     /// Browsed directory below `dir`, for the title.
     pub fn path(&self) -> PathBuf {
         let mut p = self.dir.clone();
@@ -698,7 +763,7 @@ impl Stats {
     }
 
     fn key(&mut self, code: KeyCode, page: usize) {
-        let last = self.current().children.len().saturating_sub(1);
+        let last = self.view.len().saturating_sub(1);
         match code {
             KeyCode::Up => self.sel = self.sel.saturating_sub(1),
             KeyCode::Down => self.sel = (self.sel + 1).min(last),
@@ -706,25 +771,20 @@ impl Stats {
             KeyCode::PageDown => self.sel = (self.sel + page).min(last),
             KeyCode::Home => self.sel = 0,
             KeyCode::End => self.sel = last,
-            KeyCode::Enter | KeyCode::Right
-                if self
-                    .current()
-                    .children
-                    .get(self.sel)
-                    .is_some_and(|n| n.is_dir) =>
-            {
-                self.path.push(self.sel);
-                let by_files = self.by_files;
-                stats::sort(&mut self.current_mut().children, by_files);
-                self.sel = 0;
+            KeyCode::Enter | KeyCode::Right if self.selected().is_some_and(|n| n.is_dir) => {
+                if let Some(i) = self.selected_index() {
+                    self.path.push(i);
+                }
+                self.filter = Filter::default();
+                self.resort();
             }
             KeyCode::Backspace | KeyCode::Left => {
                 if let Some(i) = self.path.pop() {
-                    let by_files = self.by_files;
-                    let dir = self.current_mut();
-                    let name = dir.children[i].name.clone();
-                    stats::sort(&mut dir.children, by_files);
-                    self.sel = dir
+                    let name = self.current().children[i].name.clone();
+                    self.filter = Filter::default();
+                    self.resort();
+                    self.sel = self
+                        .current()
                         .children
                         .iter()
                         .position(|n| n.name == name)
@@ -733,12 +793,18 @@ impl Stats {
             }
             KeyCode::Tab => {
                 self.by_files = !self.by_files;
-                let by_files = self.by_files;
-                stats::sort(&mut self.current_mut().children, by_files);
-                self.sel = 0;
+                self.resort();
             }
             _ => {}
         }
+    }
+
+    /// Sorts the browsed directory and puts the cursor on its first shown entry.
+    fn resort(&mut self) {
+        let by_files = self.by_files;
+        stats::sort(&mut self.current_mut().children, by_files);
+        self.sel = 0;
+        self.rebuild();
     }
 }
 
@@ -757,9 +823,7 @@ pub struct Procs {
     pub sel: usize,
     pub sort: ProcSort,
     pub rev: bool,
-    pub filter: LineEdit,
-    /// Filter being typed.
-    pub editing: bool,
+    pub filter: Filter,
     /// Kill question for (pid, name), shown while set.
     pub confirm: Option<(u32, String)>,
     kill: Option<thread::JoinHandle<tc_core::Result<()>>>,
@@ -779,8 +843,7 @@ impl Procs {
             sel: 0,
             sort: ProcSort::Cpu,
             rev: false,
-            filter: LineEdit::default(),
-            editing: false,
+            filter: Filter::default(),
             confirm: None,
             kill: None,
             status: String::new(),
@@ -789,7 +852,7 @@ impl Procs {
 
     /// No prompt or question open.
     pub fn idle(&self) -> bool {
-        !self.editing && self.every_edit.is_none() && self.confirm.is_none()
+        !self.filter.editing && self.every_edit.is_none() && self.confirm.is_none()
     }
 
     /// Process under the cursor.
@@ -800,7 +863,7 @@ impl Procs {
     /// Re-sort and re-filter; the cursor keeps its row, so the list does not jump under it.
     fn refresh(&mut self) {
         procs::sort(&mut self.snap.procs, self.sort, self.rev);
-        let filter = self.filter.text.to_lowercase();
+        let filter = self.filter.line.text.to_lowercase();
         self.rows = (0..self.snap.procs.len())
             .filter(|&i| procs::matches(&self.snap.procs[i], &filter))
             .collect();
@@ -842,12 +905,12 @@ impl Procs {
             self.confirm_key(key.code);
             return true;
         }
-        if self.editing {
-            self.filter_key(key);
-            return true;
-        }
         if let Some(l) = self.every_edit.take() {
             self.every_key(l, key);
+            return true;
+        }
+        if self.filter.key(key) {
+            self.refresh();
             return true;
         }
         let last = self.rows.len().saturating_sub(1);
@@ -856,6 +919,10 @@ impl Procs {
             p.sort = key;
         };
         match key.code {
+            // sample now: the next snapshot comes right away
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.sampler.set_interval(self.every);
+            }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(10) => return false,
             KeyCode::Up => self.sel = self.sel.saturating_sub(1),
             KeyCode::Down => self.sel = (self.sel + 1).min(last),
@@ -867,7 +934,7 @@ impl Procs {
             KeyCode::Char('m') => sort(self, ProcSort::Mem),
             KeyCode::Char('p') => sort(self, ProcSort::Pid),
             KeyCode::Char('n') => sort(self, ProcSort::Name),
-            KeyCode::Char('/' | 'f') => self.editing = true,
+            KeyCode::Char('f') => self.filter.editing = true,
             KeyCode::Char('s') => {
                 self.every_edit = Some(LineEdit::from(self.every.as_secs_f64().to_string()));
             }
@@ -878,21 +945,6 @@ impl Procs {
         }
         self.refresh();
         true
-    }
-
-    /// Typing the filter: the list narrows live, Enter keeps it, Esc clears it.
-    fn filter_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Enter => self.editing = false,
-            KeyCode::Esc => {
-                self.editing = false;
-                self.filter = LineEdit::default();
-            }
-            _ => {
-                edit_key(&mut self.filter, key);
-            }
-        }
-        self.refresh();
     }
 
     /// Typing the update interval: Enter sets it (0.5 to 3600 s), Esc keeps the old one.
@@ -1068,6 +1120,92 @@ fn paste_line(l: &mut LineEdit, text: &str) {
         .for_each(|c| l.insert(c));
 }
 
+/// `/` filter of a list screen: case-insensitive substring, typed live; Enter keeps it,
+/// Esc clears it.
+#[derive(Default)]
+pub struct Filter {
+    pub line: LineEdit,
+    pub editing: bool,
+}
+
+impl Filter {
+    pub fn active(&self) -> bool {
+        !self.line.text.is_empty()
+    }
+
+    pub fn matches(&self, name: &str) -> bool {
+        !self.active() || name.to_lowercase().contains(&self.line.text.to_lowercase())
+    }
+
+    /// Filter part of a key: typing, `/` to start, Esc to clear an active filter.
+    /// True when the key was used and the rows need a rebuild.
+    pub fn key(&mut self, key: KeyEvent) -> bool {
+        if self.editing {
+            match key.code {
+                KeyCode::Enter => self.editing = false,
+                KeyCode::Esc => *self = Self::default(),
+                _ => {
+                    edit_key(&mut self.line, key);
+                }
+            }
+            return true;
+        }
+        match key.code {
+            KeyCode::Char('/') => self.editing = true,
+            KeyCode::Esc if self.active() => self.line = LineEdit::default(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Title suffix: ` [filter: x]`, with `_` while typing.
+    pub fn tag(&self) -> String {
+        match (self.active(), self.editing) {
+            (false, false) => String::new(),
+            (_, editing) => format!(
+                " [filter: {}{}]",
+                self.line.text,
+                if editing { "_" } else { "" }
+            ),
+        }
+    }
+}
+
+/// Delete question with its answers; remote panels have no trash.
+fn delete_text(mut question: String, recursive: bool, remote: bool) -> String {
+    if recursive {
+        question.push_str("\nDirectories are deleted recursively.");
+    }
+    if remote {
+        return question + "\n\nNo trash on remote panels.\n[p] Delete permanently   [Esc] Cancel";
+    }
+    question + "\n\n[y] Trash   [p] Delete permanently   [Esc] Cancel"
+}
+
+/// Indices of the `rows` a list shows.
+pub fn list_rows(rows: &[PathBuf], filter: &Filter) -> Vec<usize> {
+    (0..rows.len())
+        .filter(|&i| filter.matches(&rows[i].to_string_lossy()))
+        .collect()
+}
+
+/// Filter and Up/Down keys of a path list; `sel` is a row of `rows`. True when `key` was used.
+fn list_nav(filter: &mut Filter, rows: &[PathBuf], sel: &mut usize, key: KeyEvent) -> bool {
+    if filter.key(key) {
+        *sel = list_rows(rows, filter).first().copied().unwrap_or(0);
+        return true;
+    }
+    let view = list_rows(rows, filter);
+    let pos = view.iter().position(|&i| i == *sel).unwrap_or(0);
+    let pos = match key.code {
+        KeyCode::Up => pos.saturating_sub(1),
+        KeyCode::Down => (pos + 1).min(view.len().saturating_sub(1)),
+        _ => return false,
+    };
+    *sel = view.get(pos).copied().unwrap_or(0);
+    true
+}
+
 impl Mode {
     /// The editor shown behind prompts.
     pub fn editor_mut(&mut self) -> Option<&mut Editor> {
@@ -1079,6 +1217,70 @@ impl Mode {
         }
     }
 }
+
+/// Footer bar items of one screen: label, key sent when clicked.
+type Footer = [(&'static str, KeyCode, KeyModifiers)];
+
+const fn f(label: &'static str, n: u8) -> (&'static str, KeyCode, KeyModifiers) {
+    (label, KeyCode::F(n), KeyModifiers::NONE)
+}
+
+const CLOSE: (&str, KeyCode, KeyModifiers) = f("F10 Close", 10);
+const HELP: (&str, KeyCode, KeyModifiers) = f("F1 Help", 1);
+
+const VIEW_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
+    HELP,
+    f("F4 Edit", 4),
+    f("F7 Search", 7),
+    ("g Goto", KeyCode::Char('g'), KeyModifiers::NONE),
+    ("w Wrap", KeyCode::Char('w'), KeyModifiers::NONE),
+    ("l Lines", KeyCode::Char('l'), KeyModifiers::NONE),
+    CLOSE,
+];
+
+const EDIT_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
+    HELP,
+    f("F2 Save", 2),
+    f("F3 Next", 3),
+    f("F4 Replace", 4),
+    f("F7 Search", 7),
+    f("F8 Del line", 8),
+    CLOSE,
+];
+
+const FOUND_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
+    HELP,
+    f("F3 View", 3),
+    f("F4 Edit", 4),
+    ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
+    ("Enter Panel", KeyCode::Enter, KeyModifiers::NONE),
+    ("Ctrl+G Go to", KeyCode::Char('g'), KeyModifiers::CONTROL),
+    CLOSE,
+];
+
+const SYNC_FOOTER: [(&str, KeyCode, KeyModifiers); 6] = [
+    HELP,
+    ("Enter Sync", KeyCode::Enter, KeyModifiers::NONE),
+    ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
+    ("Ctrl+R Compare", KeyCode::Char('r'), KeyModifiers::CONTROL),
+    ("Space Skip", KeyCode::Char(' '), KeyModifiers::NONE),
+    CLOSE,
+];
+
+const FIND_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 6] = [
+    HELP,
+    ("Enter Start", KeyCode::Enter, KeyModifiers::NONE),
+    f("F2 Save", 2),
+    f("F3 Load", 3),
+    f("F8 Del", 8),
+    CLOSE,
+];
+
+const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
+    HELP,
+    ("Enter Start", KeyCode::Enter, KeyModifiers::NONE),
+    CLOSE,
+];
 
 /// Footer bar items: label, key sent when clicked.
 pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [
@@ -1202,15 +1404,16 @@ pub fn help_action(line: &str) -> Option<(KeyCode, KeyModifiers)> {
 }
 
 /// F-key bar of File Stats (labels and the keys they send).
-pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
+pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
     ("S-F4 Ext", KeyCode::F(4), KeyModifiers::SHIFT),
     ("F8 Delete", KeyCode::F(8), KeyModifiers::NONE),
+    ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
     ("Tab Size/Count", KeyCode::Tab, KeyModifiers::NONE),
     (": Cmd", KeyCode::Char(':'), KeyModifiers::NONE),
-    ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
+    ("F10 Close", KeyCode::F(10), KeyModifiers::NONE),
 ];
 
 /// F-key bar of the process monitor.
@@ -1219,7 +1422,7 @@ pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 5] = [
     ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
     ("s Interval", KeyCode::Char('s'), KeyModifiers::NONE),
     ("F8 Kill", KeyCode::F(8), KeyModifiers::NONE),
-    ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
+    ("F10 Close", KeyCode::F(10), KeyModifiers::NONE),
 ];
 
 /// Toolbar button: icon, tooltip, key sent when clicked.
@@ -1324,6 +1527,8 @@ pub struct App {
     sync_again: Option<sync::SyncSetup>,
     /// Find results while a result is open in the viewer or editor; shown again after it.
     found: Option<Found>,
+    /// Sync rows while a file is open in the viewer or editor; shown again after it.
+    sync_back: Option<Box<Sync>>,
     /// Saved find forms, one line each (see `FindForm::to_line`), and their file.
     searches: Vec<String>,
     searches_file: Option<PathBuf>,
@@ -1335,6 +1540,8 @@ pub struct App {
     pub view_numbers: bool,
     /// Bookmarked directories and the file they are saved to (none: not persisted).
     pub hotlist: Vec<PathBuf>,
+    /// `/` filter of the open bookmark or connection list.
+    pub list_filter: Filter,
     pub hotlist_file: Option<PathBuf>,
     /// Time and cell of the last left click, to detect double clicks (terminals send none).
     last_click: Option<(Instant, u16, u16)>,
@@ -1397,12 +1604,14 @@ impl App {
             last_sync: None,
             sync_again: None,
             found: None,
+            sync_back: None,
             searches: Vec::new(),
             searches_file: None,
             cut_pending: false,
             dir_job: None,
             view_numbers: false,
             hotlist: Vec::new(),
+            list_filter: Filter::default(),
             hotlist_file: None,
             last_click: None,
             history: Vec::new(),
@@ -1429,6 +1638,9 @@ impl App {
                 let row = usize::from(ev.row - self.help_area.y);
                 self.help_click(self.help_scroll + row);
             }
+            return;
+        }
+        if ev.kind == MouseEventKind::Down(MouseButton::Left) && self.footer_click(ev) {
             return;
         }
         if let MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) =
@@ -1484,24 +1696,46 @@ impl App {
                 let last = p.rows.len().saturating_sub(1);
                 p.sel = p.sel.saturating_add_signed(lines).min(last);
             }
+            // the panel under the pointer scrolls, the active panel stays
+            Mode::Normal => {
+                let at = (ev.column, ev.row).into();
+                let i = (0..2).find(|&i| self.areas[i].contains(at));
+                self.panels[i.unwrap_or(self.active)].move_cursor(lines);
+            }
             _ => {}
         }
+    }
+
+    /// Footer labels send keys: on idle screens, and on the find results and forms.
+    pub fn footer_active(&self) -> bool {
+        self.idle()
+            || (self.input.is_none()
+                && matches!(
+                    self.mode,
+                    Mode::Found(_) | Mode::FindForm(_) | Mode::MultiRename(_) | Mode::SyncForm(_)
+                ))
+    }
+
+    /// Click on a footer label sends its key; only where the screen takes keys that way.
+    fn footer_click(&mut self, ev: MouseEvent) -> bool {
+        if !self.footer.contains((ev.column, ev.row).into()) || !self.footer_active() {
+            return false;
+        }
+        let mut x = self.footer.x;
+        for &(label, code, mods) in self.footer_keys() {
+            let end = x + label.len() as u16;
+            if (x..end).contains(&ev.column) {
+                self.on_key(KeyEvent::new(code, mods));
+                break;
+            }
+            x = end + 2;
+        }
+        true
     }
 
     /// Left click on a file row moves the cursor there (and activates the panel); with Shift it selects the range from the old cursor.
     fn click(&mut self, ev: MouseEvent) {
         if self.input.is_some() || !matches!(self.mode, Mode::Normal) {
-            return;
-        }
-        if self.footer.contains((ev.column, ev.row).into()) {
-            let mut x = self.footer.x;
-            for (label, code, mods) in FOOTER {
-                let end = x + label.len() as u16;
-                if (x..end).contains(&ev.column) {
-                    return self.on_key(KeyEvent::new(code, mods));
-                }
-                x = end + 2;
-            }
             return;
         }
         let Some(i) = (0..2).find(|&i| self.areas[i].contains((ev.column, ev.row).into())) else {
@@ -1575,12 +1809,31 @@ impl App {
     }
 
     /// F-key bar of the current screen.
-    pub fn footer_keys(&self) -> &'static [(&'static str, KeyCode, KeyModifiers)] {
+    pub fn footer_keys(&self) -> &'static Footer {
         match &self.mode {
+            Mode::View { .. } => &VIEW_FOOTER,
+            Mode::Edit { .. } | Mode::AskSave { .. } | Mode::AskExit(_) => &EDIT_FOOTER,
+            Mode::Found(_) => &FOUND_FOOTER,
+            Mode::Sync(_) => &SYNC_FOOTER,
+            Mode::FindForm(_) => &FIND_FORM_FOOTER,
+            Mode::MultiRename(_) | Mode::SyncForm(_) => &FORM_FOOTER,
             Mode::Stats(_) => &STATS_FOOTER,
+            Mode::Cmd(_) if self.stats.is_some() => &STATS_FOOTER,
             Mode::Procs(_) => &PROCS_FOOTER,
             _ => &FOOTER,
         }
+    }
+
+    /// F1 opens the help here: the footer screens plus lists and the conflict question.
+    fn takes_f1(&self) -> bool {
+        self.footer_active()
+            || (self.input.is_none()
+                && !self.help
+                && match &self.mode {
+                    Mode::Hotlist(_) | Mode::Connections(_) | Mode::Drives(..) => true,
+                    Mode::Xfer(x) => x.ask.is_some() && x.rename.is_none(),
+                    _ => false,
+                })
     }
 
     /// The screen takes F1 and footer clicks: no prompt, dialog, help or running scan.
@@ -1598,7 +1851,10 @@ impl App {
         if self.help {
             return self.help_key(key);
         }
-        if key.code == KeyCode::F(1) && self.idle() {
+        if key.code == KeyCode::F(1)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && self.takes_f1()
+        {
             self.help = true;
             self.help_scroll = 0;
             self.help_set_filter(String::new());
@@ -1619,7 +1875,7 @@ impl App {
                     self.mode = Mode::Editor(path, cmd);
                 }
             },
-            Mode::Connections(sel) => self.connections_key(key.code, sel),
+            Mode::Connections(sel) => self.connections_key(key, sel),
             Mode::ConnEdit(row, mut l) => match key.code {
                 KeyCode::Enter => self.conn_save(row, &l.text),
                 KeyCode::Esc => self.mode = Mode::Connections(row.unwrap_or(0)),
@@ -1631,6 +1887,7 @@ impl App {
             Mode::Connecting(c) => self.connecting_key(c, key),
             Mode::Confirm(op, targets, text) => self.confirm_key(op, targets, text, key.code),
             Mode::ResetConfig(dir) => self.reset_config_key(key.code, dir),
+            Mode::AskQuit => self.ask_quit_key(key.code),
             Mode::Transfer(op, targets, mut text) => match key.code {
                 KeyCode::Enter => self.run(op, &targets, &text.text),
                 KeyCode::Esc => {}
@@ -1656,7 +1913,7 @@ impl App {
                 }
             },
             Mode::Cmd(l) => self.cmd_key(l, key),
-            Mode::Hotlist(sel) => self.hotlist_key(key.code, sel),
+            Mode::Hotlist(sel) => self.hotlist_key(key, sel),
             Mode::Menu(group, sel) => self.menu_key(key.code, group, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
             Mode::Found(f) => self.found_key(key, f),
@@ -1986,8 +2243,8 @@ impl App {
             }
             KeyCode::Char('m') => self.multi_rename(),
             KeyCode::Char('e') => self.sync_open(),
-            KeyCode::Char('n') => self.mode = Mode::Connections(0),
-            KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
+            KeyCode::Char('n') => self.open_list(Mode::Connections(0)),
+            KeyCode::Char('b') => self.open_list(Mode::Hotlist(0)),
             KeyCode::Char(' ') => self.spawn_stats(),
             KeyCode::Char('p') => {
                 let r = self.panels[self.active].remote().cloned();
@@ -2186,6 +2443,8 @@ impl App {
             }
             return;
         }
+        let save =
+            key.code == KeyCode::F(2) || (ctrl && matches!(key.code, KeyCode::Char('s' | 'S')));
         let prompt = matches!(key.code, KeyCode::F(3 | 4 | 7))
             || (ctrl && matches!(key.code, KeyCode::Char('g' | 'f' | 'r')));
         if matches!(
@@ -2210,7 +2469,7 @@ impl App {
                 }
                 return;
             }
-            KeyCode::F(2) => {
+            _ if save => {
                 self.next_save_prompt(editor, false, false, Step::Encoding);
                 return;
             }
@@ -2221,6 +2480,7 @@ impl App {
                 };
                 match key.code {
                     KeyCode::F(3) => self.find_or_ask(!shift),
+                    KeyCode::F(7) if shift => self.find_or_ask(true),
                     KeyCode::F(4) | KeyCode::Char('r') => self.ask(Ask::Replace),
                     KeyCode::F(7) | KeyCode::Char('f') => self.ask(Ask::Find),
                     _ => self.ask(Ask::Goto),
@@ -2233,15 +2493,7 @@ impl App {
             KeyCode::PageDown => editor.move_v(page),
             KeyCode::Char('w') if alt => editor.wrap = !editor.wrap,
             KeyCode::Char('l') if alt => editor.numbers = !editor.numbers,
-            KeyCode::Char('c') if alt => {
-                self.exact = !self.exact;
-                self.note = if self.exact {
-                    "case sensitive"
-                } else {
-                    "smart case"
-                }
-                .into();
-            }
+            KeyCode::Char('c') if alt => self.toggle_case(),
             KeyCode::Char('r') if alt => {
                 self.mode = Mode::Edit {
                     editor,
@@ -2299,10 +2551,37 @@ impl App {
         };
     }
 
+    /// Alt+C in the viewer and editor: searches match case exactly, or ignore it without capitals.
+    fn toggle_case(&mut self) {
+        self.exact = !self.exact;
+        self.note = if self.exact {
+            "case sensitive"
+        } else {
+            "smart case"
+        }
+        .into();
+    }
+
+    /// F4 in the viewer: the editor on the same local file, at the top line.
+    fn view_to_editor(&mut self, title: String, view: Viewer) {
+        if self.view_tmp.is_some() || self.edit_remote.is_some() {
+            self.note = "edit: local files only".into();
+            return self.mode = Mode::View { title, view };
+        }
+        let line = view.top_line().map(|n| n + 1);
+        self.edit_path_at(view.path().to_owned(), line);
+    }
+
+    // Alt+W, Alt+L, Ctrl+F and Ctrl+G act like their plain letters: modifiers are not checked
     fn viewer_key(&mut self, title: String, mut view: Viewer, key: KeyEvent) {
         let page = self.page as isize;
         let result = match key.code {
             KeyCode::Esc | KeyCode::F(3 | 10) | KeyCode::Char('q') => return,
+            KeyCode::F(4) => return self.view_to_editor(title, view),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.toggle_case();
+                Ok(())
+            }
             KeyCode::Up => view.scroll(-1),
             KeyCode::Down => view.scroll(1),
             KeyCode::PageUp => view.scroll(-page),
@@ -2330,6 +2609,9 @@ impl App {
                     KeyCode::Char('n') => self.find_or_ask(true),
                     KeyCode::Char('N') => self.find_or_ask(false),
                     KeyCode::Char('g') => self.ask(Ask::Goto),
+                    KeyCode::F(7) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        self.find_or_ask(true)
+                    }
                     _ => self.ask(Ask::Find),
                 }
                 return;
@@ -2405,7 +2687,7 @@ impl App {
         let n = MENUS.len();
         let len = MENUS[group].1.len();
         match code {
-            KeyCode::Esc | KeyCode::F(9) => {}
+            KeyCode::Esc | KeyCode::F(9 | 10) => {}
             KeyCode::Enter => self.menu_run(group, sel),
             KeyCode::Left => self.mode = Mode::Menu((group + n - 1) % n, 0),
             KeyCode::Right => self.mode = Mode::Menu((group + 1) % n, 0),
@@ -2457,23 +2739,35 @@ impl App {
         true
     }
 
-    fn hotlist_key(&mut self, code: KeyCode, sel: usize) {
-        let last = self.hotlist.len().saturating_sub(1);
-        let mut sel = sel.min(last);
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => return,
-            KeyCode::Up => sel = sel.saturating_sub(1),
-            KeyCode::Down => sel = (sel + 1).min(last),
-            KeyCode::Enter if !self.hotlist.is_empty() => {
+    /// Bookmark or connection list, shown without a filter.
+    fn open_list(&mut self, mode: Mode) {
+        self.list_filter = Filter::default();
+        self.mode = mode;
+    }
+
+    fn hotlist_key(&mut self, key: KeyEvent, sel: usize) {
+        let mut sel = sel.min(self.hotlist.len().saturating_sub(1));
+        if list_nav(&mut self.list_filter, &self.hotlist, &mut sel, key) {
+            self.mode = Mode::Hotlist(sel);
+            return;
+        }
+        let shown = list_rows(&self.hotlist, &self.list_filter).contains(&sel);
+        match key.code {
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => return,
+            KeyCode::Enter if shown => {
                 let path = self.hotlist[sel].clone();
                 if let Err(e) = self.panels[self.active].go(path) {
                     self.mode = Mode::Message(e.to_string());
                 }
                 return;
             }
-            KeyCode::Delete if !self.hotlist.is_empty() => {
+            KeyCode::Delete if shown => {
                 self.hotlist.remove(sel);
                 self.hotlist_save();
+                sel = list_rows(&self.hotlist, &self.list_filter)
+                    .first()
+                    .copied()
+                    .unwrap_or(0);
                 if matches!(self.mode, Mode::Message(_)) {
                     return;
                 }
@@ -2494,6 +2788,7 @@ impl App {
         let (c, err) = (cancel.clone(), error.clone());
         let is_remote = remote.is_some();
         let re = q.content.as_ref().map(|c| c.re.clone());
+        let query = q.clone();
         thread::spawn(move || match remote {
             None => find::find(&root, &q, &c, |h| drop(tx.send(h))),
             Some(r) => {
@@ -2506,6 +2801,9 @@ impl App {
         });
         self.mode = Mode::Found(Found {
             list: Vec::new(),
+            view: Vec::new(),
+            filter: Filter::default(),
+            query,
             sel: 0,
             running: true,
             remote: is_remote,
@@ -2522,7 +2820,7 @@ impl App {
         let last = form.rows.len() - 1;
         form.error = None;
         match key.code {
-            KeyCode::Esc => return self.last_find = Some(form),
+            KeyCode::Esc | KeyCode::F(10) => return self.last_find = Some(form),
             KeyCode::Enter => match form.query(self.exact, remote) {
                 Ok(q) => {
                     let line = form.to_line(form.text(F_SAVED).trim());
@@ -2604,9 +2902,13 @@ impl App {
             self.mode = Mode::Message("File Stats does not work in archives.".into());
             return;
         }
-        let dir = panel.path().to_owned();
+        self.scan_stats(panel.path().to_owned(), panel.remote().cloned());
+    }
+
+    /// Scan `dir` in a worker and show its File Stats.
+    fn scan_stats(&mut self, dir: PathBuf, remote: Option<Arc<dyn Remote>>) {
         let progress = Arc::new(ops::Progress::default());
-        let (p, d, r) = (progress.clone(), dir.clone(), panel.remote().cloned());
+        let (p, d, r) = (progress.clone(), dir.clone(), remote);
         self.mode = Mode::Stats(Stats {
             remote: r.clone(),
             deleting: None,
@@ -2614,6 +2916,8 @@ impl App {
             root: Node::default(),
             path: Vec::new(),
             sel: 0,
+            view: Vec::new(),
+            filter: Filter::default(),
             by_files: false,
             job: Some(thread::spawn(move || match r {
                 Some(r) => stats::scan_remote(r.as_ref(), &d, &p),
@@ -2629,6 +2933,11 @@ impl App {
         if st.confirm.is_some() {
             return self.stats_confirm_key(st, key.code);
         }
+        if !st.scanning() && st.filter.key(key) {
+            st.rebuild();
+            self.mode = Mode::Stats(st);
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(10) => {
                 st.progress.cancel.store(true, Ordering::Relaxed);
@@ -2636,17 +2945,15 @@ impl App {
             }
             _ if st.scanning() => {}
             KeyCode::F(3 | 4) => return self.stats_open(st, key),
+            // the browsed directory becomes the root of the new scan
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return self.scan_stats(st.path(), st.remote.clone());
+            }
             KeyCode::F(8) | KeyCode::Char('d') => {
-                st.confirm = st.current().children.get(st.sel).map(|n| {
-                    let mut text = format!("Delete {}?", n.name.to_string_lossy());
-                    if n.is_dir {
-                        text.push_str("\nDirectories are deleted recursively.");
-                    }
-                    if st.remote.is_some() {
-                        return text
-                            + "\n\nNo trash on remote panels.\n[p] delete permanently   [n] no";
-                    }
-                    text + "\n\n[y] trash   [p] delete permanently   [n] no"
+                let remote = st.remote.is_some();
+                st.confirm = st.selected().map(|n| {
+                    let question = format!("Delete {}?", n.name.to_string_lossy());
+                    delete_text(question, n.is_dir, remote)
                 });
             }
             KeyCode::Char(':') => {
@@ -2676,13 +2983,15 @@ impl App {
             }
         };
         st.confirm = None;
-        let Some(name) = st.current().children.get(st.sel).map(|n| n.name.clone()) else {
+        let (Some(name), Some(index)) =
+            (st.selected().map(|n| n.name.clone()), st.selected_index())
+        else {
             self.mode = Mode::Stats(st);
             return;
         };
         let target = st.path().join(name);
         if let Some(r) = st.remote.clone() {
-            st.deleting = Some(st.sel);
+            st.deleting = Some(index);
             self.stats = Some(st);
             let side = Side::Remote(r);
             return self.spawn_xfer((side.clone(), side.clone()), move |_, _| {
@@ -2695,8 +3004,8 @@ impl App {
             ops::delete(&target)
         };
         if result.is_ok() {
-            stats::remove(&mut st.root, &st.path, st.sel);
-            st.sel = st.sel.min(st.current().children.len().saturating_sub(1));
+            stats::remove(&mut st.root, &st.path, index);
+            st.rebuild();
         }
         // `tick` brings the stats back once any error message is closed
         self.stats = Some(st);
@@ -2705,10 +3014,8 @@ impl App {
 
     /// F3 view, F4 edit, Shift+F4 external editor on the selected file of File Stats.
     fn stats_open(&mut self, st: Stats, key: KeyEvent) {
-        let dir = st.current();
-        let Some(path) = dir
-            .children
-            .get(st.sel)
+        let Some(path) = st
+            .selected()
             .filter(|n| !n.is_dir)
             .map(|n| (st.path().join(&n.name), n.size))
         else {
@@ -2743,21 +3050,50 @@ impl App {
 
     /// Keys in the results: Esc stops a running search, then closes; Enter panelizes;
     /// F3/F4 open the selected file at its match, Ctrl+G jumps to it in the panel.
+    fn ask_quit_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.quit = true,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
+            _ => self.mode = Mode::AskQuit,
+        }
+    }
+
+    /// Back to the sync screen after a viewer or editor opened from it closed.
+    fn restore_sync_back(&mut self) {
+        if matches!(self.mode, Mode::Normal)
+            && let Some(s) = self.sync_back.take()
+        {
+            self.mode = Mode::Sync(s);
+        }
+    }
+
     fn found_key(&mut self, key: KeyEvent, mut f: Found) {
         let page = self.page;
-        let last = f.list.len().saturating_sub(1);
+        let last = f.view.len().saturating_sub(1);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if f.filter.key(key) {
+            f.rebuild();
+            self.mode = Mode::Found(f);
+            return;
+        }
         match key.code {
-            KeyCode::Esc if f.running => f.cancel.store(true, Ordering::Relaxed),
-            KeyCode::Esc => return,
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') if f.running => {
+                f.cancel.store(true, Ordering::Relaxed)
+            }
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => return,
+            KeyCode::Char('r') if ctrl => {
+                f.cancel.store(true, Ordering::Relaxed);
+                return self.spawn_find(f.query);
+            }
             KeyCode::Enter | KeyCode::F(3 | 4) if f.remote => {
                 self.found = Some(f);
                 self.mode = Mode::Message("Remote results are only listed.".into());
                 return;
             }
+            KeyCode::Enter if f.view.is_empty() => {}
             KeyCode::Enter => return self.panelize_found(f),
             KeyCode::F(3 | 4) => {
-                let Some(hit) = f.list.get(f.sel).filter(|h| !h.entry.is_dir).cloned() else {
+                let Some(hit) = f.shown().nth(f.sel).filter(|h| !h.entry.is_dir).cloned() else {
                     self.mode = Mode::Found(f);
                     return;
                 };
@@ -2774,7 +3110,7 @@ impl App {
             }
             KeyCode::Char('g') if ctrl && !f.remote => {
                 f.cancel.store(true, Ordering::Relaxed);
-                if let Some(h) = f.list.get(f.sel) {
+                if let Some(h) = f.shown().nth(f.sel) {
                     let file = PathBuf::from(&h.entry.name);
                     if let Err(e) = self.panels[self.active].reveal(&file) {
                         self.mode = Mode::Message(e.to_string());
@@ -2797,21 +3133,18 @@ impl App {
     /// panel; their first matching line stays for F3/F4 there.
     fn panelize_found(&mut self, f: Found) {
         f.cancel.store(true, Ordering::Relaxed);
-        if f.list.is_empty() {
-            return;
-        }
         if f.re.is_some() {
             self.search.clone_from(&f.re);
         }
         let (mut seen, mut lines, mut entries) = (HashSet::new(), HashMap::new(), Vec::new());
-        for h in f.list {
+        for h in f.shown() {
             if !seen.insert(h.entry.name.clone()) {
                 continue;
             }
-            if let Some((n, _)) = h.line {
-                lines.insert(h.entry.name.clone(), n);
+            if let Some((n, _)) = &h.line {
+                lines.insert(h.entry.name.clone(), *n);
             }
-            entries.push(h.entry);
+            entries.push(h.entry.clone());
         }
         self.panels[self.active].panelize(entries, lines);
     }
@@ -2883,7 +3216,7 @@ impl App {
         }
         let more = editor.find(re, true, false);
         self.note = if more {
-            "Replace? y yes  n skip  a all  Esc stop".into()
+            "Replace?  [y] Yes   [n] Skip   [a] All   [Esc] Cancel".into()
         } else {
             self.replacing = None;
             "replace done".into()
@@ -2985,7 +3318,7 @@ impl App {
         let page = self.page as isize;
         let panel = &mut self.panels[self.active];
         match code {
-            KeyCode::Char('q') | KeyCode::F(10) => self.quit = true,
+            KeyCode::Char('q') | KeyCode::F(10) => self.mode = Mode::AskQuit,
             KeyCode::Null => self.ask_reset_config(),
             KeyCode::F(9) => self.mode = Mode::Menu(0, 0),
             KeyCode::Tab => self.active = 1 - self.active,
@@ -3114,18 +3447,17 @@ impl App {
             .map(|e| e.name.to_string_lossy())
             .collect();
         let more = if entries.len() > 3 { "…" } else { "" };
-        let mut text = match entries.len() {
+        let question = match entries.len() {
             1 => format!("Delete {}?", names[0]),
             n => format!("Delete {n} items: {}{more}?", names.join(", ")),
         };
         // a symlink is removed as a link, not recursed into
-        if entries.iter().any(|e| e.is_dir && !e.is_symlink) {
-            text.push_str("\nDirectories are deleted recursively.");
-        }
-        if self.panels[self.active].remote().is_some() {
-            return text + "\n\nNo trash on remote panels.\n[p] delete permanently   [n] no";
-        }
-        text + "\n\n[y] trash   [p] delete permanently   [n] no"
+        let recursive = entries.iter().any(|e| e.is_dir && !e.is_symlink);
+        delete_text(
+            question,
+            recursive,
+            self.panels[self.active].remote().is_some(),
+        )
     }
 
     fn delete(&mut self, targets: &[PathBuf], to_trash: bool) {
@@ -3168,7 +3500,7 @@ impl App {
         let last = rows.len().saturating_sub(1);
         let mut sel = sel.min(last);
         match code {
-            KeyCode::Esc | KeyCode::Char('q') => return,
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => return,
             KeyCode::Up => sel = sel.saturating_sub(1),
             KeyCode::Down => sel = (sel + 1).min(last),
             KeyCode::Enter if !rows.is_empty() => return self.go(panel, rows[sel].clone()),
@@ -3228,7 +3560,7 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let last = form.rows.len() - 1;
         match key.code {
-            KeyCode::Esc => return,
+            KeyCode::Esc | KeyCode::F(10) => return,
             KeyCode::Enter => return self.multi_rename_run(form),
             KeyCode::Up | KeyCode::Down if alt => {
                 let len = self.rename_history.len();
@@ -3691,29 +4023,38 @@ impl App {
         }
     }
 
-    fn connections_key(&mut self, code: KeyCode, sel: usize) {
-        let last = self.connections.len().saturating_sub(1);
-        let mut sel = sel.min(last);
+    fn connections_key(&mut self, key: KeyEvent, sel: usize) {
+        let mut sel = sel.min(self.connections.len().saturating_sub(1));
+        if list_nav(&mut self.list_filter, &self.connections, &mut sel, key) {
+            self.mode = Mode::Connections(sel);
+            return;
+        }
+        let shown = list_rows(&self.connections, &self.list_filter).contains(&sel);
         let url = self
             .connections
             .get(sel)
+            .filter(|_| shown)
             .map(|u| u.to_string_lossy().into_owned());
-        match (code, url) {
-            (KeyCode::Esc | KeyCode::Char('q'), _) => return,
-            (KeyCode::Up, _) => sel = sel.saturating_sub(1),
-            (KeyCode::Down, _) => sel = (sel + 1).min(last),
+        match (key.code, url) {
+            (KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q'), _) => return,
             (KeyCode::Enter, Some(url)) => return self.connect(url),
             (KeyCode::Insert | KeyCode::Char('a'), _) => {
+                self.list_filter = Filter::default();
                 self.mode = Mode::ConnEdit(None, LineEdit::from("sftp://".to_owned()));
                 return;
             }
             (KeyCode::F(4) | KeyCode::Char('e'), Some(url)) => {
+                self.list_filter = Filter::default();
                 self.mode = Mode::ConnEdit(Some(sel), LineEdit::from(url));
                 return;
             }
             (KeyCode::Delete, Some(_)) => {
                 self.connections.remove(sel);
                 self.connections_save();
+                sel = list_rows(&self.connections, &self.list_filter)
+                    .first()
+                    .copied()
+                    .unwrap_or(0);
                 if matches!(self.mode, Mode::Message(_)) {
                     return;
                 }
@@ -3815,14 +4156,17 @@ impl App {
             Ok(SizeCheck::Large(n)) => {
                 self.mode = ask(
                     format!(
-                        "File is {}, open in viewer instead?\n\n[y] viewer   [n] edit   Esc cancel",
+                        "File is {}, open in viewer instead?\n\n[y] Viewer   [n] Edit   [Esc] Cancel",
                         edit::human(n)
                     ),
                     true,
                 )
             }
             Err(e @ Error::OutOfMemory { .. }) => {
-                self.mode = ask(format!("{e}. Open in viewer?\n\n[y] yes   [n] no"), false)
+                self.mode = ask(
+                    format!("{e}. Open in viewer?\n\n[y] Viewer   [Esc] Cancel"),
+                    false,
+                )
             }
             Err(e) => self.mode = Mode::Message(e.to_string()),
         }
@@ -3964,7 +4308,7 @@ impl App {
                     && error.is_none()
                 {
                     stats::remove(&mut st.root, &st.path, i);
-                    st.sel = st.sel.min(st.current().children.len().saturating_sub(1));
+                    st.rebuild();
                 }
                 self.finish(error);
             }
@@ -3995,6 +4339,7 @@ impl App {
         {
             self.mode = Mode::Found(f);
         }
+        self.restore_sync_back();
         if matches!(self.mode, Mode::Normal)
             && let Some(setup) = self.sync_again.take()
         {
@@ -4031,7 +4376,10 @@ impl App {
             && let Some(job) = st.job.take()
         {
             match job.join() {
-                Ok(root) => st.root = root,
+                Ok(root) => {
+                    st.root = root;
+                    st.rebuild();
+                }
                 Err(_) => self.mode = Mode::Message("File Stats scan failed.".into()),
             }
             return;
@@ -4370,6 +4718,57 @@ mod tests {
     }
 
     #[test]
+    fn slash_filters_stats_and_acts_on_shown_rows_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (n, size) in [("Alpha", 30), ("beta", 20), ("gamma", 10)] {
+            std::fs::write(tmp.path().join(n), "x".repeat(size)).unwrap();
+        }
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+            app.tick();
+        }
+        let shown = |app: &App| match &app.mode {
+            Mode::Stats(st) => st
+                .shown()
+                .map(|n| n.name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            _ => panic!("not in stats"),
+        };
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "AM");
+        assert_eq!(shown(&app), ["gamma"]);
+        key(&mut app, KeyCode::Enter);
+        // delete acts on the shown row, not on the first child
+        key(&mut app, KeyCode::F(8));
+        key(&mut app, KeyCode::Char('p'));
+        app.tick();
+        assert!(!tmp.path().join("gamma").exists() && tmp.path().join("Alpha").exists());
+        assert!(shown(&app).is_empty());
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(shown(&app), ["Alpha", "beta"]);
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn slash_filters_bookmarks_and_enter_goes_to_the_shown_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("one"), tmp.path().join("two"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        app.hotlist = vec![a, b.clone()];
+        with(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "TW");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.panels[app.active].path(), b);
+    }
+
+    #[test]
     fn stats_sorts_toggles_count_and_browses() {
         let tmp = tempfile::tempdir().unwrap();
         let many = tmp.path().join("many");
@@ -4402,6 +4801,90 @@ mod tests {
         assert_eq!(top(&app), "a"); // back in stats after the viewer
         key(&mut app, KeyCode::F(10));
         assert!(matches!(app.mode, Mode::Normal) && !app.quit);
+    }
+
+    #[test]
+    fn quit_asks_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        key(&mut app, KeyCode::F(10));
+        assert!(matches!(app.mode, Mode::AskQuit) && !app.quit);
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal) && !app.quit);
+        key(&mut app, KeyCode::Char('q'));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn footer_follows_screen_and_f10_closes_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        assert_eq!(app.footer_keys(), &FOOTER);
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(matches!(app.mode, Mode::FindForm(_)));
+        assert_eq!(app.footer_keys(), &FIND_FORM_FOOTER);
+        key(&mut app, KeyCode::F(10));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn f1_help_opens_on_forms_and_lists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        for (code, mods) in [
+            (KeyCode::Char('f'), KeyModifiers::CONTROL),
+            (KeyCode::Char('b'), KeyModifiers::CONTROL),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL),
+            (KeyCode::F(1), KeyModifiers::ALT),
+        ] {
+            app.on_key(KeyEvent::new(code, mods));
+            let title = fmt::help(&app.mode).0;
+            key(&mut app, KeyCode::F(1));
+            assert!(app.help && title != "Help", "{title} {code:?}");
+            key(&mut app, KeyCode::Esc);
+            assert!(!app.help && !matches!(app.mode, Mode::Normal));
+            key(&mut app, KeyCode::Esc);
+            assert!(matches!(app.mode, Mode::Normal));
+        }
+    }
+
+    #[test]
+    fn footer_keys_are_documented_in_their_help() {
+        let screens: [(&Footer, &[&str]); 9] = [
+            (&FOOTER, &[fmt::HELP_MAIN]),
+            (&VIEW_FOOTER, &[fmt::HELP_VIEW]),
+            (&EDIT_FOOTER, &[fmt::HELP_EDIT]),
+            (&FOUND_FOOTER, &[fmt::HELP_FOUND]),
+            (&SYNC_FOOTER, &[fmt::HELP_SYNC]),
+            (&FIND_FORM_FOOTER, &[fmt::HELP_FIND_FORM]),
+            (&FORM_FOOTER, &[fmt::HELP_RENAME, fmt::HELP_SYNC_FORM]),
+            (&STATS_FOOTER, &[fmt::HELP_STATS]),
+            (&PROCS_FOOTER, &[fmt::HELP_PROCS]),
+        ];
+        for (footer, helps) in screens {
+            for &(label, ..) in footer {
+                let key = label
+                    .split(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .replace("S-", "Shift+");
+                // F1 opens the help itself; Tab and arrows are navigation
+                if key == "F1" {
+                    continue;
+                }
+                for help in helps {
+                    let found = help.lines().any(|l| {
+                        let col = l.get(..16).unwrap_or(l);
+                        col.split(' ').chain(col.split('/')).any(|t| t == key)
+                    });
+                    assert!(found, "{label} missing in help");
+                }
+            }
+        }
     }
 
     #[test]
@@ -4493,7 +4976,9 @@ mod tests {
         key(&mut app, KeyCode::Up);
         assert_eq!(app.help_sel, first);
         // filter to Ctrl+B bookmarks, Enter runs it
-        type_text(&mut app, "bookmarks");
+        for c in "bookmarks".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
         assert!(app.help_action_at(app.help_sel).is_some());
         key(&mut app, KeyCode::Enter);
         assert!(!app.help && matches!(app.mode, Mode::Hotlist(_)));
@@ -5147,6 +5632,68 @@ mod tests {
     }
 
     #[test]
+    fn viewer_f4_edits_at_top_line_and_shared_keys_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "a\nb\nFoo\nc\nfoo\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        with(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        type_text(&mut app, "foo");
+        assert_eq!(app.mode_view_percent(), 28);
+        with(&mut app, KeyCode::F(7), KeyModifiers::SHIFT);
+        assert_eq!(app.mode_view_percent(), 71);
+        with(&mut app, KeyCode::Char('c'), KeyModifiers::ALT);
+        assert_eq!(app.note, "case sensitive");
+        with(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        type_text(&mut app, "2");
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        assert_eq!(app.mode.editor_mut().unwrap().cursor.0, 1);
+        // Ctrl+S saves like F2
+        key(&mut app, KeyCode::Char('x'));
+        with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(std::fs::read_to_string(&file).unwrap().starts_with("a\nxb"));
+    }
+
+    #[test]
+    fn wheel_moves_the_cursor_of_the_panel_under_the_pointer_by_3() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..10 {
+            std::fs::write(dir.path().join(format!("f{n}")), "x").unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        app.areas = [Rect::new(0, 0, 10, 10), Rect::new(10, 0, 10, 10)];
+        let wheel = |app: &mut App, kind, column| {
+            app.on_mouse(MouseEvent {
+                kind,
+                column,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        wheel(&mut app, MouseEventKind::ScrollDown, 12);
+        assert_eq!((app.panels[0].cursor(), app.panels[1].cursor()), (0, 3));
+        wheel(&mut app, MouseEventKind::ScrollUp, 12);
+        assert_eq!(app.panels[1].cursor(), 0);
+    }
+
+    #[test]
+    fn delete_text_lists_the_answers_and_no_trash_on_remote() {
+        let local = delete_text("Delete a?".into(), true, false);
+        assert!(
+            local.contains("recursively")
+                && local.ends_with("[y] Trash   [p] Delete permanently   [Esc] Cancel")
+        );
+        let remote = delete_text("Delete a?".into(), false, true);
+        assert!(
+            !remote.contains("[y]") && remote.ends_with("[p] Delete permanently   [Esc] Cancel")
+        );
+    }
+
+    #[test]
     fn find_then_panelize_and_back() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
@@ -5174,6 +5721,79 @@ mod tests {
         }
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn found_ctrl_r_searches_again_and_slash_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("B.txt"), "x").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        find_in_form(&mut app, "*.txt", None);
+        wait_found(&mut app);
+        std::fs::write(dir.path().join("c.txt"), "x").unwrap();
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        wait_found(&mut app);
+        let n = |app: &App| match &app.mode {
+            Mode::Found(f) => (f.list.len(), f.shown_len()),
+            _ => panic!("no results"),
+        };
+        assert_eq!(n(&app), (3, 3));
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "b.");
+        assert_eq!(n(&app), (3, 1));
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter); // panelizes the shown result only
+        assert_eq!(app.panels[0].entries().len(), 1);
+    }
+
+    #[test]
+    fn found_enter_with_empty_filter_keeps_results() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        find_in_form(&mut app, "*.txt", None);
+        wait_found(&mut app);
+        key(&mut app, KeyCode::Char('/'));
+        type_keys(&mut app, "zzz");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.mode, Mode::Found(f) if f.shown_len() == 0));
+    }
+
+    #[test]
+    fn q_and_f10_close_found_results_and_the_menu() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        find_in_form(&mut app, "*", None);
+        wait_found(&mut app);
+        key(&mut app, KeyCode::Char('q'));
+        assert!(matches!(app.mode, Mode::Normal));
+        key(&mut app, KeyCode::F(9));
+        key(&mut app, KeyCode::F(10));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn stats_ctrl_r_scans_the_browsed_directory_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("d")).unwrap();
+        std::fs::write(tmp.path().join("d/a"), "x").unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        let wait = |app: &mut App| {
+            while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+                app.tick();
+            }
+        };
+        wait(&mut app);
+        key(&mut app, KeyCode::Enter);
+        std::fs::write(tmp.path().join("d/b"), "x").unwrap();
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        wait(&mut app);
+        assert!(
+            matches!(&app.mode, Mode::Stats(st) if st.root.files == 2 && st.dir == tmp.path().join("d"))
+        );
     }
 
     #[test]
@@ -5375,7 +5995,7 @@ mod tests {
         key(&mut app, KeyCode::Char('/'));
         type_keys(&mut app, &std::process::id().to_string());
         let p = procs(&app);
-        assert!(p.editing && p.rows.len() < all);
+        assert!(p.filter.editing && p.rows.len() < all);
         assert_eq!(p.current().map(|c| c.pid), Some(std::process::id()));
         key(&mut app, KeyCode::Esc);
         assert_eq!(procs(&app).rows.len(), all);

@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use encoding_rs::Encoding;
 use regex::Regex;
@@ -12,6 +12,7 @@ const CHUNK: usize = 8 * 1024;
 /// Longest line part shown; the rest of the line is skipped.
 const MAX_LINE: u64 = 4 * 1024;
 pub struct Viewer {
+    path: PathBuf,
     file: File,
     len: u64,
     /// Byte offset of the first visible line, always a line start.
@@ -36,6 +37,7 @@ impl Viewer {
         det.feed(&head, head.len() < CHUNK);
         let encoding = det.guess(None, chardetng::Utf8Detection::Allow);
         Ok(Self {
+            path: path.to_owned(),
             file,
             len,
             top: 0,
@@ -44,6 +46,10 @@ impl Viewer {
             wrap: false,
             top_line: Some(0),
         })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Positive scrolls down, negative up; stops at first and last line.

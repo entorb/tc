@@ -12,7 +12,7 @@ use tc_core::sync::{Action, Item};
 use tc_core::vfs::Side;
 use tc_core::{Error, ops, sync};
 
-use super::{App, FormRow, Mode, form_checked, form_text, paste_line};
+use super::{App, Filter, FormRow, Mode, form_checked, form_text, paste_line};
 use tc_core::edit::human;
 
 const S_MASK: &str = "File mask";
@@ -82,6 +82,8 @@ pub struct Sync {
     /// Shown groups by compare result: `->`, `=`, `!=`, `<-` (with `del`).
     pub show: [bool; 4],
     pub sel: usize,
+    /// `/` filter on the relative path.
+    pub filter: Filter,
     job: Option<JoinHandle<tc_core::Result<Vec<Item>>>>,
     pub progress: Arc<ops::Progress>,
     /// Sync question, shown while set.
@@ -119,7 +121,10 @@ impl Sync {
     fn rebuild(&mut self) {
         let show = self.show;
         self.view = (0..self.items.len())
-            .filter(|&i| show[group(self.items[i].default)])
+            .filter(|&i| {
+                let it = &self.items[i];
+                show[group(it.default)] && self.filter.matches(&it.rel.to_string_lossy())
+            })
             .collect();
         self.sel = self.sel.min(self.view.len().saturating_sub(1));
     }
@@ -167,7 +172,7 @@ impl Sync {
         };
         format!(
             "Synchronize?\n\nCopy left -> right: {right} ({})\nCopy right -> left: {left} ({})\n\
-             Overwrite existing: {over}\nDelete on right ({trash}): {del}\n\n[y]/Enter start   [n]/Esc back",
+             Overwrite existing: {over}\nDelete on right ({trash}): {del}\n\n[y] Start   [Esc] Cancel",
             human(rb),
             human(lb)
         )
@@ -228,7 +233,7 @@ impl App {
     pub(super) fn sync_form_key(&mut self, key: KeyEvent, mut form: SyncForm) {
         let last = form.rows.len() - 1;
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::F(10) => {
                 self.last_sync = Some(form);
                 return;
             }
@@ -267,6 +272,7 @@ impl App {
             view: Vec::new(),
             show: [true; 4],
             sel: 0,
+            filter: Filter::default(),
             job: Some(thread::spawn(move || sync::compare(&s, &r, &o, &p))),
             progress,
             confirm: None,
@@ -278,17 +284,43 @@ impl App {
             return self.sync_confirm_key(s, key.code);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if !s.comparing() && s.filter.key(key) {
+            s.rebuild();
+            self.mode = Mode::Sync(s);
+            return;
+        }
         match key.code {
-            KeyCode::Esc if s.comparing() => s.progress.cancel.store(true, Ordering::Relaxed),
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') if s.comparing() => {
+                s.progress.cancel.store(true, Ordering::Relaxed)
+            }
             _ if s.comparing() => {}
             KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => return,
             KeyCode::Char('r') if ctrl => return self.sync_spawn((s.form, s.sides, s.roots)),
+            KeyCode::F(3 | 4) => return self.sync_row_open(s, key.code == KeyCode::F(4)),
             KeyCode::Enter => s.confirm = Some(s.confirm_text()),
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => s.set_action(key.code),
             KeyCode::Char(c) => s.toggle_show(c),
             code => s.nav(code, self.page),
         }
         self.mode = Mode::Sync(s);
+    }
+
+    /// F3 views, F4 edits the file of the row on the left, or on the right when only that has it.
+    fn sync_row_open(&mut self, s: Box<Sync>, edit: bool) {
+        let row = s.view.get(s.sel).map(|&i| &s.items[i]);
+        let Some(it) = row.filter(|it| !it.is_dir()) else {
+            self.mode = Mode::Sync(s);
+            return;
+        };
+        let side = usize::from(it.left.is_none());
+        let path = s.roots[side].join(&it.rel);
+        let remote = s.sides[side].remote().is_some();
+        self.sync_back = Some(s);
+        if remote {
+            self.mode = Mode::Message("Remote rows are only listed.".into());
+        } else {
+            self.open_at(path, None, edit);
+        }
     }
 
     fn sync_confirm_key(&mut self, mut s: Box<Sync>, code: KeyCode) {
@@ -353,6 +385,58 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("no compare result");
+    }
+
+    #[test]
+    fn f3_opens_the_left_file_else_the_right_and_returns_to_the_rows() {
+        let t = tempfile::tempdir().unwrap();
+        let (l, r) = (t.path().join("l"), t.path().join("r"));
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&r).unwrap();
+        fs::write(l.join("a.txt"), "left").unwrap();
+        fs::write(r.join("a.txt"), "right").unwrap();
+        fs::write(r.join("b.txt"), "only right").unwrap();
+        let mut app = App::new(Panel::open(&l).unwrap(), Panel::open(&r).unwrap());
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        compared(&mut app);
+        for (name, text) in [("a.txt", "left"), ("b.txt", "only right")] {
+            let Mode::Sync(s) = &app.mode else {
+                panic!("no sync");
+            };
+            assert_eq!(s.shown().nth(s.sel).unwrap().rel.to_str(), Some(name));
+            key(&mut app, KeyCode::F(3), KeyModifiers::NONE);
+            let Mode::View { view, .. } = &mut app.mode else {
+                panic!("no viewer");
+            };
+            assert_eq!(view.lines(1, 80).unwrap(), [text]);
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            app.tick();
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        }
+        assert!(matches!(&app.mode, Mode::Sync(s) if s.sel == 1));
+    }
+
+    #[test]
+    fn slash_filters_sync_rows() {
+        let t = tempfile::tempdir().unwrap();
+        let (l, r) = (t.path().join("l"), t.path().join("r"));
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&r).unwrap();
+        fs::write(l.join("a.txt"), "a").unwrap();
+        fs::write(l.join("B.txt"), "b").unwrap();
+        let mut app = App::new(Panel::open(&l).unwrap(), Panel::open(&r).unwrap());
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        compared(&mut app);
+        key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        key(&mut app, KeyCode::Char('b'), KeyModifiers::NONE);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(compared(&mut app), [("B.txt".into(), Action::ToRight)]);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        compared(&mut app);
+        assert!(r.join("B.txt").exists() && !r.join("a.txt").exists());
     }
 
     #[test]

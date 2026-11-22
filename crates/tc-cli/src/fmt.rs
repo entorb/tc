@@ -13,7 +13,9 @@ use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, FormRow, Found, Input, Mode, Procs, Stats, Step, Sync, Xfer};
+use crate::app::{
+    App, Filter, FormRow, Found, Input, Mode, Procs, Stats, Step, Sync, Xfer, list_rows,
+};
 use tc_core::procs::{Proc, ProcSort};
 use tc_core::sync::Item;
 
@@ -101,7 +103,7 @@ pub fn progress_text(x: &Xfer) -> String {
         _ => "--".to_owned(),
     };
     format!(
-        "{current}\n{} / {total}   files {of}\n{speed}   ETA {eta}\n\nEsc cancel",
+        "{current}\n{} / {total}   files {of}\n{speed}   ETA {eta}\n\n[Esc] Cancel",
         human(done)
     )
 }
@@ -114,9 +116,11 @@ pub fn hms(s: u64) -> String {
 }
 
 pub const HELP_MAIN: &str = "\
+Type to filter this help, Up/Down select, Enter runs the key.
+
 == Highlights ==
-Ctrl+B          bookmarks (hotlist), Ctrl+D adds this directory
-F9              MENU with all features (when keys are eaten)
+F9              menu with all features (when keys are eaten)
+Ctrl+B          bookmarks (hotlist)
 Ctrl+Space      FILE STATS (like ncdu): biggest files and dirs
                 of the current tree, with % and bar
 Ctrl+N          SFTP / FTP / FTPS connections
@@ -127,144 +131,363 @@ Ctrl+P          PROCESSES (like btop / task manager), of the
 Tab             switch panel
 Enter           open directory, archive or file
 Backspace       parent directory
-Alt+Left/Right  history back / forward
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last entry
+Alt+Left        history back
+Alt+Right       history forward
 ~               home directory
-Ctrl+\\         root directory
+Ctrl+\\          root directory
 Ctrl+R          refresh
-Alt+F1 / F2     drives for left / right panel
+Alt+F1          drives for left panel
+Alt+F2          drives for right panel
+Ctrl+D          add this directory to the bookmarks
 Ctrl+U          swap panels
-Ctrl+T / Ctrl+W new / close tab
-Ctrl+PgDn/PgUp  next / previous tab
+Ctrl+T          new tab
+Ctrl+W          close tab
+Ctrl+PgDn       next tab
+Ctrl+Tab        next tab
+Ctrl+PgUp       previous tab
 Alt+=           other panel to this directory
 Alt+.           show / hide hidden files
-Ctrl+F3..F6     sort name/ext/date/size (again: reverse)
+Ctrl+F3         sort by name (Ctrl+F4 ext, F5 date, F6 size;
+                again: reverse)
 Esc             clear filter, leave found list
 Ctrl+G          found list: go to the file's directory
 
+== Mouse ==
+Wheel           scroll the panel under the pointer, 3 entries
+Click           cursor to the entry, activates the panel
+Shift+click     select range from the cursor
+Double click    open directory / archive, view file
+Click title     sort by name / size / date (again: reverse)
+Click F-bar     run the key shown on the label
+Click menu bar  open the F9 menu
+
 == Selection ==
-Insert / Space  select entry
+Insert          select entry, cursor moves down
+Space           same; on a local directory also sizes it
 Shift+Up/Down   select range
-+ / -           select / deselect by mask
++               select by mask
+-               deselect by mask
 *               invert selection
 Ctrl+Y          select differences to other panel
 
 == Search ==
-Ctrl+S          quick search (again: next match)
-/               quick filter
+Ctrl+S          quick search: type to jump to a match, Ctrl+S
+                next match, Enter / Esc stop searching
+/               quick filter: type to hide other entries,
+                Enter keeps the filter, Esc clears it
 Ctrl+F          find files
 Ctrl+E          synchronize directories (left / right panel)
-:               command line
-
-== Config ==
-Delete config files  (F9 Tools) delete tc's saved files: hotlist,
-                connections, histories, searches, session
+:               command line (Up/Down: earlier commands)
 
 == Files ==
-F3 / F4         view (media: preview) / edit
+F3              view (media: preview)
+F4              edit (media: default application)
 Shift+F4        create file, edit in external editor
-Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
-F5 / F6         copy / move
-Ctrl+C / Ctrl+X copy / cut files, Ctrl+V pastes them here
+F5              copy
+F6              move
 Shift+F6        rename
-Ctrl+M          multi-rename: masks, counter, find/replace
-F7 / F8         make directory / delete
-F10 / q         quit";
+Ctrl+M          multi-rename: masks, counter, find / replace
+                (tc-cli: use F9 -> File, Enter is Ctrl+M)
+F7              make directory
+F8              delete: y / Enter trash, p permanent,
+                n / Esc cancel (remote panels: only p)
+Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
+Ctrl+C          copy files
+Ctrl+X          cut files
+Ctrl+V          paste copied / cut files here
 
+== Tools ==
+Delete config files
+                (F9 Tools) delete tc's saved files: hotlist,
+                connections, histories, searches, session
+
+== Quit ==
+F10             quit (asks first), also q";
 pub const HELP_STATS: &str = "\
-Enter / Right  open directory
-Backspace / Left  parent directory
-Tab  toggle size / file count
-F3  view file
-F4  edit file
-Shift+F4  edit in external editor
-F8 / d  delete (y trash, p permanent), no rescan
-:  command line in this directory
-Esc / q / F10  close (while scanning: cancel)
-
+== About ==
 Scan runs in up to 8 threads; footer shows files and
-scanned / discovered directories.";
+scanned / discovered directories.
 
+== Move ==
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last entry
+Enter           open directory
+Right           open directory
+Backspace       parent directory
+Left            parent directory
+Tab             toggle size / file count
+Ctrl+R          scan the browsed directory again
+/               filter the entries by name: Enter keeps,
+                Esc clears
+
+== Files ==
+F3              view file
+F4              edit file
+Shift+F4        edit in external editor
+F8              delete entry (also d), tree updates without rescan:
+                y / Enter trash, p permanent, n / Esc cancel
+:               command line in this directory
+Esc / q / F10   close (while scanning: cancel)";
 pub const HELP_SYNC: &str = "\
-Up/Down/PgUp/PgDn/Home/End  move
-Right  copy left -> right (overwrites the right file)
-Left  copy right -> left (overwrites the left file)
-Space  no action / restore the compare result
-> = ! <  show / hide rows compared ->, =, != , <- (and del)
-Enter  synchronize the shown rows (asks first)
-Ctrl+R  compare again
-Esc / q / F10  close (while comparing: cancel)
-
+== About ==
 -> left is newer or only left, <- right is newer or only
-right, = equal, != differs without direction (same date, date
-ignored, file vs directory), del only right (asymmetric), -- skip.
-A directory on one side only is one row, copied or deleted whole.
-Copies keep the date on local disks; remote targets get the
-copy time, so use Ignore date against SFTP / FTP.
-Hidden rows are not synchronized. Local deletes go to the trash.";
+right, = equal, != differs without direction (same date,
+date ignored, file vs directory), del only right
+(asymmetric), -- skip. A directory on one side only is one
+row, copied or deleted whole.
+Copies keep the date on local disks; remote targets get
+the copy time, so use Ignore date against SFTP / FTP.
+Hidden and filtered-out rows are not synchronized. Local
+deletes go to the trash.
 
+== Move ==
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last row
+F3 / F4         view / edit the left file (the right one when
+                only it has the file); local only
+
+== Actions ==
+Right           copy left -> right (overwrites the right file)
+Left            copy right -> left (overwrites the left file)
+Space           no action / restore the compare result
+> = ! <         show / hide rows compared ->, =, !=, <- (and del)
+/               filter the rows by path: Enter keeps, Esc clears
+Enter           synchronize the shown rows: y / Enter starts,
+                n / Esc goes back
+Ctrl+R          compare again
+Esc / q / F10   close (while comparing: cancel)";
+pub const HELP_SYNC_FORM: &str = "\
+== Fields ==
+Tab             next field
+Shift+Tab       previous field
+Up/Down         previous / next field
+Space           toggle checkbox
+Left/Right      move in text
+
+== Options ==
+File mask: names to compare, `*` and `?`, comma or space
+separated. Subdirectories: compare the whole tree.
+By content: same size is compared byte by byte.
+Ignore date: same size = equal.
+Asymmetric: the right side becomes a copy of the left
+(extra right files are deleted).
+
+== Run ==
+Enter           compare the two panel directories
+Esc / F10       close";
+pub const HELP_FIND_FORM: &str = "\
+== Fields ==
+Tab             next field
+Shift+Tab       previous field
+Up/Down         previous / next field
+Space           toggle checkbox
+Left/Right      move in text
+Alt+Up/Down     earlier / later searches (history)
+
+== Name ==
+Name (masks): `*` any run, `?` one character, several
+masks separated by comma or space; empty = any name.
+Name is a regex: the field is a regular expression
+instead (local panels only). Exclude files: masks of
+files to leave out. Case-sensitive: names match exactly.
+Extensions: comma separated, with or without dot.
+
+== Content ==
+Typing in Content turns on Search file contents.
+Plain text, `*` matches any run within a line. Content is
+a regex uses a regular expression, Whole words, Not
+containing (files without the text), List every match
+(one result per line). No capital letter = ignore case
+unless Content case-sensitive is on.
+
+== Limits ==
+Exclude dirs: names or paths with `/` below the start
+directory, comma separated. Skip hidden: dot names.
+Use .gitignore (local only). Follow symlinks. Max depth:
+1 = only this directory.
+Min / Max size: number with K, M, G or T (1024 steps),
+e.g. 10k, 2 MB. Modified after / before: YYYY-MM-DD.
+Not older than: 30m, 12h, 7d, 2w (bare number = days).
+
+== Saved searches ==
+F2              save the form under the name in \"Saved search\"
+F3              load the next saved search
+F8              delete the saved search of that name
+
+== Run ==
+Enter           start the search
+Esc / F10       close (the form is kept for next time)";
+pub const HELP_FOUND: &str = "\
+== Move ==
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last result
+/               filter the results by path: Enter keeps,
+                Esc clears
+
+== Results ==
+F3              view file at the match
+F4              edit file at the match
+Enter           put the shown results in the panel (virtual list)
+Ctrl+R          search again
+Ctrl+G          go to the file's directory (local only)
+Esc / q / F10   stop a running search, then close";
+pub const HELP_RENAME: &str = "\
+== Fields ==
+Tab             next field
+Shift+Tab       previous field
+Up/Down         previous / next field
+Space           toggle checkbox, cycle choice
+Left/Right      move in text, cycle choice
+Alt+Up/Down     earlier / later settings (history)
+PgUp/PgDn       scroll the preview
+
+== Name and extension masks ==
+Text stays as typed, [..] placeholders are replaced:
+  [N] name, [E] extension, [N2-5] characters 2 to 5,
+  [N2,3] 3 characters from 2, [N-3-] last 3 to end
+  (negative counts from the end)
+  [C] counter (start, step, digits below)
+  [Y] [M] [D] year, month, day of the modified date
+  [h] [n] [s] hour, minute, second
+  [[] a literal [
+
+== Find and replace ==
+Applied to the name part. Find is a regex: `$1` or
+`${1}` in Replace is the first group. Find case-sensitive
+is off by default. Case: unchanged, lower, UPPER,
+First letter, Every Word.
+
+== Run ==
+Enter           rename (the preview shows every new name)
+Esc / F10       close";
+pub const HELP_LISTS: &str = "\
+== Bookmarks (Ctrl+B) ==
+Up/Down         move
+Enter           go to the directory in the active panel
+Delete          remove the bookmark
+/               filter: Enter keeps, Esc clears
+Esc / q / F10   close
+
+== Connections (Ctrl+N) ==
+Up/Down         move
+Enter           connect
+Insert / a      add a connection
+F4 / e          edit the connection
+Delete          remove the connection
+/               filter: Enter keeps, Esc clears
+Esc / q / F10   close
+
+== Drives (Alt+F1 / Alt+F2) ==
+Up/Down         move
+Enter           go to the mount point
+Esc / q / F10   close";
+pub const HELP_CONFLICT: &str = "\
+== Target exists ==
+o               overwrite this file
+s               skip this file
+n               overwrite only if the source is newer
+r               rename: type a new name for the target
+O               overwrite all further conflicts
+S               skip all further conflicts
+N               newer-only for all further conflicts
+Esc / Enter     cancel the whole operation (c too)";
 pub const HELP_PROCS: &str = "\
-c / m / p / n  sort by CPU, memory, pid, name (again: reverse)
-/ or f  filter (name, command, user, pid)
-        Enter keeps, Esc clears
-F8 / k  kill: t SIGTERM, k SIGKILL
-s  update interval in seconds (default 2)
-Esc / q / F10  close
+== About ==
+CPU% is the average over the interval, per core (can
+exceed 100). Load = average number of busy processes
+over the last 1 / 5 / 15 minutes; above the core count
+means overloaded. The cursor keeps its row while the
+list re-sorts. On an SFTP panel the list comes from the
+server's /proc and ps.
 
-CPU% is the average over the interval, per core (can exceed
-100). Load = average number of busy processes over the last
-1 / 5 / 15 minutes; above the core count means overloaded.
-The cursor keeps its row while the list re-sorts.
-On an SFTP panel the list comes from the server's /proc and ps.";
+== Move ==
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last process
+Mouse wheel     scroll
+Click title     sort by that column (GUI)
 
+== Keys ==
+c / m / p / n   sort by CPU, memory, pid, name (again: reverse)
+/ or f          filter (name, command, user, pid):
+                Enter keeps, Esc clears
+Ctrl+R          sample now
+s               update interval in seconds (default 2):
+                Enter sets, Esc keeps
+F8 / k          kill: t / Enter SIGTERM, k SIGKILL, n / Esc cancel
+Esc / q / F10   close";
 pub const HELP_VIEW: &str = "\
 == Move ==
-Up/Down/PgUp/PgDn/Home/End  scroll
-Left/Right  scroll sideways
-g  go to line or N%
+Up/Down         scroll
+PgUp/PgDn       page up / down
+Home/End        start / end of file
+Left/Right      scroll sideways
+Mouse wheel     scroll
+g / Ctrl+G      go to line or N%
 
 == Search ==
-/ or f or F7  find (prompt: Up/Down earlier patterns)
-n  next match
-N  previous match
+/ f F7 Ctrl+F   find (prompt: Up/Down earlier patterns)
+n / Shift+F7    next match
+N               previous match
+Alt+C           case sensitive / smart case
 
 == View ==
-w  wrap long lines
-l  line numbers
-Esc / q / F3 / F10  close";
-
+w / Alt+W       wrap long lines
+l / Alt+L       line numbers
+F4              edit this file at the top line (local files)
+Esc / q / F10   close
+F3              close";
 pub const HELP_EDIT: &str = "\
 == File ==
-F2  save
-Esc / F10  exit
+F2 / Ctrl+S     save
+Esc / F10       exit (asks if unsaved)
 
 == Move ==
-Ctrl+Left/Right  by word
-Ctrl+Home/End  start / end of file
-Ctrl+G  go to line
+Up/Down         line up / down
+PgUp/PgDn       page up / down
+Left/Right      character left / right
+Home/End        start / end of line
+Ctrl+Left       word left
+Ctrl+Right      word right
+Ctrl+Home/End   start / end of file
+Ctrl+G          go to line
+Mouse wheel     scroll
+Mouse           click, drag, Shift+click select
 
 == Search ==
-F7 / Ctrl+F  find (prompt: Up/Down earlier patterns)
-F3  next match
-Shift+F3  previous match
-F4 / Ctrl+R  replace all
-Alt+R  replace one by one (y n a Esc)
-Alt+C  case sensitive / smart case
+F7 / Ctrl+F     find (prompt: Up/Down earlier patterns)
+F3 / Shift+F7   next match
+Shift+F3        previous match
+F4 / Ctrl+R     replace all
+Alt+R           replace one by one (y / Enter, n / Space,
+                a all, other key stops)
+Alt+C           case sensitive / smart case
 
 == Edit ==
-Ctrl+Z  undo
-Ctrl+Y  redo
-Shift+arrows  select
-Ctrl+C  copy (also system clipboard)
-Ctrl+X  cut
-Ctrl+V  paste (terminal paste works too)
-Ctrl+K / F8  delete selection or line
-Ctrl+A  select all
-Ctrl+D  duplicate line
-Ctrl+Backspace/Delete  delete word
-Shift+Tab  unindent line / selection
-Alt+W  wrap on / off
-Alt+L  line numbers on / off
-Mouse  click, drag, Shift+click select";
+Enter           new line, keeps the indentation
+Tab             insert a tab
+Shift+Tab       unindent line / selection
+Backspace       delete left
+Delete          delete right
+Ctrl+Backspace  delete word left
+Ctrl+Delete     delete word right
+Ctrl+Z          undo
+Ctrl+Y          redo
+Shift+arrows    select
+Ctrl+A          select all
+Ctrl+C          copy (also system clipboard)
+Ctrl+X          cut
+Ctrl+V          paste (terminal paste works too)
+Ctrl+K / F8     delete selection or line
+Ctrl+D          duplicate line
+Alt+W           wrap on / off
+Alt+L           line numbers on / off";
 
 /// Popup content of the current mode, rendered by each front end in its own look.
 pub enum Dialog<'a> {
@@ -281,15 +504,16 @@ pub enum Dialog<'a> {
     },
     /// List with the selected row, `empty` shown when there are no rows.
     List {
-        title: &'static str,
-        rows: &'a [PathBuf],
+        title: String,
+        rows: Vec<&'a PathBuf>,
+        /// Position in `rows`.
         sel: usize,
         empty: &'static str,
         keys: &'static str,
     },
 }
 
-const OK_CANCEL: &str = "Enter ok   Esc cancel";
+const OK_CANCEL: &str = "[Enter] OK   [Esc] Cancel";
 
 fn edit<'a>(title: &'a str, head: &str, l: &LineEdit, tail: &str) -> Option<Dialog<'a>> {
     Some(Dialog::Edit {
@@ -297,6 +521,24 @@ fn edit<'a>(title: &'a str, head: &str, l: &LineEdit, tail: &str) -> Option<Dial
         head: head.to_owned(),
         line: l.clone(),
         tail: tail.to_owned(),
+    })
+}
+
+/// List of paths with the rows `filter` keeps; `list.2` is a row of `list.1`.
+fn list_dialog<'a>(
+    list: (&str, &'a [PathBuf], usize),
+    filter: &Filter,
+    empty: &'static str,
+    keys: &'static str,
+) -> Option<Dialog<'a>> {
+    let (title, rows, sel) = list;
+    let view = list_rows(rows, filter);
+    Some(Dialog::List {
+        title: format!("{title}{}", filter.tag()),
+        sel: view.iter().position(|&i| i == sel).unwrap_or(0),
+        rows: view.iter().map(|&i| &rows[i]).collect(),
+        empty,
+        keys,
     })
 }
 
@@ -311,7 +553,7 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
         Mode::ResetConfig(dir) => text(
             "Delete config files",
             format!(
-                "Delete tc's files in {}?\n{}\nOther files there stay.\n\ny delete   n/Esc cancel",
+                "Delete tc's files in {}?\n{}\nOther files there stay.\n\n[y] Delete   [Esc] Cancel",
                 dir.display(),
                 tc_core::settings::FILES.join(", ")
             ),
@@ -334,50 +576,47 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             OK_CANCEL,
         ),
         Mode::Editor(_, l) => edit("Editor not found, enter editor command", "", l, OK_CANCEL),
-        Mode::Hotlist(sel) => Some(Dialog::List {
-            title: "Hotlist",
-            rows: &app.hotlist,
-            sel: *sel,
-            empty: "(empty, Ctrl+D adds the current directory)",
-            keys: "Enter go  Del remove  Esc close",
-        }),
-        Mode::Drives(rows, sel, _) => Some(Dialog::List {
-            title: "Drives",
-            rows,
-            sel: *sel,
-            empty: "(no drives found)",
-            keys: "Enter go  Esc close",
-        }),
-        Mode::Connections(sel) => Some(Dialog::List {
-            title: "Connections",
-            rows: &app.connections,
-            sel: *sel,
-            empty: "(empty, Insert adds one)",
-            keys: "Enter connect  Ins add  F4 edit  Del remove  Esc close",
-        }),
+        Mode::Hotlist(sel) => list_dialog(
+            ("Hotlist", &app.hotlist, *sel),
+            &app.list_filter,
+            "(empty, Ctrl+D adds the current directory)",
+            "Enter go  Delete remove  / filter  Esc close",
+        ),
+        Mode::Drives(rows, sel, _) => list_dialog(
+            ("Drives", rows, *sel),
+            &Filter::default(),
+            "(no drives found)",
+            "Enter go  Esc close",
+        ),
+        Mode::Connections(sel) => list_dialog(
+            ("Connections", &app.connections, *sel),
+            &app.list_filter,
+            "(empty, Insert adds one)",
+            "Enter connect  Insert add  F4 edit  Delete remove  / filter  Esc close",
+        ),
         Mode::ConnEdit(_, l) => edit(
             "Connection",
             "sftp://user@host[:port]/dir, ftp://..., ftps://...\n(no passwords, they are asked on connect)",
             l,
-            "Enter save   Esc cancel",
+            "[Enter] Save   [Esc] Cancel",
         ),
         Mode::Connecting(c) => match &c.ask {
             Some((Prompt::HostKey(t), _)) => text(
                 "Host key",
-                format!("{t}\n\n[y] trust and save to known_hosts   [n] cancel"),
+                format!("{t}\n\n[y] Trust and save to known_hosts   [Esc] Cancel"),
             ),
             Some((Prompt::Password(label), l)) => {
                 let masked = LineEdit::from("*".repeat(l.text.chars().count()));
                 edit(label, "", &masked, OK_CANCEL)
             }
-            None => text("Connecting", format!("{}\n\nEsc abandon", c.url)),
+            None => text("Connecting", format!("{}\n\n[Esc] Cancel", c.url)),
         },
         Mode::Message(msg) => text("Error", format!("{msg}\n\nany key")),
         Mode::Edit {
             error: Some(msg), ..
         } => text("Error", format!("{msg}\n\nany key")),
         Mode::Work(job) if job.visible() => {
-            text(job.label, format!("{}%\n\nEsc cancel", job.percent()))
+            text(job.label, format!("{}%\n\n[Esc] Cancel", job.percent()))
         }
         Mode::Xfer(x) => xfer_dialog(x),
         Mode::AskViewer { text: t, .. } => text("Edit", t.clone()),
@@ -387,11 +626,12 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
                 Step::Encoding => format!("File is {}. Convert to UTF-8?", editor.encoding_name()),
                 Step::Eol => "Convert line endings to LF?".to_owned(),
             };
-            text("Save", format!("{t}\n\n[y] yes   [n] no   Esc cancel"))
+            text("Save", format!("{t}\n\n[y] Yes   [n] No   [Esc] Cancel"))
         }
+        Mode::AskQuit => text("Quit", "Quit tc?\n\n[y] Quit   [Esc] Cancel".to_owned()),
         Mode::AskExit(_) => text(
             "Edit",
-            "Save changes?\n\n[y] yes   [n] no   Esc cancel".to_owned(),
+            "Save changes?\n\n[y] Yes   [n] No   [Esc] Cancel".to_owned(),
         ),
         _ => None,
     }
@@ -399,12 +639,12 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
 
 fn xfer_dialog(x: &Xfer) -> Option<Dialog<'_>> {
     if let Some(l) = &x.rename {
-        edit("Rename", "", l, "Enter ok   Esc back")
+        edit("Rename", "", l, OK_CANCEL)
     } else if let Some((_, target)) = &x.ask {
         text(
             "File exists",
             format!(
-                "{}\n\no overwrite  s skip  r rename  n newer\nO all  S skip all  N newer all\nEsc cancel",
+                "{}\n\n[o] Overwrite   [s] Skip   [r] Rename   [n] Newer\n[O] Overwrite all   [S] Skip all   [N] Newer all\n[Esc] Cancel",
                 target.display()
             ),
         )
@@ -434,6 +674,12 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Stats(_) => ("Help: file stats (ncdu)", HELP_STATS),
         Mode::Procs(_) => ("Help: processes (top)", HELP_PROCS),
         Mode::Sync(_) => ("Help: synchronize directories", HELP_SYNC),
+        Mode::SyncForm(_) => ("Help: synchronize form", HELP_SYNC_FORM),
+        Mode::FindForm(_) => ("Help: find files", HELP_FIND_FORM),
+        Mode::Found(_) => ("Help: found files", HELP_FOUND),
+        Mode::MultiRename(_) => ("Help: multi-rename", HELP_RENAME),
+        Mode::Hotlist(_) | Mode::Connections(_) | Mode::Drives(..) => ("Help: lists", HELP_LISTS),
+        Mode::Xfer(_) => ("Help: file exists", HELP_CONFLICT),
         _ => ("Help", HELP_MAIN),
     }
 }
@@ -554,12 +800,16 @@ pub fn found_title(f: &Found) -> String {
         Some(e) => format!(", {e}"),
         None => String::new(),
     };
-    let keys = if f.remote {
-        "Esc stop/close"
+    let shown = if f.filter.active() || f.filter.editing {
+        format!("{} of ", f.shown_len())
     } else {
-        "Enter panelize  F3/F4 view/edit  Ctrl+G go to file  Esc stop/close"
+        String::new()
     };
-    format!(" Find: {} found, {state}{cap}{err}  {keys} ", f.list.len())
+    format!(
+        " Find: {shown}{} found, {state}{cap}{err}{} ",
+        f.list.len(),
+        f.filter.tag()
+    )
 }
 
 /// Find result row: size (blank for directories), full path and the matching line if any.
@@ -595,7 +845,12 @@ pub fn sync_title(s: &Sync) -> String {
     } else {
         format!("  hidden:{hidden}")
     };
-    format!(" Sync: {}  <->  {}{hidden} ", side(0), side(1))
+    format!(
+        " Sync: {}  <->  {}{hidden}{} ",
+        side(0),
+        side(1),
+        s.filter.tag()
+    )
 }
 
 /// Sync row: left size and date, action, right size and date, path.
@@ -625,7 +880,7 @@ pub fn sync_row(it: &Item, today: jiff::civil::Date) -> String {
 pub fn sync_footer(s: &Sync) -> String {
     if s.comparing() {
         return format!(
-            "comparing: {} names, {} dirs  Esc cancel",
+            "comparing: {} names, {} dirs  [Esc] Cancel",
             thousands(s.progress.files.load(Ordering::Relaxed)),
             thousands(s.progress.dirs_done.load(Ordering::Relaxed))
         );
@@ -635,7 +890,7 @@ pub fn sync_footer(s: &Sync) -> String {
         n[it.action as usize] += 1;
     }
     format!(
-        "{} shown of {}: = {}  != {}  -> {}  <- {}  del {}  -- {}   Enter sync  Left/Right direction  Space skip  > = ! < show  Ctrl+R compare  F1 Help  Esc close",
+        "{} shown of {}: = {}  != {}  -> {}  <- {}  del {}  -- {}   Left/Right direction  > = ! < show",
         s.view.len(),
         s.items.len(),
         n[0],
@@ -721,7 +976,7 @@ pub fn stats_row(st: &Stats, n: &Node) -> String {
 pub fn stats_footer(st: &Stats) -> String {
     if st.scanning() {
         return format!(
-            "scanning: {} files, {} / {} dirs  Esc/F10 cancel",
+            "scanning: {} files, {} / {} dirs  [Esc] Cancel",
             thousands(st.progress.files.load(Ordering::Relaxed)),
             thousands(st.progress.dirs_done.load(Ordering::Relaxed)),
             thousands(st.progress.dirs.load(Ordering::Relaxed))
@@ -730,7 +985,7 @@ pub fn stats_footer(st: &Stats) -> String {
     let dir = st.current();
     let mode = if st.by_files { "count" } else { "size" };
     format!(
-        "{}, {} files  Tab size/count ({mode})  Enter open  Bksp up  F1 Help  F3 View  F4 Edit  S-F4 Ext  F8 Del  : Cmd  F10 Quit",
+        "{}, {} files  Tab size/count ({mode})  Enter open  Backspace up",
         human(dir.size),
         thousands(dir.files)
     )
@@ -745,15 +1000,12 @@ pub fn procs_title(p: &Procs) -> String {
         ProcSort::Cpu => "cpu",
         ProcSort::Mem => "mem",
     };
-    let mut t = format!(
+    let t = format!(
         "Processes: {src} [{key}{}] [every {}s]",
         if p.rev { " rev" } else { "" },
         p.every.as_secs_f64()
     );
-    if !p.filter.text.is_empty() {
-        t += &format!(" [filter: {}]", p.filter.text);
-    }
-    t
+    t + &p.filter.tag()
 }
 
 /// Summary line: CPU, memory, swap, load and process count; `-` = unknown.
@@ -799,7 +1051,7 @@ pub fn proc_col_key(col: usize) -> Option<char> {
 pub fn procs_prompt(p: &Procs) -> Option<(&'static str, &LineEdit)> {
     match &p.every_edit {
         Some(l) => Some(("update every (seconds)> ", l)),
-        None if p.editing => Some(("filter> ", &p.filter)),
+        None if p.filter.editing => Some(("filter> ", &p.filter.line)),
         None => None,
     }
 }
@@ -826,17 +1078,17 @@ pub fn procs_footer(p: &Procs) -> String {
         return p.status.clone();
     }
     if p.snap.procs.is_empty() {
-        return "loading...  Esc/F10 close".into();
+        return "loading...".into();
     }
-    "c/m/p/n sort  / filter  s interval  F8 kill  F1 Help  F10 Quit".into()
+    "c/m/p/n sort  / filter  s interval  F8 kill".into()
 }
 
 /// Kill question for the process monitor.
 pub fn procs_confirm(pid: u32, name: &str) -> String {
-    format!("Kill {pid} {name}?\n\n[t] terminate (SIGTERM)   [k] kill (SIGKILL)   [n] no")
+    format!("Kill {pid} {name}?\n\n[t] Terminate (SIGTERM)   [k] Kill (SIGKILL)   [Esc] Cancel")
 }
 
-/// Editor status line: position, encoding, line ending, dirty flag, note and keys.
+/// Editor status line: position, encoding, line ending, dirty flag, note.
 pub fn editor_info(editor: &Editor, note: &str) -> String {
     let (line, col) = editor.cursor;
     let eol = match editor.eol() {
@@ -846,7 +1098,7 @@ pub fn editor_info(editor: &Editor, note: &str) -> String {
     };
     let dirty = if editor.dirty() { " *" } else { "" };
     format!(
-        "{}:{}  {}  {eol}{dirty}  {note}  F2 Save  F3 Next  F4/^R Replace  F7/^F Find  ^Z Undo  Esc Exit",
+        "{}:{}  {}  {eol}{dirty}  {note}  Ctrl+Z Undo",
         line + 1,
         col + 1,
         editor.encoding_name()

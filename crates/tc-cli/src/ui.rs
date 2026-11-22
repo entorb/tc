@@ -9,9 +9,7 @@ use regex::Regex;
 
 use ratatui::widgets::ListState;
 use std::path::{Path, PathBuf};
-use tc::app::{
-    App, FOOTER, FindForm, Found, MENUS, Mode, RenameForm, Stats, Sync, SyncForm, menu_drop,
-};
+use tc::app::{App, FindForm, Found, MENUS, Mode, RenameForm, Stats, Sync, SyncForm, menu_drop};
 use tc::fmt::{
     self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
     help, input_dialog, panel_info, panel_title, stats_footer, stats_row, sync_footer, sync_row,
@@ -50,18 +48,18 @@ fn themed_block() -> Block<'static> {
         .style(PANEL)
 }
 
-fn draw_view(frame: &mut Frame, app: &mut App) {
+fn draw_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let Mode::View { title, view } = &mut app.mode else {
         return;
     };
     let bottom = format!(
-        " {}%  {}  {}  / or f Find  n/N Next/Prev  g Goto  w Wrap  l Lines ",
+        " {}%  {}  {} ",
         view.percent(),
         view.encoding_name(),
         app.note
     );
     let block = themed_block().title(title.as_str()).title_bottom(bottom);
-    let inner = block.inner(frame.area());
+    let inner = block.inner(area);
     let height = inner.height as usize;
     app.page = height.max(1);
     // numbers only while the top line is known, see `Viewer::top_line`
@@ -93,15 +91,28 @@ fn draw_view(frame: &mut Frame, app: &mut App) {
         }
         Err(e) => vec![Line::raw(e.to_string())],
     };
-    frame.render_widget(
-        Paragraph::new(visible).style(PANEL).block(block),
-        frame.area(),
-    );
+    frame.render_widget(Paragraph::new(visible).style(PANEL).block(block), area);
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    let full = matches!(
+        app.mode,
+        Mode::View { .. }
+            | Mode::Edit { .. }
+            | Mode::AskSave { .. }
+            | Mode::AskExit(_)
+            | Mode::Found(_)
+            | Mode::Sync(_)
+            | Mode::Stats(_)
+            | Mode::Procs(_)
+    ) || (matches!(app.mode, Mode::Cmd(_)) && app.stats.is_some());
+    let [body, bar] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    if full {
+        draw_footer(frame, app, bar);
+    }
     if matches!(app.mode, Mode::View { .. }) {
-        draw_view(frame, app);
+        draw_view(frame, app, body);
         draw_input(frame, app);
         return;
     }
@@ -113,6 +124,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             (&mut app.page, &mut app.edit_text),
             &app.note,
             app.search.as_ref(),
+            body,
         );
     } else {
         let [bar, main, cmd, status] = Layout::vertical([
@@ -130,9 +142,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         for (i, area) in halves.into_iter().enumerate() {
             draw_panel(frame, app, i, area);
         }
-        app.footer = status;
-        let help = FOOTER.map(|(l, ..)| l).join("  ");
-        frame.render_widget(Line::raw(help).style(BAR), status);
+        draw_footer(frame, app, status);
     }
 
     if let Mode::Menu(g, sel) = app.mode {
@@ -140,14 +150,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     match &app.mode {
-        Mode::Found(f) => draw_found(frame, f),
+        Mode::Found(f) => draw_found(frame, f, body),
         Mode::FindForm(form) => draw_find_form(frame, form),
         Mode::MultiRename(form) => draw_multi_rename(frame, form),
         Mode::SyncForm(form) => draw_sync_form(frame, form),
-        Mode::Sync(s) => draw_sync(frame, s),
-        Mode::Stats(st) => draw_stats(frame, st, None),
-        Mode::Procs(_) => draw_procs(frame, app),
-        Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l)),
+        Mode::Sync(s) => draw_sync(frame, s, body),
+        Mode::Stats(st) => draw_stats(frame, st, None, body),
+        Mode::Procs(_) => draw_procs(frame, app, body),
+        Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l), body),
         _ => {
             if let Some(d) = dialog(app) {
                 draw_dialog(frame, &d);
@@ -156,6 +166,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     draw_input(frame, app);
+}
+
+/// F-key bar of the current screen in `area`; clicks on it are mapped by `App::footer_click`.
+fn draw_footer(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.footer = area;
+    let bar = app
+        .footer_keys()
+        .iter()
+        .map(|k| k.0)
+        .collect::<Vec<_>>()
+        .join("  ");
+    frame.render_widget(Line::raw(bar).style(BAR), area);
 }
 
 /// Top row: group titles, the open one highlighted.
@@ -226,11 +248,10 @@ fn draw_edit(frame: &mut Frame, area: Rect, prompt: &str, l: &LineEdit, style: S
     }
 }
 
-fn draw_found(frame: &mut Frame, f: &Found) {
-    let area = frame.area();
+fn draw_found(frame: &mut Frame, f: &Found, area: Rect) {
     let h = usize::from(area.height.saturating_sub(2)).max(1);
     let start = f.sel / h * h; // page-wise, so only visible rows are built
-    let items = f.list.iter().skip(start).take(h).map(fmt::found_row);
+    let items = f.shown().skip(start).take(h).map(fmt::found_row);
     let title = found_title(f);
     let list = List::new(items)
         .style(PANEL)
@@ -261,8 +282,7 @@ fn draw_sync_form(frame: &mut Frame, form: &SyncForm) {
 }
 
 /// Synchronize directories: page of compared rows holding the cursor, status line, question.
-fn draw_sync(frame: &mut Frame, s: &Sync) {
-    let area = frame.area();
+fn draw_sync(frame: &mut Frame, s: &Sync, area: Rect) {
     let today = jiff::ZonedDateTime::now().date();
     let h = usize::from(area.height.saturating_sub(3)).max(1);
     let start = s.sel / h * h;
@@ -352,21 +372,18 @@ fn draw_form(
 
 /// File Stats: entries of the browsed directory, largest first, with share and bar.
 /// `cmd`: command line typed from the stats, shown in the footer row.
-fn draw_stats(frame: &mut Frame, st: &Stats, cmd: Option<&LineEdit>) {
-    let area = frame.area();
+fn draw_stats(frame: &mut Frame, st: &Stats, cmd: Option<&LineEdit>, area: Rect) {
     let h = usize::from(area.height.saturating_sub(3)).max(1);
     let start = st.sel / h * h;
-    let items = st
-        .current()
-        .children
-        .iter()
-        .skip(start)
-        .take(h)
-        .map(|n| stats_row(st, n));
+    let items = st.shown().skip(start).take(h).map(|n| stats_row(st, n));
     let footer = stats_footer(st);
     let list = List::new(items)
         .style(PANEL)
-        .block(themed_block().title(format!(" Stats: {} ", st.path().display())))
+        .block(themed_block().title(format!(
+            " Stats: {}{} ",
+            st.path().display(),
+            st.filter.tag()
+        )))
         .highlight_style(BAR);
     let mut state = ListState::default().with_selected(Some(st.sel.saturating_sub(start)));
     let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
@@ -386,8 +403,7 @@ fn draw_stats(frame: &mut Frame, st: &Stats, cmd: Option<&LineEdit>) {
 }
 
 /// Process monitor: summary, column titles, the page of processes holding the cursor, footer.
-fn draw_procs(frame: &mut Frame, app: &mut App) {
-    let area = frame.area();
+fn draw_procs(frame: &mut Frame, app: &mut App, area: Rect) {
     let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let block = themed_block();
     let [head, cols, rows] = Layout::vertical([
@@ -481,9 +497,9 @@ fn draw_editor(
     (page, text_area): (&mut usize, &mut Rect),
     note: &str,
     re: Option<&Regex>,
+    area: Rect,
 ) {
-    let [main, status] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let block = themed_block().title(editor.path().display().to_string());
     let inner = block.inner(main);
     let gutter = if editor.numbers {
@@ -673,7 +689,7 @@ fn popup_edit(frame: &mut Frame, title: &str, head: &str, l: &LineEdit, tail: &s
 fn list_popup(
     frame: &mut Frame,
     title: &str,
-    rows: &[PathBuf],
+    rows: &[&PathBuf],
     sel: usize,
     empty: &str,
     footer: &str,
@@ -745,7 +761,7 @@ mod tests {
         assert!(screen.contains("Processes: local"));
         assert!(screen.contains("COMMAND"));
         assert!(screen.contains("F8 kill"));
-        assert_eq!(app.page, 24 - 1 - 2 - 2);
+        assert_eq!(app.page, 24 - 1 - 1 - 2 - 2); // status row and F-key bar
     }
 
     #[test]

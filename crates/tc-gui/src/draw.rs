@@ -56,6 +56,7 @@ pub struct Look {
 
 pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
     let today = jiff::ZonedDateTime::now().date();
+    egui::Panel::bottom("footer").show(ui, |ui| footer(ui, app));
     if matches!(app.mode, Mode::View { .. }) {
         egui::CentralPanel::default().show(ui, |ui| draw_view(ui, app));
     } else if app.mode.editor_mut().is_some() {
@@ -63,7 +64,6 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
     } else {
         egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, app));
         egui::Panel::top("toolbar").show(ui, |ui| toolbar(ui, app));
-        egui::Panel::bottom("footer").show(ui, |ui| footer(ui, app));
         // File Stats and processes have their own status / prompt line
         let own = app.stats.is_some()
             || matches!(app.mode, Mode::Stats(_) | Mode::Procs(_) | Mode::Sync(_));
@@ -293,7 +293,7 @@ fn footer(ui: &mut Ui, app: &mut App) {
     ui.horizontal(|ui| {
         for &(label, code, mods) in app.footer_keys() {
             let clicked = ui.add(Button::new(label).sense(Sense::CLICK)).clicked();
-            if clicked && app.idle() {
+            if clicked && app.footer_active() {
                 app.on_key(KeyEvent::new(code, mods));
             }
         }
@@ -562,7 +562,7 @@ fn draw_found(ui: &mut Ui, app: &mut App) {
     let h = page_rows(ui);
     let start = f.sel / h * h;
     let mut clicked = None;
-    for (k, e) in f.list.iter().enumerate().skip(start).take(h) {
+    for (k, e) in f.shown().enumerate().skip(start).take(h) {
         if let Some(double) = list_row(ui, fmt::found_row(e), k == f.sel) {
             clicked = Some((k, double));
         }
@@ -632,7 +632,7 @@ fn draw_stats(ui: &mut Ui, app: &mut App) {
         _ => return,
     };
     ui.label(
-        RichText::new(format!("Stats: {}", st.path().display()))
+        RichText::new(format!("Stats: {}{}", st.path().display(), st.filter.tag()))
             .strong()
             .color(ACCENT),
     );
@@ -640,9 +640,7 @@ fn draw_stats(ui: &mut Ui, app: &mut App) {
     let start = st.sel / h * h;
     let mut clicked = None;
     let rows: Vec<String> = st
-        .current()
-        .children
-        .iter()
+        .shown()
         .skip(start)
         .take(h)
         .map(|n| stats_row(st, n))
@@ -783,7 +781,7 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) {
                 empty,
                 keys,
             } => {
-                ui.heading(*title);
+                ui.heading(title);
                 ui.separator();
                 ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     for (k, p) in rows.iter().enumerate() {
