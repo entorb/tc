@@ -13,7 +13,7 @@ use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, FindForm, FormRow, Found, Input, Mode, Procs, Stats, Step, Xfer};
+use crate::app::{App, FormRow, Found, Input, Mode, Procs, Stats, Step, Xfer};
 use tc_core::procs::{Proc, ProcSort};
 
 /// Length of "YY-MM-DD HH:MM".
@@ -160,6 +160,7 @@ Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
 F5 / F6         copy / move
 Ctrl+C / Ctrl+X copy / cut files, Ctrl+V pastes them here
 Shift+F6        rename
+Ctrl+M          multi-rename: masks, counter, find/replace
 F7 / F8         make directory / delete
 F10 / q         quit";
 
@@ -547,14 +548,23 @@ pub fn found_row(h: &Hit) -> String {
 pub const FIND_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter search  Esc cancel
 F2 save as \"Saved search\"  F3 load next saved  F8 delete saved";
 
-/// Find form lines as (text, focused), the caret after the focused field's text.
-pub fn find_form_lines(f: &FindForm) -> Vec<(String, bool)> {
-    f.rows
-        .iter()
+/// Preview rows under the multi-rename form; PgUp/PgDn scroll by this.
+pub const RENAME_PREVIEW_ROWS: usize = 12;
+
+/// Keys shown under the multi-rename form.
+pub const RENAME_FORM_KEYS: &str = "Tab/Up/Down field  Space/Left/Right option  PgUp/PgDn list
+Enter rename  Esc cancel  Alt+Up/Down earlier settings
+[N] name [E] ext ([N2-5] [N2,3] [N-3-] chars)  [C] counter
+[Y] [M] [D] [h] [n] [s] modified date/time  [[] = [";
+
+/// Form lines as (text, focused), the caret after the focused field's text.
+pub fn form_lines(rows: &[FormRow], focused: usize) -> Vec<(String, bool)> {
+    rows.iter()
         .enumerate()
         .map(|(i, row)| {
-            let focus = i == f.focus;
+            let focus = i == focused;
             let text = match row {
+                FormRow::Choice(label, opts, i) => format!("{label:<18} < {} >", opts[*i]),
                 FormRow::Check(label, on) => {
                     format!("[{}] {label}", if *on { "x" } else { " " })
                 }
@@ -570,6 +580,16 @@ pub fn find_form_lines(f: &FindForm) -> Vec<(String, bool)> {
             (text, focus)
         })
         .collect()
+}
+
+/// Multi-rename preview row: `old -> new`, or `old  ! why` (bool: is an error).
+pub fn rename_row(old: &str, new: &Result<String, String>) -> (String, bool) {
+    match new {
+        Ok(n) if n == old => (format!("{old}  (unchanged)"), false),
+        Ok(n) => (format!("{old}  ->  {n}"), false),
+        Err(e) if e.is_empty() => (old.to_owned(), false),
+        Err(e) => (format!("{old}  ! {e}"), true),
+    }
 }
 
 /// File Stats row: value, share, text bar and name.

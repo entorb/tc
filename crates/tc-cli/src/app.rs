@@ -26,7 +26,7 @@ use tc_core::panel::{Panel, SortKey};
 use tc_core::procs::{self, Proc, ProcSort, Sampler, Snapshot};
 use tc_core::stats::{self, Node};
 use tc_core::vfs::{self, Remote, Side};
-use tc_core::{Error, find, hotlist, ops, search, view::Viewer};
+use tc_core::{Error, find, hotlist, ops, rename, search, view::Viewer};
 use tc_remote::Prompt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,8 @@ pub enum Mode {
     FindForm(FindForm),
     /// Find results, filled live by a worker thread.
     Found(Found),
+    /// Multi-rename form (Ctrl+M) with the preview.
+    MultiRename(RenameForm),
     /// File Stats (ncdu-style) tree, scanned by a worker thread.
     Stats(Stats),
     /// Process monitor, refreshed by a worker thread.
@@ -205,6 +207,129 @@ pub struct Found {
     cancel: Arc<AtomicBool>,
 }
 
+// Multi-rename form row labels.
+const R_NAME: &str = "Name mask";
+const R_EXT: &str = "Extension mask";
+const R_FIND: &str = "Find";
+const R_REPLACE: &str = "Replace with";
+const R_REGEX: &str = "Find is a regex";
+const R_CASE_SENS: &str = "Find case-sensitive";
+const R_CASE: &str = "Case";
+const R_START: &str = "Counter start";
+const R_STEP: &str = "Counter step";
+const R_WIDTH: &str = "Counter digits";
+const CASES: [(&str, rename::Case); 5] = [
+    ("unchanged", rename::Case::Keep),
+    ("lower", rename::Case::Lower),
+    ("UPPER", rename::Case::Upper),
+    ("First letter", rename::Case::First),
+    ("Every Word", rename::Case::Words),
+];
+const CASE_NAMES: [&str; 5] = [CASES[0].0, CASES[1].0, CASES[2].0, CASES[3].0, CASES[4].0];
+
+/// Multi-rename form rows in focus order, with the defaults (name unchanged).
+fn rename_rows() -> Vec<FormRow> {
+    let text = |label, v: &str| FormRow::Text(label, LineEdit::from(v.to_owned()));
+    vec![
+        text(R_NAME, "[N]"),
+        text(R_EXT, "[E]"),
+        text(R_FIND, ""),
+        text(R_REPLACE, ""),
+        FormRow::Check(R_REGEX, false),
+        FormRow::Check(R_CASE_SENS, false),
+        FormRow::Choice(R_CASE, &CASE_NAMES, 0),
+        text(R_START, "1"),
+        text(R_STEP, "1"),
+        text(R_WIDTH, "1"),
+    ]
+}
+
+/// Multi-rename (Ctrl+M): form, the items (selection in panel order) and their new names.
+pub struct RenameForm {
+    pub rows: Vec<FormRow>,
+    pub focus: usize,
+    dir: PathBuf,
+    items: Vec<(OsString, Option<std::time::SystemTime>)>,
+    /// Old name and the new one, or why there is none (empty: the form has an error).
+    pub preview: Vec<(String, Result<String, String>)>,
+    /// First preview row shown.
+    pub scroll: usize,
+    pub error: Option<String>,
+    /// Position in the settings history for Alt+Up/Down (= its length: not from history).
+    hist: usize,
+}
+
+impl RenameForm {
+    fn spec(&self) -> Result<rename::Spec, String> {
+        let rows = &self.rows;
+        let num = |label: &str| {
+            let t = form_text(rows, label).trim();
+            t.parse::<i64>()
+                .map_err(|_| format!("{label}: not a number: {t}"))
+        };
+        let width = num(R_WIDTH)?;
+        let case = rows.iter().find_map(|r| match r {
+            FormRow::Choice(R_CASE, _, i) => Some(CASES[*i].1),
+            _ => None,
+        });
+        Ok(rename::Spec {
+            name_mask: form_text(rows, R_NAME).into(),
+            ext_mask: form_text(rows, R_EXT).into(),
+            find: form_text(rows, R_FIND).into(),
+            replace: form_text(rows, R_REPLACE).into(),
+            regex: form_checked(rows, R_REGEX),
+            case_sensitive: form_checked(rows, R_CASE_SENS),
+            case: case.unwrap_or_default(),
+            start: num(R_START)?,
+            step: num(R_STEP)?,
+            width: usize::try_from(width)
+                .ok()
+                .filter(|w| (1..=20).contains(w))
+                .ok_or(format!("{R_WIDTH}: 1 to 20"))?,
+        })
+    }
+
+    /// New names for the form as it is; the first problem goes to `error`.
+    fn refresh(&mut self) {
+        let rule = self.spec().and_then(rename::Spec::compile);
+        self.preview = (self.items.iter().enumerate())
+            .map(|(i, (name, modified))| {
+                let new = match &rule {
+                    Ok(r) => r.new_name(name, *modified, i),
+                    Err(_) => Err(String::new()),
+                };
+                (name.to_string_lossy().into_owned(), new)
+            })
+            .collect();
+        self.error = match rule {
+            Err(e) => Some(e),
+            Ok(_) => self.pairs().err(),
+        };
+    }
+
+    /// Renames to run, or why not.
+    fn pairs(&self) -> Result<Vec<(String, String)>, String> {
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        for (o, n) in &self.preview {
+            match n {
+                Ok(n) => new.push(n.clone()),
+                Err(e) => return Err(format!("{o}: {e}")),
+            }
+            // a new name exists only for UTF-8 old names, so this is the real name
+            old.push(o.clone());
+        }
+        rename::plan(&old, &new)
+    }
+
+    fn paste(&mut self, text: &str) {
+        if let FormRow::Text(_, l) = &mut self.rows[self.focus] {
+            paste_line(l, text);
+        }
+        self.refresh();
+    }
+}
+
 // Find form row labels; also the keys of saved searches.
 const F_NAME: &str = "Name (masks)";
 const F_NAME_RE: &str = "Name is a regex";
@@ -261,19 +386,51 @@ fn find_rows() -> Vec<FormRow> {
     ]
 }
 
-/// One line of the find form: a text field or a checkbox.
+/// One line of a form: a text field, a checkbox or a choice (options, selected).
 #[derive(Clone)]
 pub enum FormRow {
     Text(&'static str, LineEdit),
     Check(&'static str, bool),
+    Choice(&'static str, &'static [&'static str], usize),
 }
 
 impl FormRow {
     fn label(&self) -> &'static str {
         match self {
-            FormRow::Text(l, _) | FormRow::Check(l, _) => l,
+            FormRow::Text(l, _) | FormRow::Check(l, _) | FormRow::Choice(l, _, _) => l,
         }
     }
+
+    /// Typing edits a text field, Space toggles a checkbox, Space/Left/Right cycle a choice.
+    fn key(&mut self, code: KeyCode, ctrl: bool) {
+        match (self, code) {
+            (FormRow::Check(_, on), KeyCode::Char(' ')) => *on = !*on,
+            (FormRow::Choice(_, opts, i), KeyCode::Char(' ') | KeyCode::Right) => {
+                *i = (*i + 1) % opts.len();
+            }
+            (FormRow::Choice(_, opts, i), KeyCode::Left) => *i = (*i + opts.len() - 1) % opts.len(),
+            (FormRow::Text(_, l), KeyCode::Char(c)) if !ctrl => l.insert(c),
+            (FormRow::Text(_, l), KeyCode::Backspace) => l.backspace(),
+            (FormRow::Text(_, l), KeyCode::Delete) => l.delete(),
+            (FormRow::Text(_, l), KeyCode::Left) => l.left(),
+            (FormRow::Text(_, l), KeyCode::Right) => l.right(),
+            (FormRow::Text(_, l), KeyCode::Home) => l.home(),
+            (FormRow::Text(_, l), KeyCode::End) => l.end(),
+            _ => {}
+        }
+    }
+}
+
+fn form_text<'a>(rows: &'a [FormRow], label: &str) -> &'a str {
+    match rows.iter().find(|r| r.label() == label) {
+        Some(FormRow::Text(_, l)) => &l.text,
+        _ => "",
+    }
+}
+
+fn form_checked(rows: &[FormRow], label: &str) -> bool {
+    rows.iter()
+        .any(|r| matches!(r, FormRow::Check(l, true) if *l == label))
 }
 
 /// Find files form: rows, the focused one, and the error (or note) of the last try.
@@ -293,35 +450,17 @@ impl FindForm {
         }
     }
 
-    fn row(&self, label: &str) -> Option<&FormRow> {
-        self.rows.iter().find(|r| r.label() == label)
-    }
-
     fn text(&self, label: &str) -> &str {
-        match self.row(label) {
-            Some(FormRow::Text(_, l)) => &l.text,
-            _ => "",
-        }
+        form_text(&self.rows, label)
     }
 
     fn checked(&self, label: &str) -> bool {
-        matches!(self.row(label), Some(FormRow::Check(_, true)))
+        form_checked(&self.rows, label)
     }
 
     /// Typing and space toggle on the focused row.
     fn key(&mut self, code: KeyCode, ctrl: bool) {
-        let i = self.focus;
-        match (&mut self.rows[i], code) {
-            (FormRow::Check(_, on), KeyCode::Char(' ')) => *on = !*on,
-            (FormRow::Text(_, l), KeyCode::Char(c)) if !ctrl => l.insert(c),
-            (FormRow::Text(_, l), KeyCode::Backspace) => l.backspace(),
-            (FormRow::Text(_, l), KeyCode::Delete) => l.delete(),
-            (FormRow::Text(_, l), KeyCode::Left) => l.left(),
-            (FormRow::Text(_, l), KeyCode::Right) => l.right(),
-            (FormRow::Text(_, l), KeyCode::Home) => l.home(),
-            (FormRow::Text(_, l), KeyCode::End) => l.end(),
-            _ => {}
-        }
+        self.rows[self.focus].key(code, ctrl);
         self.tick_content();
     }
 
@@ -353,6 +492,7 @@ impl FindForm {
             let value = match row {
                 FormRow::Text(_, l) => l.text.replace('\t', " "),
                 FormRow::Check(_, on) => if *on { "1" } else { "0" }.into(),
+                FormRow::Choice(_, _, i) => i.to_string(),
             };
             line += &format!("\t{}={value}", row.label());
         }
@@ -370,6 +510,10 @@ impl FindForm {
                 FormRow::Text(F_SAVED, l) => l.text = name.into(),
                 FormRow::Text(label, l) => l.text = values.get(label).unwrap_or(&"").to_string(),
                 FormRow::Check(label, on) => *on = values.get(label) == Some(&"1"),
+                FormRow::Choice(label, opts, i) => {
+                    let v = values.get(label).and_then(|v| v.parse().ok());
+                    *i = v.filter(|&v| v < opts.len()).unwrap_or(0);
+                }
             }
             if let FormRow::Text(_, l) = row {
                 l.end();
@@ -937,6 +1081,7 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Copy                F5", KeyCode::F(5), N),
             ("Move                F6", KeyCode::F(6), N),
             ("Rename              Shift+F6", KeyCode::F(6), S),
+            ("Multi-rename        Ctrl+M", KeyCode::Char('m'), C),
             ("Make directory      F7", KeyCode::F(7), N),
             ("Delete              F8", KeyCode::F(8), N),
             ("Copy paths          Ctrl+Insert", KeyCode::Insert, C),
@@ -1108,6 +1253,9 @@ pub struct App {
     last_host: Vec<PathBuf>,
     /// Find form as last searched or cancelled; Ctrl+F reopens it.
     last_find: Option<FindForm>,
+    /// Multi-rename settings of past runs, oldest first; Ctrl+M opens with the last.
+    // TODO: persist to a config file like the saved searches
+    rename_history: Vec<Vec<FormRow>>,
     /// Find results while a result is open in the viewer or editor; shown again after it.
     found: Option<Found>,
     /// Saved find forms, one line each (see `FindForm::to_line`), and their file.
@@ -1176,6 +1324,7 @@ impl App {
             file_clip: None,
             last_host: Vec::new(),
             last_find: None,
+            rename_history: Vec::new(),
             found: None,
             searches: Vec::new(),
             searches_file: None,
@@ -1467,6 +1616,7 @@ impl App {
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
             Mode::Found(f) => self.found_key(key, f),
             Mode::FindForm(form) => self.find_form_key(key, form),
+            Mode::MultiRename(form) => self.multi_rename_key(key, form),
             Mode::Stats(st) => self.stats_mode_key(st, key),
             Mode::Procs(mut p) => {
                 if p.key(key, self.page) {
@@ -1782,6 +1932,7 @@ impl App {
                     self.mode = Mode::Message(e.to_string());
                 }
             }
+            KeyCode::Char('m') => self.multi_rename(),
             KeyCode::Char('n') => self.mode = Mode::Connections(0),
             KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
             KeyCode::Char(' ') => self.spawn_stats(),
@@ -2966,6 +3117,100 @@ impl App {
         self.mode = Mode::Transfer(Op::Move, vec![path], LineEdit::from(name));
     }
 
+    /// Ctrl+M: multi-rename the selection (else the cursor entry), opened with the last settings.
+    fn multi_rename(&mut self) {
+        let panel = &self.panels[self.active];
+        if panel.archive().is_some() {
+            self.mode = Mode::Message(READ_ONLY.into());
+            return;
+        }
+        if panel.is_virtual() {
+            self.mode =
+                Mode::Message("Multi-rename works in a directory, not in a found list.".into());
+            return;
+        }
+        let items: Vec<_> = (panel.target_entries().into_iter())
+            .map(|e| (e.name.clone(), e.modified))
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let mut form = RenameForm {
+            rows: self
+                .rename_history
+                .last()
+                .cloned()
+                .unwrap_or_else(rename_rows),
+            focus: 0,
+            dir: panel.path().to_owned(),
+            items,
+            preview: Vec::new(),
+            scroll: 0,
+            error: None,
+            hist: self.rename_history.len(),
+        };
+        form.refresh();
+        self.mode = Mode::MultiRename(form);
+    }
+
+    fn multi_rename_key(&mut self, key: KeyEvent, mut form: RenameForm) {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let last = form.rows.len() - 1;
+        match key.code {
+            KeyCode::Esc => return,
+            KeyCode::Enter => return self.multi_rename_run(form),
+            KeyCode::Up | KeyCode::Down if alt => {
+                let len = self.rename_history.len();
+                form.hist = match key.code {
+                    KeyCode::Up => form.hist.saturating_sub(1),
+                    _ => (form.hist + 1).min(len),
+                };
+                form.rows =
+                    (self.rename_history.get(form.hist).cloned()).unwrap_or_else(rename_rows);
+                form.refresh();
+            }
+            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
+            KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
+            KeyCode::PageUp => form.scroll = form.scroll.saturating_sub(fmt::RENAME_PREVIEW_ROWS),
+            KeyCode::PageDown => {
+                let end = form.preview.len().saturating_sub(fmt::RENAME_PREVIEW_ROWS);
+                form.scroll = (form.scroll + fmt::RENAME_PREVIEW_ROWS).min(end);
+            }
+            code => {
+                let ctrl = key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                form.rows[form.focus].key(code, ctrl);
+                form.refresh();
+            }
+        }
+        self.mode = Mode::MultiRename(form);
+    }
+
+    /// Enter: rename in a worker (remote panels too); the form stays open on a problem.
+    fn multi_rename_run(&mut self, mut form: RenameForm) {
+        let pairs = match form.pairs() {
+            Ok(p) if p.is_empty() => Err("No name changes.".to_owned()),
+            r => r,
+        };
+        let pairs = match pairs {
+            Ok(p) => p,
+            Err(e) => {
+                form.error = Some(e);
+                self.mode = Mode::MultiRename(form);
+                return;
+            }
+        };
+        self.rename_history.push(form.rows);
+        if self.rename_history.len() > 20 {
+            self.rename_history.remove(0);
+        }
+        let side = self.panels[self.active].side();
+        let dir = form.dir;
+        let sides = (side.clone(), side.clone());
+        self.spawn_xfer(sides, move |p, _| rename::apply(&side, &dir, &pairs, p));
+    }
+
     /// Ctrl+Insert: paths of the selection or cursor entry to the system clipboard.
     fn copy_paths(&mut self) {
         let panel = &self.panels[self.active];
@@ -3063,6 +3308,7 @@ impl App {
             }) => paste_line(l, &text),
             Mode::Editor(_, l) => paste_line(l, &text),
             Mode::FindForm(f) => f.paste(&text),
+            Mode::MultiRename(f) => f.paste(&text),
             Mode::Xfer(Xfer {
                 rename: Some(l), ..
             }) => paste_line(l, &text),
@@ -3889,6 +4135,63 @@ mod tests {
         type_text(&mut app, "xyz");
         wait(&mut app);
         assert!(dir.path().join("xyz").is_dir() && !dir.path().join("abc").exists());
+    }
+
+    #[test]
+    fn multi_rename_counter_history_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // skip ".."
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Insert);
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Backspace); // "[N]"
+        }
+        for c in "x_[Q]".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert!(f.error.as_deref().is_some_and(|e| e.contains("[Q]")));
+        key(&mut app, KeyCode::Enter); // refused, form stays
+        assert!(matches!(app.mode, Mode::MultiRename(_)));
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Char('C'));
+        key(&mut app, KeyCode::Char(']'));
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(f.preview[1].1.as_deref(), Ok("x_2.txt"));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        let read = |n: &str| std::fs::read_to_string(dir.path().join(n)).unwrap();
+        assert_eq!(
+            (read("x_1.txt"), read("x_2.txt")),
+            ("a.txt".into(), "b.txt".into())
+        );
+        assert!(dir.path().join("c.txt").exists() && !dir.path().join("a.txt").exists());
+        // reopens with the last settings; Alt+Down past the history gives the defaults
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(form_text(&f.rows, R_NAME), "x_[C]");
+        with(&mut app, KeyCode::Down, KeyModifiers::ALT);
+        let Mode::MultiRename(f) = &app.mode else {
+            panic!("no form");
+        };
+        assert_eq!(form_text(&f.rows, R_NAME), "[N]");
+        assert_eq!(f.preview[0].1.as_deref(), Ok(f.preview[0].0.as_str()));
+        key(&mut app, KeyCode::Enter); // nothing changes: refused
+        assert!(matches!(&app.mode, Mode::MultiRename(f) if f.error.is_some()));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
     }
 
     #[test]

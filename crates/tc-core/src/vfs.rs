@@ -151,7 +151,7 @@ impl Side {
         }
     }
 
-    fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+    pub(crate) fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         match self {
             Side::Remote(r) => r.rename(&rpath(from), &rpath(to)),
             Side::Local => fs::rename(from, to).map_err(io_err(from)),
@@ -431,7 +431,7 @@ impl Xfer<'_> {
 
 impl Side {
     /// Something (also a dangling symlink) is at `p`.
-    fn exists(&self, p: &Path) -> Result<bool> {
+    pub(crate) fn exists(&self, p: &Path) -> Result<bool> {
         match self {
             Side::Remote(r) => Ok(r.lstat(&rpath(p))?.is_some()),
             Side::Local => match fs::symlink_metadata(p) {
@@ -445,7 +445,7 @@ impl Side {
     /// Unused `.tc-tmp-[<n>-]<name>` next to `t`, so a failed transfer never deletes a user's file.
     // shortcut: a file created there between this check and the exclusive create would be
     // removed on failure, upgrade if remote backends report AlreadyExists distinctly
-    fn free_temp(&self, t: &Path) -> Result<PathBuf> {
+    pub(crate) fn free_temp(&self, t: &Path) -> Result<PathBuf> {
         let name = t.file_name().unwrap_or_default();
         for n in 0..100 {
             let mut tmp = OsString::from(".tc-tmp-");

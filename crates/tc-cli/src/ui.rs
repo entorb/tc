@@ -9,7 +9,7 @@ use regex::Regex;
 
 use ratatui::widgets::ListState;
 use std::path::{Path, PathBuf};
-use tc::app::{App, FOOTER, FindForm, Found, MENUS, Mode, Stats, menu_drop};
+use tc::app::{App, FOOTER, FindForm, Found, MENUS, Mode, RenameForm, Stats, menu_drop};
 use tc::fmt::{
     self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
     help, input_dialog, panel_info, panel_title, stats_footer, stats_row,
@@ -139,6 +139,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Found(f) => draw_found(frame, f),
         Mode::FindForm(form) => draw_find_form(frame, form),
+        Mode::MultiRename(form) => draw_multi_rename(frame, form),
         Mode::Stats(st) => draw_stats(frame, st, None),
         Mode::Procs(_) => draw_procs(frame, app),
         Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l)),
@@ -237,19 +238,64 @@ fn draw_found(frame: &mut Frame, f: &Found) {
 
 /// Find files form popup over the panels: fields, checkboxes, the error and the keys.
 fn draw_find_form(frame: &mut Frame, form: &FindForm) {
-    let mut lines: Vec<Line> = fmt::find_form_lines(form)
+    let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
+    draw_form(
+        frame,
+        " Find files ",
+        lines,
+        form.focus,
+        fmt::FIND_FORM_KEYS,
+    );
+}
+
+/// Multi-rename: the form, then the visible part of the old -> new list.
+fn draw_multi_rename(frame: &mut Frame, form: &RenameForm) {
+    let mut lines = form_lines(&form.rows, form.focus, form.error.as_deref());
+    lines.push(Line::raw(format!("{} files:", form.preview.len())).style(PANEL));
+    let rows = form
+        .preview
+        .iter()
+        .skip(form.scroll)
+        .take(fmt::RENAME_PREVIEW_ROWS);
+    lines.extend(rows.map(|(old, new)| {
+        let (text, bad) = fmt::rename_row(old, new);
+        Line::raw(text).style(if bad {
+            PANEL.fg(Color::LightRed)
+        } else {
+            PANEL
+        })
+    }));
+    draw_form(
+        frame,
+        " Multi-rename ",
+        lines,
+        form.focus,
+        fmt::RENAME_FORM_KEYS,
+    );
+}
+
+/// Form rows (focused one highlighted) and the error under them.
+fn form_lines(rows: &[tc::app::FormRow], focus: usize, error: Option<&str>) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = fmt::form_lines(rows, focus)
         .into_iter()
         .map(|(text, focus)| Line::raw(text).style(if focus { BAR } else { PANEL }))
         .collect();
-    if let Some(e) = &form.error {
-        lines.push(Line::raw(e.clone()).style(PANEL.fg(Color::LightRed)));
+    if let Some(e) = error {
+        lines.push(Line::raw(e.to_owned()).style(PANEL.fg(Color::LightRed)));
     }
+    lines
+}
+
+/// Centered form popup: `lines`, then the key help.
+fn draw_form(
+    frame: &mut Frame,
+    title: &str,
+    mut lines: Vec<Line>,
+    focus: usize,
+    keys: &'static str,
+) {
     lines.push(Line::raw(""));
-    lines.extend(
-        fmt::FIND_FORM_KEYS
-            .lines()
-            .map(|k| Line::raw(k).style(PANEL)),
-    );
+    lines.extend(keys.lines().map(|k| Line::raw(k).style(PANEL)));
     let area = frame.area();
     let w = area.width.min(76);
     let h = (lines.len() as u16 + 2).min(area.height);
@@ -261,9 +307,9 @@ fn draw_find_form(frame: &mut Frame, form: &FindForm) {
         .areas(col);
     // short terminals: scroll so the focused row stays visible
     let inner = usize::from(h.saturating_sub(2));
-    let off = u16::try_from((form.focus + 1).saturating_sub(inner)).unwrap_or(0);
+    let off = u16::try_from((focus + 1).saturating_sub(inner)).unwrap_or(0);
     frame.render_widget(Clear, popup);
-    let block = themed_block().title(" Find files ");
+    let block = themed_block().title(title);
     let text = Paragraph::new(lines)
         .style(PANEL)
         .block(block)

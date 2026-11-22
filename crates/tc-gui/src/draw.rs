@@ -7,7 +7,7 @@ use eframe::egui::{
     ScrollArea, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob, vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{App, FindForm, MENUS, Mode, Stats, TOOLBAR};
+use tc::app::{App, FindForm, FormRow, MENUS, Mode, RenameForm, Stats, TOOLBAR};
 use tc::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
     panel_title, stats_footer, stats_row,
@@ -646,6 +646,9 @@ fn overlays(ctx: &Context, app: &mut App) {
     if let Mode::FindForm(form) = &app.mode {
         show_find_form(ctx, form);
     }
+    if let Mode::MultiRename(form) = &app.mode {
+        show_multi_rename(ctx, form);
+    }
     if let Mode::Stats(st) = &app.mode
         && let Some(text) = &st.confirm
     {
@@ -731,18 +734,48 @@ fn show_find_form(ctx: &Context, form: &FindForm) {
     Modal::new(Id::unique("find-form")).show(ctx, |ui| {
         ui.heading("Find files");
         ui.separator();
-        for (text, focus) in fmt::find_form_lines(form) {
+        form_rows(ui, &form.rows, form.focus, form.error.as_deref());
+        ui.label(RichText::new(fmt::FIND_FORM_KEYS).color(MUTED));
+    });
+}
+
+/// Multi-rename form and the visible part of the old -> new list; keys go through the app.
+fn show_multi_rename(ctx: &Context, form: &RenameForm) {
+    Modal::new(Id::unique("multi-rename")).show(ctx, |ui| {
+        ui.heading("Multi-rename");
+        ui.separator();
+        form_rows(ui, &form.rows, form.focus, form.error.as_deref());
+        ui.separator();
+        ui.label(format!("{} files:", form.preview.len()));
+        let rows = form
+            .preview
+            .iter()
+            .skip(form.scroll)
+            .take(fmt::RENAME_PREVIEW_ROWS);
+        for (old, new) in rows {
+            let (text, bad) = fmt::rename_row(old, new);
             let mut t = RichText::new(text).font(mono());
-            if focus {
-                t = t.background_color(SELECT_BG).color(Color32::WHITE);
+            if bad {
+                t = t.color(Color32::LIGHT_RED);
             }
             ui.label(t);
         }
-        if let Some(e) = &form.error {
-            ui.label(RichText::new(e).color(Color32::LIGHT_RED));
-        }
-        ui.label(RichText::new(fmt::FIND_FORM_KEYS).color(MUTED));
+        ui.label(RichText::new(fmt::RENAME_FORM_KEYS).color(MUTED));
     });
+}
+
+/// Form rows, the focused one highlighted, and the error under them.
+fn form_rows(ui: &mut Ui, rows: &[FormRow], focus: usize, error: Option<&str>) {
+    for (text, focused) in fmt::form_lines(rows, focus) {
+        let mut t = RichText::new(text).font(mono());
+        if focused {
+            t = t.background_color(SELECT_BG).color(Color32::WHITE);
+        }
+        ui.label(t);
+    }
+    if let Some(e) = error {
+        ui.label(RichText::new(e).color(Color32::LIGHT_RED));
+    }
 }
 
 fn show_help(ctx: &Context, app: &mut App) {
