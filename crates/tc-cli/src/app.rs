@@ -29,6 +29,9 @@ use tc_core::vfs::{self, Remote, Side};
 use tc_core::{Error, find, hotlist, ops, rename, search, view::Viewer};
 use tc_remote::Prompt;
 
+mod sync;
+pub use sync::{Sync, SyncForm};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Copy,
@@ -76,6 +79,10 @@ pub enum Mode {
     Found(Found),
     /// Multi-rename form (Ctrl+M) with the preview.
     MultiRename(RenameForm),
+    /// Synchronize directories options (Ctrl+E).
+    SyncForm(SyncForm),
+    /// Synchronize directories compare result, filled by a worker thread.
+    Sync(Box<Sync>),
     /// File Stats (ncdu-style) tree, scanned by a worker thread.
     Stats(Stats),
     /// Process monitor, refreshed by a worker thread.
@@ -1122,6 +1129,7 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("File stats (ncdu)   Ctrl+Space", KeyCode::Char(' '), C),
             ("Processes (top)     Ctrl+P", KeyCode::Char('p'), C),
             ("Find files          Ctrl+F", KeyCode::Char('f'), C),
+            ("Synchronize dirs    Ctrl+E", KeyCode::Char('e'), C),
             ("Go to found file    Ctrl+G", KeyCode::Char('g'), C),
             ("Quick search        Ctrl+S", KeyCode::Char('s'), C),
             ("Quick filter        /", KeyCode::Char('/'), N),
@@ -1188,7 +1196,7 @@ pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 5] = [
 ];
 
 /// tc-gui toolbar: icon, tooltip and key sent when clicked; the rest stays in the F9 menu.
-pub const TOOLBAR: [(&str, &str, KeyCode, KeyModifiers); 7] = [
+pub const TOOLBAR: [(&str, &str, KeyCode, KeyModifiers); 8] = [
     ("★", "Bookmarks (Ctrl+B)", KeyCode::Char('b'), C),
     (":", "Run command (:)", KeyCode::Char(':'), N),
     ("+", "New tab (Ctrl+T)", KeyCode::Char('t'), C),
@@ -1201,6 +1209,12 @@ pub const TOOLBAR: [(&str, &str, KeyCode, KeyModifiers); 7] = [
     ),
     ("top", "Process monitor (Ctrl+P)", KeyCode::Char('p'), C),
     ("🔍", "Find files (Ctrl+F)", KeyCode::Char('f'), C),
+    (
+        "⇄",
+        "Synchronize directories (Ctrl+E)",
+        KeyCode::Char('e'),
+        C,
+    ),
 ];
 
 pub struct App {
@@ -1256,6 +1270,10 @@ pub struct App {
     /// Multi-rename settings of past runs, oldest first; Ctrl+M opens with the last.
     // TODO: persist to a config file like the saved searches
     rename_history: Vec<Vec<FormRow>>,
+    /// Sync form as last used; Ctrl+E reopens it.
+    last_sync: Option<SyncForm>,
+    /// A running sync compares again when it ends.
+    sync_again: Option<sync::SyncSetup>,
     /// Find results while a result is open in the viewer or editor; shown again after it.
     found: Option<Found>,
     /// Saved find forms, one line each (see `FindForm::to_line`), and their file.
@@ -1325,6 +1343,8 @@ impl App {
             last_host: Vec::new(),
             last_find: None,
             rename_history: Vec::new(),
+            last_sync: None,
+            sync_again: None,
             found: None,
             searches: Vec::new(),
             searches_file: None,
@@ -1545,6 +1565,7 @@ impl App {
         let screen = matches!(self.mode, Mode::Normal | Mode::View { .. })
             || matches!(&self.mode, Mode::Stats(st) if !st.scanning() && st.confirm.is_none())
             || matches!(&self.mode, Mode::Procs(p) if p.idle())
+            || matches!(&self.mode, Mode::Sync(s) if s.idle())
             || matches!(self.mode, Mode::Edit { error: None, .. });
         screen && self.input.is_none() && !self.help
     }
@@ -1617,6 +1638,8 @@ impl App {
             Mode::Found(f) => self.found_key(key, f),
             Mode::FindForm(form) => self.find_form_key(key, form),
             Mode::MultiRename(form) => self.multi_rename_key(key, form),
+            Mode::SyncForm(form) => self.sync_form_key(key, form),
+            Mode::Sync(s) => self.sync_key(key, s),
             Mode::Stats(st) => self.stats_mode_key(st, key),
             Mode::Procs(mut p) => {
                 if p.key(key, self.page) {
@@ -1933,6 +1956,7 @@ impl App {
                 }
             }
             KeyCode::Char('m') => self.multi_rename(),
+            KeyCode::Char('e') => self.sync_open(),
             KeyCode::Char('n') => self.mode = Mode::Connections(0),
             KeyCode::Char('b') => self.mode = Mode::Hotlist(0),
             KeyCode::Char(' ') => self.spawn_stats(),
@@ -3309,6 +3333,7 @@ impl App {
             Mode::Editor(_, l) => paste_line(l, &text),
             Mode::FindForm(f) => f.paste(&text),
             Mode::MultiRename(f) => f.paste(&text),
+            Mode::SyncForm(f) => f.paste(&text),
             Mode::Xfer(Xfer {
                 rename: Some(l), ..
             }) => paste_line(l, &text),
@@ -3926,6 +3951,14 @@ impl App {
             && let Some(f) = self.found.take()
         {
             self.mode = Mode::Found(f);
+        }
+        if matches!(self.mode, Mode::Normal)
+            && let Some(setup) = self.sync_again.take()
+        {
+            self.sync_spawn(setup);
+        }
+        if matches!(self.mode, Mode::Sync(_)) {
+            return self.sync_tick();
         }
         self.dir_job_tick();
         if self.view_tmp.is_some() && !matches!(self.mode, Mode::View { .. }) {

@@ -13,8 +13,9 @@ use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, FormRow, Found, Input, Mode, Procs, Stats, Step, Xfer};
+use crate::app::{App, FormRow, Found, Input, Mode, Procs, Stats, Step, Sync, Xfer};
 use tc_core::procs::{Proc, ProcSort};
+use tc_core::sync::Item;
 
 /// Length of "YY-MM-DD HH:MM".
 pub const DATE_WIDTH: usize = 14;
@@ -151,6 +152,7 @@ Ctrl+Y          select differences to other panel
 Ctrl+S          quick search (again: next match)
 /               quick filter
 Ctrl+F          find files
+Ctrl+E          synchronize directories (left / right panel)
 :               command line
 
 == Files ==
@@ -177,6 +179,24 @@ Esc / q / F10  close (while scanning: cancel)
 
 Scan runs in up to 8 threads; footer shows files and
 scanned / discovered directories.";
+
+pub const HELP_SYNC: &str = "\
+Up/Down/PgUp/PgDn/Home/End  move
+Right  copy left -> right (overwrites the right file)
+Left  copy right -> left (overwrites the left file)
+Space  no action / restore the compare result
+> = ! <  show / hide rows compared ->, =, != , <- (and del)
+Enter  synchronize the shown rows (asks first)
+Ctrl+R  compare again
+Esc / q / F10  close (while comparing: cancel)
+
+-> left is newer or only left, <- right is newer or only
+right, = equal, != differs without direction (same date, date
+ignored, file vs directory), del only right (asymmetric), -- skip.
+A directory on one side only is one row, copied or deleted whole.
+Copies keep the date on local disks; remote targets get the
+copy time, so use Ignore date against SFTP / FTP.
+Hidden rows are not synchronized. Local deletes go to the trash.";
 
 pub const HELP_PROCS: &str = "\
 c / m / p / n  sort by CPU, memory, pid, name (again: reverse)
@@ -401,6 +421,7 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
         Mode::Stats(_) => ("Help: file stats (ncdu)", HELP_STATS),
         Mode::Procs(_) => ("Help: processes (top)", HELP_PROCS),
+        Mode::Sync(_) => ("Help: synchronize directories", HELP_SYNC),
         _ => ("Help", HELP_MAIN),
     }
 }
@@ -542,6 +563,76 @@ pub fn found_row(h: &Hit) -> String {
         Some((n, text)) => format!("{size:>9}  {name}:{n}: {text}"),
         None => format!("{size:>9}  {name}"),
     }
+}
+
+/// Keys shown under the sync form.
+pub const SYNC_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter compare  Esc cancel";
+
+/// Sync screen title: both directories and the options.
+pub fn sync_title(s: &Sync) -> String {
+    let side = |i: usize| {
+        let url = s.sides[i].remote().map_or("", |r| r.url());
+        format!("{url}{}", s.roots[i].display())
+    };
+    let hidden: String = (["->", "=", "!=", "<-"].iter().zip(s.show))
+        .filter(|(_, on)| !on)
+        .map(|(k, _)| format!(" {k}"))
+        .collect();
+    let hidden = if hidden.is_empty() {
+        String::new()
+    } else {
+        format!("  hidden:{hidden}")
+    };
+    format!(" Sync: {}  <->  {}{hidden} ", side(0), side(1))
+}
+
+/// Sync row: left size and date, action, right size and date, path.
+pub fn sync_row(it: &Item, today: jiff::civil::Date) -> String {
+    let side = |e: &Option<Entry>| match e {
+        Some(e) if e.is_dir => {
+            format!("{:>SIZE_WIDTH$} {:DATE_WIDTH$}", "<DIR>", date_of(e, today))
+        }
+        Some(e) => format!(
+            "{:>SIZE_WIDTH$} {:DATE_WIDTH$}",
+            human(e.size),
+            date_of(e, today)
+        ),
+        None => " ".repeat(SIZE_WIDTH + 1 + DATE_WIDTH),
+    };
+    let slash = if it.is_dir() { "/" } else { "" };
+    format!(
+        "{} {:^4} {}  {}{slash}",
+        side(&it.left),
+        it.action.symbol(),
+        side(&it.right),
+        it.rel.display()
+    )
+}
+
+/// Sync status line: compare progress, else counts and keys.
+pub fn sync_footer(s: &Sync) -> String {
+    if s.comparing() {
+        return format!(
+            "comparing: {} names, {} dirs  Esc cancel",
+            thousands(s.progress.files.load(Ordering::Relaxed)),
+            thousands(s.progress.dirs_done.load(Ordering::Relaxed))
+        );
+    }
+    let mut n = [0; 6];
+    for it in s.shown() {
+        n[it.action as usize] += 1;
+    }
+    format!(
+        "{} shown of {}: = {}  != {}  -> {}  <- {}  del {}  -- {}   Enter sync  Left/Right direction  Space skip  > = ! < show  Ctrl+R compare  F1 Help  Esc close",
+        s.view.len(),
+        s.items.len(),
+        n[0],
+        n[1],
+        n[2],
+        n[3],
+        n[4],
+        n[5]
+    )
 }
 
 /// Keys shown under the find form.

@@ -7,10 +7,10 @@ use eframe::egui::{
     ScrollArea, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob, vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{App, FindForm, FormRow, MENUS, Mode, RenameForm, Stats, TOOLBAR};
+use tc::app::{App, FindForm, FormRow, MENUS, Mode, RenameForm, Stats, SyncForm, TOOLBAR};
 use tc::fmt::{
     self, Dialog, Mark, dialog, editor_info, entry_cols, found_title, input_dialog, panel_info,
-    panel_title, stats_footer, stats_row,
+    panel_title, stats_footer, stats_row, sync_footer, sync_row, sync_title,
 };
 use tc::fmt::{
     PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
@@ -48,7 +48,8 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         egui::Panel::top("toolbar").show(ui, |ui| toolbar(ui, app));
         egui::Panel::bottom("footer").show(ui, |ui| footer(ui, app));
         // File Stats and processes have their own status / prompt line
-        let own = app.stats.is_some() || matches!(app.mode, Mode::Stats(_) | Mode::Procs(_));
+        let own = app.stats.is_some()
+            || matches!(app.mode, Mode::Stats(_) | Mode::Procs(_) | Mode::Sync(_));
         if own {
             egui::Panel::bottom("status").show(ui, |ui| status_line(ui, app));
         } else {
@@ -56,6 +57,7 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         }
         egui::CentralPanel::default().show(ui, |ui| match &app.mode {
             Mode::Found(_) => draw_found(ui, app),
+            Mode::Sync(_) => draw_sync(ui, app),
             Mode::Stats(_) => draw_stats(ui, app),
             Mode::Procs(_) => draw_procs(ui, app),
             Mode::Cmd(_) if app.stats.is_some() => draw_stats(ui, app),
@@ -535,6 +537,27 @@ fn draw_found(ui: &mut Ui, app: &mut App) {
     }
 }
 
+/// Synchronize directories: compared rows, click selects.
+fn draw_sync(ui: &mut Ui, app: &mut App) {
+    let Mode::Sync(s) = &mut app.mode else {
+        return;
+    };
+    let today = jiff::ZonedDateTime::now().date();
+    ui.label(RichText::new(sync_title(s)).strong().color(ACCENT));
+    let h = page_rows(ui);
+    let start = s.sel / h * h;
+    let mut clicked = None;
+    for (k, it) in s.shown().enumerate().skip(start).take(h) {
+        if list_row(ui, sync_row(it, today), k == s.sel).is_some() {
+            clicked = Some(k);
+        }
+    }
+    if let Some(k) = clicked {
+        s.sel = k;
+    }
+    app.page = h;
+}
+
 /// Status line of File Stats (totals or its `:` prompt) and processes (footer or prompt).
 fn status_line(ui: &mut Ui, app: &App) {
     match (&app.mode, &app.stats) {
@@ -546,6 +569,9 @@ fn status_line(ui: &mut Ui, app: &App) {
         },
         (Mode::Stats(st), _) => {
             ui.label(RichText::new(stats_footer(st)).color(MUTED));
+        }
+        (Mode::Sync(s), _) => {
+            ui.label(RichText::new(sync_footer(s)).color(MUTED));
         }
         (Mode::Cmd(l), Some(st)) => prompt(ui, &format!("{}> ", st.path().display()), l),
         _ => {}
@@ -649,6 +675,18 @@ fn overlays(ctx: &Context, app: &mut App) {
     if let Mode::MultiRename(form) = &app.mode {
         show_multi_rename(ctx, form);
     }
+    if let Mode::SyncForm(form) = &app.mode {
+        show_sync_form(ctx, form);
+    }
+    if let Mode::Sync(s) = &app.mode
+        && let Some(text) = &s.confirm
+    {
+        let d = Dialog::Text {
+            title: "Synchronize",
+            text: text.clone(),
+        };
+        show_dialog(ctx, "sync-confirm", &d);
+    }
     if let Mode::Stats(st) = &app.mode
         && let Some(text) = &st.confirm
     {
@@ -736,6 +774,15 @@ fn show_find_form(ctx: &Context, form: &FindForm) {
         ui.separator();
         form_rows(ui, &form.rows, form.focus, form.error.as_deref());
         ui.label(RichText::new(fmt::FIND_FORM_KEYS).color(MUTED));
+    });
+}
+
+fn show_sync_form(ctx: &Context, form: &SyncForm) {
+    Modal::new(Id::unique("sync-form")).show(ctx, |ui| {
+        ui.heading("Synchronize directories (left <-> right panel)");
+        ui.separator();
+        form_rows(ui, &form.rows, form.focus, form.error.as_deref());
+        ui.label(RichText::new(fmt::SYNC_FORM_KEYS).color(MUTED));
     });
 }
 

@@ -73,7 +73,7 @@ impl Side {
         }
     }
 
-    fn same(&self, other: &Side) -> bool {
+    pub(crate) fn same(&self, other: &Side) -> bool {
         match (self, other) {
             (Side::Local, Side::Local) => true,
             (Side::Remote(a), Side::Remote(b)) => Arc::ptr_eq(a, b),
@@ -116,7 +116,11 @@ impl Side {
         }
     }
 
-    fn read(&self, p: &Path, f: &mut dyn FnMut(&mut dyn Read) -> Result<()>) -> Result<()> {
+    pub(crate) fn read(
+        &self,
+        p: &Path,
+        f: &mut dyn FnMut(&mut dyn Read) -> Result<()>,
+    ) -> Result<()> {
         match self {
             Side::Remote(r) => r.read(&rpath(p), f),
             Side::Local => f(&mut fs::File::open(p).map_err(io_err(p))?),

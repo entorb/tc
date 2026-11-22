@@ -9,10 +9,13 @@ use regex::Regex;
 
 use ratatui::widgets::ListState;
 use std::path::{Path, PathBuf};
-use tc::app::{App, FOOTER, FindForm, Found, MENUS, Mode, RenameForm, Stats, menu_drop};
+use tc::app::{
+    App, FOOTER, FindForm, Found, MENUS, Mode, RenameForm, Stats, Sync, SyncForm, menu_drop,
+};
 use tc::fmt::{
     self, DATE_WIDTH, Dialog, Mark, SIZE_WIDTH, dialog, editor_info, entry_cols, fit, found_title,
-    help, input_dialog, panel_info, panel_title, stats_footer, stats_row,
+    help, input_dialog, panel_info, panel_title, stats_footer, stats_row, sync_footer, sync_row,
+    sync_title,
 };
 use tc::fmt::{
     PROC_COLS, proc_row, procs_confirm, procs_footer, procs_header, procs_prompt, procs_title,
@@ -140,6 +143,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Found(f) => draw_found(frame, f),
         Mode::FindForm(form) => draw_find_form(frame, form),
         Mode::MultiRename(form) => draw_multi_rename(frame, form),
+        Mode::SyncForm(form) => draw_sync_form(frame, form),
+        Mode::Sync(s) => draw_sync(frame, s),
         Mode::Stats(st) => draw_stats(frame, st, None),
         Mode::Procs(_) => draw_procs(frame, app),
         Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l)),
@@ -246,6 +251,34 @@ fn draw_find_form(frame: &mut Frame, form: &FindForm) {
         form.focus,
         fmt::FIND_FORM_KEYS,
     );
+}
+
+/// Synchronize directories options popup over the panels.
+fn draw_sync_form(frame: &mut Frame, form: &SyncForm) {
+    let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
+    let title = " Synchronize directories (left <-> right panel) ";
+    draw_form(frame, title, lines, form.focus, fmt::SYNC_FORM_KEYS);
+}
+
+/// Synchronize directories: page of compared rows holding the cursor, status line, question.
+fn draw_sync(frame: &mut Frame, s: &Sync) {
+    let area = frame.area();
+    let today = jiff::ZonedDateTime::now().date();
+    let h = usize::from(area.height.saturating_sub(3)).max(1);
+    let start = s.sel / h * h;
+    let items = s.shown().skip(start).take(h).map(|it| sync_row(it, today));
+    let list = List::new(items)
+        .style(PANEL)
+        .block(themed_block().title(sync_title(s)))
+        .highlight_style(BAR);
+    let mut state = ListState::default().with_selected(Some(s.sel.saturating_sub(start)));
+    let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(list, main, &mut state);
+    frame.render_widget(Line::raw(sync_footer(s)).style(BAR), status);
+    if let Some(text) = &s.confirm {
+        popup(frame, "Synchronize", text);
+    }
 }
 
 /// Multi-rename: the form, then the visible part of the old -> new list.
