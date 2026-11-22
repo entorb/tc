@@ -208,10 +208,11 @@ pub fn help_action(line: &str) -> Option<(KeyCode, KeyModifiers)> {
 }
 
 /// F-key bar of File Stats (labels and the keys they send).
-pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
+pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
+    ("F5 Rescan", KeyCode::F(5), KeyModifiers::NONE),
     ("F8 Delete", KeyCode::F(8), KeyModifiers::NONE),
     ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
     ("Tab Size/Count", KeyCode::Tab, KeyModifiers::NONE),

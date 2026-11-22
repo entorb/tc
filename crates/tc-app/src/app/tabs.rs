@@ -110,7 +110,9 @@ impl App {
             }
             return;
         }
-        if ev.kind == MouseEventKind::Down(MouseButton::Left) && self.footer_click(ev) {
+        if ev.kind == MouseEventKind::Down(MouseButton::Left)
+            && (self.footer_click(ev) || self.stats_click(ev.column, ev.row))
+        {
             return;
         }
         if let MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) =
@@ -209,15 +211,18 @@ impl App {
             return;
         }
         let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
-        let now = Instant::now();
-        let double = !shift
-            && self.last_click.is_some_and(|(t, c, r)| {
-                (c, r) == (ev.column, ev.row) && now.duration_since(t) < Duration::from_millis(400)
-            });
-        if !shift {
-            self.last_click = (!double).then_some((now, ev.column, ev.row));
-        }
+        let double = !shift && self.double_click(ev.column, ev.row);
         self.click_entry(i, idx, shift, double);
+    }
+
+    /// Registers a left click; true if it is the second at the same cell within 400 ms.
+    pub(super) fn double_click(&mut self, col: u16, row: u16) -> bool {
+        let now = Instant::now();
+        let double = self.last_click.is_some_and(|(t, c, r)| {
+            (c, r) == (col, row) && now.duration_since(t) < Duration::from_millis(400)
+        });
+        self.last_click = (!double).then_some((now, col, row));
+        double
     }
 
     /// Sort panel `i` by `key` (same key again reverses) and make it active.

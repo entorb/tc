@@ -105,15 +105,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_menu_drop(frame, g, sel);
     }
 
+    if let Mode::Stats(st) = &mut app.mode {
+        app.stats_map = draw_stats(frame, st, None, body);
+    } else if let Mode::Cmd(l) = &app.mode
+        && let Some(st) = &mut app.stats
+    {
+        app.stats_map = draw_stats(frame, st, Some(l), body);
+    }
+
     match &app.mode {
         Mode::Found(f) => draw_found(frame, f, body),
         Mode::FindForm(form) => draw_find_form(frame, form),
         Mode::MultiRename(form) => draw_multi_rename(frame, form),
         Mode::SyncForm(form) => draw_sync_form(frame, form),
         Mode::Sync(s) => draw_sync(frame, s, body),
-        Mode::Stats(st) => draw_stats(frame, st, None, body),
+        Mode::Stats(_) => {}
         Mode::Procs(_) => draw_procs(frame, app, body),
-        Mode::Cmd(l) if let Some(st) = &app.stats => draw_stats(frame, st, Some(l), body),
+        Mode::Cmd(_) if app.stats.is_some() => {}
         _ => {
             if let Some(d) = dialog(app) {
                 draw_dialog(frame, &d);

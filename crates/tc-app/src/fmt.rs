@@ -11,6 +11,7 @@ use tc_core::cmdline::LineEdit;
 use tc_core::edit::{Editor, Eol, human};
 use tc_core::find::{Hit, MAX_RESULTS};
 use tc_core::panel::{Entry, SortKey};
+use tc_core::stats::treemap::Kind as TileKind;
 use tc_core::stats::{self, Node, Order};
 use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
@@ -615,6 +616,24 @@ pub fn rename_row(old: &str, new: &Result<String, String>) -> (String, bool) {
     }
 }
 
+/// Treemap tile color of a file type, darkened 18% per `shade` step (nested or alternating tiles).
+pub fn kind_rgb(k: TileKind, shade: u8) -> (u8, u8, u8) {
+    let (r, g, b) = match k {
+        TileKind::Dir => (96, 96, 112),
+        TileKind::Image => (230, 200, 60),
+        TileKind::Video => (200, 90, 200),
+        TileKind::Audio => (80, 190, 210),
+        TileKind::Archive => (90, 180, 90),
+        TileKind::Document => (80, 120, 220),
+        TileKind::Code => (230, 140, 60),
+        TileKind::Exec => (210, 70, 70),
+        TileKind::Other => (170, 170, 170),
+    };
+    let f = (1.0 - 0.18 * f32::from(shade.min(4))).max(0.0);
+    let d = |c: u8| (f32::from(c) * f) as u8;
+    (d(r), d(g), d(b))
+}
+
 /// File Stats row: value, share, text bar and name.
 pub fn stats_row(st: &Stats, n: &Node) -> String {
     const BAR_WIDTH: usize = 10;
@@ -659,6 +678,16 @@ pub fn stats_info(path: &Path, n: &Node, modified: Option<SystemTime>) -> String
         thousands(n.size),
         thousands(n.files)
     )
+}
+
+/// File Stats treemap tooltip: path below the browsed directory, size, files of a directory.
+pub fn stats_tip(rel: &Path, n: &Node) -> String {
+    let size = format!("Size:  {}", human(n.size));
+    if n.is_dir {
+        format!("{}/\n{size}\nFiles: {}", rel.display(), thousands(n.files))
+    } else {
+        format!("{}\n{size}", rel.display())
+    }
 }
 
 /// File Stats title: directory, sort and filter.

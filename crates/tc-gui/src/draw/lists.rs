@@ -1,7 +1,10 @@
 use super::chrome::line_edit;
 use super::viewer::cell;
 use super::{ACCENT, MUTED, SELECT_BG, TEXT, mono};
-use eframe::egui::{Align, Color32, Label, Layout, RichText, Sense, TextStyle, Ui};
+use eframe::egui::{
+    Align, Align2, Color32, FontId, Label, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
+    TextStyle, Ui, vec2,
+};
 use egui_extras::{Column, TableBuilder};
 use tc_app::app::{App, Mode, Stats};
 use tc_app::fmt::{
@@ -12,6 +15,7 @@ use tc_app::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
 use tc_core::procs::ProcSort;
+use tc_core::stats::treemap::Tile;
 /// One clickable list row; `Some(double)` when clicked.
 fn list_row(ui: &mut Ui, text: String, selected: bool) -> Option<bool> {
     let mut t = RichText::new(text).font(mono());
@@ -105,6 +109,59 @@ pub(super) fn prompt(ui: &mut Ui, label: &str, l: &LineEdit) {
     });
 }
 
+/// Window width from which File Stats shows the treemap beside the list.
+const MAP_MIN_WIDTH: f32 = 800.0;
+
+/// Treemap of the browsed directory; `Some((row, double))` when a tile was clicked.
+fn stats_chart(ui: &mut Ui, st: &mut Stats) -> Option<(usize, bool)> {
+    let size = vec2(ui.available_width(), ui.available_height().max(50.0));
+    let (resp, painter) = ui.allocate_painter(size, Sense::click());
+    let rect = resp.rect;
+    st.treemap(rect.width(), rect.height(), u8::MAX, 4.0, 2.0);
+    let sel = st.selected_index();
+    let at = |t: &Tile| Rect::from_min_size(rect.min + vec2(t.x, t.y), vec2(t.w, t.h));
+    let outline = Stroke::new(1.0, Color32::from_black_alpha(160));
+    for t in st.tiles() {
+        let (r, g, b) = fmt::kind_rgb(t.kind, t.depth % 2);
+        painter.rect_filled(at(t), 0.0, Color32::from_rgb(r, g, b));
+        painter.rect_stroke(at(t), 0.0, outline, StrokeKind::Inside);
+    }
+    let dir = st.current();
+    for t in st.tiles().iter().filter(|t| t.depth == 0) {
+        let r = at(t);
+        if r.width() >= 40.0 && r.height() >= 14.0 {
+            let name = dir.children[t.top].name.to_string_lossy();
+            painter.with_clip_rect(r).text(
+                r.min + vec2(3.0, 1.0),
+                Align2::LEFT_TOP,
+                name,
+                FontId::monospace(11.0),
+                Color32::BLACK,
+            );
+        }
+    }
+    if let Some(t) = st
+        .tiles()
+        .iter()
+        .find(|t| t.depth == 0 && Some(t.top) == sel)
+    {
+        painter.rect_stroke(at(t), 0.0, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
+    }
+    let row_at = |p: Pos2| st.map_row(p.x - rect.min.x, p.y - rect.min.y);
+    let hit = resp
+        .interact_pointer_pos()
+        .and_then(row_at)
+        .filter(|_| resp.clicked());
+    let tip = resp
+        .hover_pos()
+        .and_then(|p| st.map_node(p.x - rect.min.x, p.y - rect.min.y))
+        .map(|(rel, n)| fmt::stats_tip(&rel, n));
+    if let Some(tip) = tip {
+        resp.clone().on_hover_text_at_pointer(tip);
+    }
+    hit.map(|r| (r, resp.double_clicked()))
+}
+
 pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
     let (st, cmd): (&mut Stats, Option<&LineEdit>) = match (&mut app.mode, &mut app.stats) {
         (Mode::Stats(st), _) => (st, None),
@@ -114,18 +171,38 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
     ui.label(RichText::new(stats_title(st)).strong().color(ACCENT));
     let h = page_rows(ui);
     let start = st.sel / h * h;
-    let mut clicked = None;
     let rows: Vec<String> = st
         .shown()
         .skip(start)
         .take(h)
         .map(|n| stats_row(st, n))
         .collect();
-    for (k, row) in rows.into_iter().enumerate() {
-        if let Some(double) = list_row(ui, row, start + k == st.sel) {
-            clicked = Some((start + k, double));
+    let sel = st.sel;
+    let list = |ui: &mut Ui| {
+        let mut clicked = None;
+        for (k, row) in rows.into_iter().enumerate() {
+            if let Some(double) = list_row(ui, row, start + k == sel) {
+                clicked = Some((start + k, double));
+            }
         }
-    }
+        clicked
+    };
+    let width = ui.available_width();
+    let clicked = if width >= MAP_MIN_WIDTH {
+        let rows_w = width * 0.55;
+        ui.horizontal_top(|ui| {
+            let left = ui
+                .vertical(|ui| {
+                    ui.set_max_width(rows_w);
+                    list(ui)
+                })
+                .inner;
+            left.or(stats_chart(ui, st))
+        })
+        .inner
+    } else {
+        list(ui)
+    };
     let idle = cmd.is_none() && st.confirm.is_none();
     if let Some((k, double)) = clicked.filter(|_| idle) {
         st.sel = k;

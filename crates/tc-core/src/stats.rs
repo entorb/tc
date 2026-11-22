@@ -1,5 +1,7 @@
 //! Disk usage tree for the File Stats screen (ncdu-style).
 
+pub mod treemap;
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};

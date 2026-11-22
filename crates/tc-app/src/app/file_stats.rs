@@ -13,6 +13,7 @@ use std::thread;
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::ops;
 use tc_core::panel::Entry;
+use tc_core::stats::treemap::{self, Tile};
 use tc_core::stats::{self, Node};
 use tc_core::vfs::{Remote, Side};
 
@@ -46,6 +47,8 @@ pub struct Stats {
     pub(super) deleting: Option<(Vec<OsString>, Arc<AtomicUsize>)>,
     /// Marked names of the browsed directory.
     pub(super) marked: HashSet<OsString>,
+    /// Treemap of the browsed directory and the size it was laid out for; cleared by `rebuild`.
+    pub(super) map: Option<((u32, u32), Vec<Tile>)>,
 }
 
 impl Stats {
@@ -79,7 +82,7 @@ impl Stats {
     }
 
     /// Index in the browsed directory's children of the entry under the cursor.
-    pub(super) fn selected_index(&self) -> Option<usize> {
+    pub fn selected_index(&self) -> Option<usize> {
         self.view.get(self.sel).copied()
     }
 
@@ -141,6 +144,54 @@ impl Stats {
             .map(|(i, _)| i)
             .collect();
         self.sel = self.sel.min(self.view.len().saturating_sub(1));
+        self.map = None;
+    }
+
+    /// Treemap of the browsed directory for a `w`×`h` area; laid out again only after a change.
+    pub fn treemap(&mut self, w: f32, h: f32, depth: u8, min_side: f32, inset: f32) -> &[Tile] {
+        let key = (w.to_bits(), h.to_bits());
+        if self.map.as_ref().is_none_or(|(k, _)| *k != key) {
+            let tiles = treemap::layout(self.current(), w, h, depth, min_side, inset);
+            self.map = Some((key, tiles));
+        }
+        self.tiles()
+    }
+
+    /// Tiles of the last `treemap` call.
+    pub fn tiles(&self) -> &[Tile] {
+        self.map.as_ref().map_or(&[], |(_, t)| t)
+    }
+
+    /// Table row of the innermost tile at (`x`, `y`) of the last treemap, `None` outside or
+    /// filtered out.
+    pub fn map_row(&self, x: f32, y: f32) -> Option<usize> {
+        let top = self.tiles()[self.map_hit(x, y)?].top;
+        self.view.iter().position(|&i| i == top)
+    }
+
+    /// Node of the innermost tile at (`x`, `y`) of the last treemap, with its path below the
+    /// browsed directory.
+    pub fn map_node(&self, x: f32, y: f32) -> Option<(PathBuf, &Node)> {
+        let tiles = self.tiles();
+        let mut chain = Vec::new();
+        let mut up = Some(self.map_hit(x, y)?);
+        while let Some(k) = up {
+            chain.push(tiles[k].child);
+            up = tiles[k].parent;
+        }
+        let mut rel = PathBuf::new();
+        let n = chain.iter().rev().fold(self.current(), |n, &i| {
+            rel.push(&n.children[i].name);
+            &n.children[i]
+        });
+        Some((rel, n))
+    }
+
+    /// Index of the innermost tile at (`x`, `y`) of the last treemap.
+    fn map_hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.tiles()
+            .iter()
+            .rposition(|t| x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h)
     }
 
     /// Browsed directory below `dir`, for the title.
@@ -194,7 +245,7 @@ impl Stats {
         }
     }
 
-    /// Ctrl+R: scan the browsed directory again in a worker and swap it into the tree.
+    /// F5: scan the browsed directory again in a worker and swap it into the tree.
     pub(super) fn rescan(&mut self) {
         self.progress = Arc::new(ops::Progress::default());
         self.splice = Some(self.path.clone());
@@ -272,6 +323,30 @@ pub(super) fn spawn_scan(
 }
 
 impl App {
+    /// Left click on the File Stats treemap: cursor to the tile's entry, double click opens a
+    /// directory. True if the click hit the chart.
+    pub(super) fn stats_click(&mut self, col: u16, row: u16) -> bool {
+        let area = self.stats_map;
+        let Mode::Stats(st) = &mut self.mode else {
+            return false;
+        };
+        if !area.contains((col, row).into()) {
+            return false;
+        }
+        if st.confirm.is_some() || st.scanning() {
+            return true;
+        }
+        let (x, y) = (f32::from(col - area.x) + 0.5, f32::from(row - area.y) + 0.5);
+        let Some(r) = st.map_row(x, y) else {
+            return true;
+        };
+        st.sel = r;
+        if self.double_click(col, row) {
+            self.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        true
+    }
+
     /// Ctrl+Space: File Stats of the active panel's directory.
     pub(super) fn spawn_stats(&mut self) {
         let panel = &self.panels[self.active];
@@ -303,6 +378,7 @@ impl App {
             job: Some(job),
             progress,
             confirm: None,
+            map: None,
         });
     }
 
@@ -328,7 +404,7 @@ impl App {
             }
             _ if st.scanning() => {}
             KeyCode::F(3 | 4) => return self.stats_open(st, key),
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => st.rescan(),
+            KeyCode::F(5) => st.rescan(),
             KeyCode::F(8) | KeyCode::Char('d') => {
                 st.delete_ask();
             }
@@ -540,6 +616,71 @@ mod tests {
             app.tick();
         }
         app
+    }
+
+    #[test]
+    fn stats_treemap_cache_and_hit_test() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "x".repeat(60)).unwrap();
+        std::fs::write(tmp.path().join("b"), "x".repeat(30)).unwrap();
+        std::fs::create_dir(tmp.path().join("d")).unwrap();
+        std::fs::write(tmp.path().join("d").join("x"), "x".repeat(10)).unwrap();
+        let mut app = stats_app(tmp.path());
+        let Mode::Stats(st) = &mut app.mode else {
+            panic!()
+        };
+        let n = st.treemap(100.0, 50.0, 1, 0.0, 0.0).len();
+        assert_eq!(n, 4); // a, b, d, d/x
+        let ptr = st.map.as_ref().map(|(_, t)| t.as_ptr());
+        st.treemap(100.0, 50.0, 1, 0.0, 0.0);
+        assert_eq!(st.map.as_ref().map(|(_, t)| t.as_ptr()), ptr);
+        // every table row is hit somewhere; innermost tile wins
+        let (_, tiles) = st.map.as_ref().unwrap();
+        let t = tiles.iter().find(|t| t.depth == 0 && t.top == 0).unwrap();
+        let row = st.map_row(t.x + t.w / 2.0, t.y + t.h / 2.0).unwrap();
+        assert_eq!(st.shown().nth(row).unwrap().name, "a");
+        assert_eq!(st.map_row(-1.0, 0.0), None);
+        // the innermost tile's own node, with its path
+        let x = tiles.iter().find(|t| t.depth == 1).unwrap();
+        let (rel, n) = st.map_node(x.x + x.w / 2.0, x.y + x.h / 2.0).unwrap();
+        assert_eq!((rel, n.size), (PathBuf::from("d").join("x"), 10));
+        assert!(st.map_node(-1.0, 0.0).is_none());
+        // filtered-out entry has no row
+        st.filter.line.text = "b".into();
+        let b = st
+            .current()
+            .children
+            .iter()
+            .position(|c| c.name == "b")
+            .unwrap();
+        st.treemap(100.0, 50.0, 1, 0.0, 0.0);
+        st.rebuild();
+        assert!(st.map.is_none());
+        st.treemap(100.0, 50.0, 1, 0.0, 0.0);
+        let (_, tiles) = st.map.as_ref().unwrap();
+        let ta = tiles.iter().find(|t| t.depth == 0 && t.top != b).unwrap();
+        assert_eq!(st.map_row(ta.x + 0.5, ta.y + 0.5), None);
+        let tb = tiles.iter().find(|t| t.top == b).unwrap();
+        assert_eq!(st.map_row(tb.x + 0.5, tb.y + 0.5), Some(0));
+    }
+
+    #[test]
+    fn stats_treemap_follows_enter() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("d")).unwrap();
+        std::fs::write(tmp.path().join("d").join("x"), "x").unwrap();
+        std::fs::write(tmp.path().join("d").join("y"), "x").unwrap();
+        let mut app = stats_app(tmp.path());
+        let Mode::Stats(st) = &mut app.mode else {
+            panic!()
+        };
+        assert_eq!(st.treemap(10.0, 10.0, 0, 0.0, 0.0).len(), 1);
+        key(&mut app, KeyCode::Enter);
+        let Mode::Stats(st) = &mut app.mode else {
+            panic!()
+        };
+        assert!(st.map.is_none());
+        assert_eq!(st.treemap(10.0, 10.0, 0, 0.0, 0.0).len(), 2);
     }
 
     #[test]
@@ -840,10 +981,10 @@ mod tests {
         key(&mut app, KeyCode::Enter);
         std::fs::write(tmp.path().join("sub/z"), "x".repeat(10)).unwrap();
         // Esc cancels and keeps the old tree
-        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        with(&mut app, KeyCode::F(5), KeyModifiers::NONE);
         key(&mut app, KeyCode::Esc);
         assert!(matches!(&app.mode, Mode::Stats(st) if !st.scanning() && st.root.size == 8));
-        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        with(&mut app, KeyCode::F(5), KeyModifiers::NONE);
         while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
             app.tick();
         }
@@ -863,7 +1004,7 @@ mod tests {
         let mut app = stats_app(tmp.path());
         key(&mut app, KeyCode::Down); // b, the last row
         std::fs::remove_file(tmp.path().join("a")).unwrap();
-        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        with(&mut app, KeyCode::F(5), KeyModifiers::NONE);
         while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
             app.tick();
         }

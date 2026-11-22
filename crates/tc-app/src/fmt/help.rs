@@ -107,6 +107,10 @@ pub const HELP_STATS: &str = "\
 == About ==
 Scan runs in up to 8 threads; a popup shows files and
 scanned / discovered directories.
+Wide windows show a treemap right of the list: tiles
+sized by bytes, colored by file type; click selects,
+double-click opens a directory; hover shows path, size
+and file count of any tile.
 
 == Move ==
 Up/Down         move cursor
@@ -120,7 +124,7 @@ Tab             show size / file count
 n               sort by name (again: reverse)
 s               sort by size (again: reverse)
 C               sort by file count (again: reverse)
-Ctrl+R          rescan the browsed directory, totals above update
+F5              rescan the browsed directory, totals above update
 /               filter the entries by name: Enter keeps,
                 Esc clears
 
