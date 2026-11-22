@@ -25,8 +25,8 @@ use tc_core::sync::Item;
 
 pub use help::{
     HELP_CONFLICT, HELP_EDIT, HELP_FIND_FORM, HELP_FOUND, HELP_LISTS, HELP_MAIN, HELP_PROCS,
-    HELP_RENAME, HELP_SETTINGS, HELP_STATS, HELP_SYNC, HELP_SYNC_FORM, HELP_VIEW, HelpLine, help,
-    help_filter, help_line, key_help,
+    HELP_RENAME, HELP_SEARCH, HELP_SETTINGS, HELP_STATS, HELP_SYNC, HELP_SYNC_FORM, HELP_VIEW,
+    HelpLine, help, help_filter, help_line, key_help,
 };
 
 /// Length of "YY-MM-DD HH:MM".
@@ -578,6 +578,10 @@ pub fn sync_footer(s: &Sync) -> String {
         n[5]
     )
 }
+
+/// Keys shown under the viewer / editor search dialog.
+pub const SEARCH_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter run  Esc close
+Alt+Up/Down earlier patterns  F1 regex syntax";
 
 /// Keys shown under the find form.
 pub const FIND_FORM_KEYS: &str = "Tab/Up/Down field  Space checkbox  Enter search  Esc cancel

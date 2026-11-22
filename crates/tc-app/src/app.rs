@@ -38,7 +38,7 @@ mod update;
 mod widgets;
 mod xfer;
 pub use connect::Connecting;
-pub use editor::{Ask, Input, Step};
+pub use editor::{Ask, Input, SearchForm, Step};
 pub use file_stats::Stats;
 pub use find_files::{FindForm, Found, FoundSort};
 pub use menu::{
@@ -221,6 +221,10 @@ pub struct App {
     replacing: Option<String>,
     /// Search with exact case instead of smart case (Alt+C).
     exact: bool,
+    /// Search patterns are regular expressions; off, they match the text literally.
+    search_regex: bool,
+    /// Search dialog of the viewer / editor (F3, F7, Ctrl+F), open over the text.
+    pub search_form: Option<SearchForm>,
     /// Text area of the editor, set by the UI, used for mouse clicks.
     pub edit_text: Rect,
     /// Text for the main loop to put on the system clipboard (OSC 52).
@@ -236,7 +240,7 @@ pub struct App {
     /// Find files forms of past searches ([`FindForm::to_line`]), oldest first.
     finds: Vec<String>,
     syncs: Vec<String>,
-    /// Patterns of the viewer / editor Find and Replace prompts, oldest first.
+    /// Patterns of the viewer / editor search dialog, oldest first.
     find_history: Vec<String>,
     /// Directory of the settings and history files (none: not persisted).
     config_dir: Option<PathBuf>,
@@ -326,6 +330,8 @@ impl App {
             clipboard: String::new(),
             replacing: None,
             exact: false,
+            search_regex: true,
+            search_form: None,
             edit_text: Rect::default(),
             copied: None,
             file_clip: None,
@@ -398,6 +404,9 @@ impl App {
         }
         if self.input.is_some() {
             return self.input_key(key);
+        }
+        if self.search_form.is_some() {
+            return self.search_dialog_key(key);
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Normal => self.normal_mode_key(key),

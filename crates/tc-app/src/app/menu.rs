@@ -26,13 +26,11 @@ pub(super) const VIEW_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
     CLOSE,
 ];
 
-pub(super) const EDIT_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
+pub(super) const EDIT_FOOTER: [(&str, KeyCode, KeyModifiers); 6] = [
     HELP,
     f("F2 Save", 2),
-    f("F3 Next", 3),
-    f("F4 Replace", 4),
+    f("F3 Search", 3),
     f("F5 Format", 5),
-    f("F7 Search", 7),
     f("F8 Del line", 8),
     CLOSE,
 ];

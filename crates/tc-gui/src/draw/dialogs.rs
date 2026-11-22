@@ -23,11 +23,18 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
     if let Some(d) = dialog(app) {
         show_dialog(ctx, "dialog", &d);
     }
-    let act = match &app.mode {
-        Mode::FindForm(form) => show_find_form(ctx, form),
-        Mode::MultiRename(form) => show_multi_rename(ctx, form),
-        Mode::SyncForm(form) => show_sync_form(ctx, form),
-        Mode::Settings(form) => show_settings(ctx, form),
+    let act = match (&app.search_form, &app.mode) {
+        (Some(form), _) => show_form(
+            ctx,
+            ("search", "Search"),
+            (&form.rows, form.focus, form.error.as_deref()),
+            fmt::SEARCH_FORM_KEYS,
+            Some("OK"),
+        ),
+        (None, Mode::FindForm(form)) => show_find_form(ctx, form),
+        (None, Mode::MultiRename(form)) => show_multi_rename(ctx, form),
+        (None, Mode::SyncForm(form)) => show_sync_form(ctx, form),
+        (None, Mode::Settings(form)) => show_settings(ctx, form),
         _ => None,
     };
     match act {

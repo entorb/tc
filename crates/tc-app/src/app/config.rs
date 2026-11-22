@@ -210,7 +210,7 @@ mod tests {
 
     use super::super::find_files::F_NAME;
     use super::super::{
-        App, Ask, Mode, form_checked, form_text, rename_rows, rows_from_line, rows_to_line,
+        App, FormRow, Mode, form_checked, form_text, rename_rows, rows_from_line, rows_to_line,
     };
 
     fn app(dir: &std::path::Path) -> App {
@@ -313,13 +313,13 @@ mod tests {
             KeyCode::Char('l'),
             KeyCode::Enter,
             KeyCode::F(7),
-            KeyCode::Up,
         ] {
             a.on_key(k.into());
         }
-        let input = a.input.as_ref().unwrap();
-        assert_eq!((input.ask, input.text.text.as_str()), (Ask::Find, "l"));
-        a.input = None;
+        a.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        let form = a.search_form.as_ref().unwrap();
+        assert!(matches!(&form.rows[0], FormRow::Text("Find", l) if l.text == "l"));
+        a.search_form = None;
         a.mode = Mode::Normal;
         a.remember("find-forms", "\tName (masks)=*.rs");
         a.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));

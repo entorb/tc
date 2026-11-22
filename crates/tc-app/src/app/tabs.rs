@@ -120,6 +120,7 @@ impl App {
         if let MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) =
             ev.kind
             && self.input.is_none()
+            && self.search_form.is_none()
             && self.replacing.is_none()
             && let Mode::Edit {
                 editor,

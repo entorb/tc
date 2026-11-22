@@ -394,7 +394,8 @@ Mouse wheel     scroll
 g / Ctrl+G      go to line or N% (hex: offset 0x.. / decimal)
 
 == Search ==
-/ f F7 Ctrl+F   find (prompt: Up/Down earlier patterns)
+/ f F7 Ctrl+F   search dialog (Tab / Up / Down move, Space
+                checks, Enter runs, F1 regex syntax)
 n / Shift+F7    next match
 N               previous match
 Alt+C           case sensitive / smart case
@@ -429,12 +430,15 @@ Mouse wheel     scroll
 Mouse           click, drag, Shift+click select
 
 == Search ==
-F7 / Ctrl+F     find (prompt: Up/Down earlier patterns)
-F3 / Shift+F7   next match
+F3 / F7 Ctrl+F  search and replace dialog (Tab / Up / Down
+                move, Space checks, Enter runs, F1 regex
+                syntax, Alt+Up/Down earlier patterns)
+Shift+F7        next match
 Shift+F3        previous match
-F4 / Ctrl+R     replace all
-Alt+R           replace one by one (y / Enter, n / Space,
-                a all, other key stops)
+Ctrl+R          dialog with Replace on
+Alt+R           Replace on and Confirm each: y / Enter
+                replace, n / Space skip, a all, other key
+                stops
 Alt+C           case sensitive / smart case
 
 == Edit ==
@@ -456,6 +460,46 @@ Ctrl+K / F8     delete selection or line
 Ctrl+D          duplicate line
 Alt+W           wrap on / off
 Alt+L           line numbers on / off";
+
+pub const HELP_SEARCH: &str = "\
+== Fields ==
+Find            text to search for; empty repeats the last
+                search; Alt+Up/Down earlier patterns
+Replace with    text put in place of each match (Replace on)
+
+== Options ==
+Replace         replace the matches (Enter: all at once)
+Confirm each    ask at each match: y / Enter replace,
+                n / Space skip, a all, other key stops
+Regex           Find is a regular expression (see below);
+                off: the text is matched literally, and
+                `$` in Replace with is not special
+Case sensitive  on: exact case; off: smart case (an upper
+                case letter in Find makes it exact)
+
+== Regex syntax ==
+.               any character except line break
+^ $             start / end of line
+\\d \\w \\s      digit, word character, whitespace
+\\b             word boundary
+[abc] [^a-z]    one of the set / none of the range
+a|b             a or b
+( ... )         group, numbered from 1
+(?: ... )       group, not numbered
+(?P<name> ...)  named group
+a* a+ a?        0 or more, 1 or more, 0 or 1
+a{2,5}          2 to 5 times
+(?i)            ignore case in this part of the pattern
+\\n \\t         newline, tab
+
+== Replace with (Regex on) ==
+$0              the whole match
+$1 ${1}        text of group 1 (${1}x when letters follow)
+$name           text of a named group
+$$              a dollar sign
+
+A match cannot span lines: `\\n` never matches.
+Esc / F10 close";
 
 /// Title and text of the F1 help for `mode`.
 pub fn help(mode: &Mode) -> (&'static str, &'static str) {

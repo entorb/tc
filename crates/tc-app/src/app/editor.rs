@@ -1,6 +1,6 @@
 //! Viewer (F3) and editor (F4): keys, find / replace / goto prompts, load and save.
 
-use super::{App, Done, Mode, edit_key};
+use super::{App, Done, FormRow, Mode, edit_key};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -15,11 +15,7 @@ use tc_core::{
 /// What a text prompt in the viewer or editor asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ask {
-    Find,
     Goto,
-    Replace,
-    /// Second step of replace, `Input::pattern` holds the first answer.
-    With,
     /// File panel: select (`+`) or deselect (`-`) files by mask.
     Select,
     Deselect,
@@ -28,10 +24,7 @@ pub enum Ask {
 impl Ask {
     pub fn title(self) -> &'static str {
         match self {
-            Ask::Find => "Find (regex)",
             Ask::Goto => "Go to line (N%; offset in hex view)",
-            Ask::Replace => "Replace (regex)",
-            Ask::With => "Replace with ($1 = group)",
             Ask::Select => "Select files (mask, default *)",
             Ask::Deselect => "Deselect files (mask, default *)",
         }
@@ -41,9 +34,13 @@ impl Ask {
 pub struct Input {
     pub ask: Ask,
     pub text: LineEdit,
-    pub(super) pattern: String,
-    /// Replace asks for each match instead of replacing all.
-    pub(super) each: bool,
+    pub error: Option<String>,
+}
+
+/// Search dialog of the viewer (Find) or editor (Find, Replace with, options), over the text.
+pub struct SearchForm {
+    pub rows: Vec<FormRow>,
+    pub focus: usize,
     pub error: Option<String>,
 }
 
@@ -120,7 +117,7 @@ impl App {
         }
         let save =
             key.code == KeyCode::F(2) || (ctrl && matches!(key.code, KeyCode::Char('s' | 'S')));
-        let prompt = matches!(key.code, KeyCode::F(3 | 4 | 7))
+        let prompt = matches!(key.code, KeyCode::F(3 | 7))
             || (ctrl && matches!(key.code, KeyCode::Char('g' | 'f' | 'r')));
         if matches!(
             key.code,
@@ -156,11 +153,11 @@ impl App {
                     error: None,
                 };
                 match key.code {
-                    KeyCode::F(3) => self.find_or_ask(!shift),
+                    KeyCode::F(3) if shift => self.find_or_ask(false),
                     KeyCode::F(7) if shift => self.find_or_ask(true),
-                    KeyCode::F(4) | KeyCode::Char('r') => self.ask(Ask::Replace),
-                    KeyCode::F(7) | KeyCode::Char('f') => self.ask(Ask::Find),
-                    _ => self.ask(Ask::Goto),
+                    KeyCode::Char('g') => self.ask(Ask::Goto),
+                    KeyCode::Char('r') => self.open_search(true, false),
+                    _ => self.open_search(false, false),
                 }
                 return;
             }
@@ -176,10 +173,7 @@ impl App {
                     editor,
                     error: None,
                 };
-                self.ask(Ask::Replace);
-                if let Some(i) = &mut self.input {
-                    i.each = true;
-                }
+                self.open_search(true, true);
                 return;
             }
             KeyCode::Left if ctrl => editor.move_word(false),
@@ -306,7 +300,7 @@ impl App {
                     KeyCode::F(7) if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         self.find_or_ask(true)
                     }
-                    _ => self.ask(Ask::Find),
+                    _ => self.open_search(false, false),
                 }
                 return;
             }
@@ -340,8 +334,6 @@ impl App {
         self.input = Some(Input {
             ask,
             text: LineEdit::default(),
-            pattern: String::new(),
-            each: false,
             error: None,
         });
     }
@@ -350,8 +342,104 @@ impl App {
         if self.search.is_some() {
             self.find(forward);
         } else {
-            self.ask(Ask::Find);
+            self.open_search(false, false);
         }
+    }
+
+    /// Opens the search dialog; `replace` ticks Replace (editor only), `each` Confirm each.
+    pub(super) fn open_search(&mut self, replace: bool, each: bool) {
+        let editable = matches!(self.mode, Mode::Edit { .. });
+        let mut rows = vec![FormRow::Text("Find", LineEdit::default())];
+        if editable {
+            rows.push(FormRow::Text("Replace with", LineEdit::default()));
+            rows.push(FormRow::Check("Replace", replace));
+            rows.push(FormRow::Check("Confirm each", each));
+        }
+        rows.push(FormRow::Check("Regex", self.search_regex));
+        rows.push(FormRow::Check("Case sensitive", self.exact));
+        self.search_form = Some(SearchForm {
+            rows,
+            focus: 0,
+            error: None,
+        });
+    }
+
+    /// Keys in the search dialog: Tab / Up / Down move between rows, Space toggles, Enter runs.
+    pub(super) fn search_dialog_key(&mut self, key: KeyEvent) {
+        let Some(form) = &mut self.search_form else {
+            return;
+        };
+        form.error = None;
+        let last = form.rows.len() - 1;
+        match key.code {
+            KeyCode::Esc | KeyCode::F(10) => self.search_form = None,
+            KeyCode::Enter => self.search_enter(),
+            KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                if let FormRow::Text(_, l) = &mut form.rows[0] {
+                    match key.code {
+                        KeyCode::Up => l.prev(&self.find_history),
+                        _ => l.next(&self.find_history),
+                    }
+                }
+            }
+            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
+            KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
+            code => form.rows[form.focus].key(code, key.modifiers.contains(KeyModifiers::CONTROL)),
+        }
+    }
+
+    /// Enter in the search dialog: runs it and closes; an error keeps the dialog open.
+    pub(super) fn search_enter(&mut self) {
+        let Some(form) = self.search_form.take() else {
+            return;
+        };
+        if let Err(e) = self.run_search(&form.rows) {
+            self.search_form = Some(SearchForm {
+                error: Some(e),
+                ..form
+            });
+        }
+    }
+
+    /// Finds the first match, or replaces in the editor (all at once, or one by one).
+    fn run_search(&mut self, rows: &[FormRow]) -> Result<(), String> {
+        let text = row_text(rows, "Find");
+        let (regex, exact) = (row_on(rows, "Regex"), row_on(rows, "Case sensitive"));
+        let re = if text.is_empty() {
+            // empty answer repeats the last search
+            self.search.clone().ok_or("empty pattern")?
+        } else {
+            let pattern = if regex {
+                text.clone()
+            } else {
+                regex::escape(&text)
+            };
+            search::compile_case(&pattern, exact).map_err(|e| e.to_string())?
+        };
+        self.exact = exact;
+        self.search_regex = regex;
+        if !text.is_empty() {
+            self.note = self.remember("find-history", &text);
+        }
+        self.search = Some(re.clone());
+        if !row_on(rows, "Replace") {
+            self.find(true);
+            return Ok(());
+        }
+        let each = row_on(rows, "Confirm each");
+        let with = row_text(rows, "Replace with");
+        // literal text: a `$` is not a group reference
+        let with = if regex { with } else { with.replace('$', "$$") };
+        if each {
+            if re.is_match("") {
+                return Err("pattern matches empty text".into());
+            }
+            self.replacing = Some(with);
+            self.replace_step(false);
+        } else if let Mode::Edit { editor, .. } = &mut self.mode {
+            self.note = format!("{} replaced", editor.replace_all(&re, &with));
+        }
+        Ok(())
     }
 
     /// Select or show the next match of the last search in the viewer or editor.
@@ -462,15 +550,8 @@ impl App {
         };
         match key.code {
             KeyCode::Esc => return,
-            KeyCode::Up if matches!(input.ask, Ask::Find | Ask::Replace) => {
-                input.text.prev(&self.find_history);
-            }
-            KeyCode::Down if matches!(input.ask, Ask::Find | Ask::Replace) => {
-                input.text.next(&self.find_history);
-            }
-            KeyCode::Enter => match self.submit(&mut input) {
-                Ok(true) => return,
-                Ok(false) => {}
+            KeyCode::Enter => match self.submit(&input) {
+                Ok(()) => return,
                 Err(e) => input.error = Some(e),
             },
             _ => {
@@ -482,53 +563,17 @@ impl App {
         self.input = Some(input);
     }
 
-    /// `Ok(true)` when done, `Ok(false)` when the prompt goes on with its next step.
-    pub(super) fn submit(&mut self, input: &mut Input) -> Result<bool, String> {
-        let text = input.text.text.clone();
-        let exact = self.exact;
-        let compile = |p: &str| search::compile_case(p, exact).map_err(|e| e.to_string());
+    /// Runs the prompt's answer; an error keeps the prompt open.
+    pub(super) fn submit(&mut self, input: &Input) -> Result<(), String> {
+        let text = &input.text.text;
         match input.ask {
-            Ask::Goto => self.goto(&text)?,
+            Ask::Goto => self.goto(text)?,
             Ask::Select | Ask::Deselect => {
                 let on = input.ask == Ask::Select;
-                self.panels[self.active].select_mask(&text, on);
-            }
-            Ask::Find => {
-                // empty answer repeats the last search
-                if !text.is_empty() {
-                    self.search = Some(compile(&text)?);
-                    self.note = self.remember("find-history", &text);
-                } else if self.search.is_none() {
-                    return Err("empty pattern".into());
-                }
-                self.find(true);
-            }
-            Ask::Replace => {
-                compile(&text)?;
-                self.note = self.remember("find-history", &text);
-                input.pattern = text;
-                input.text.clear();
-                input.ask = Ask::With;
-                return Ok(false);
-            }
-            Ask::With => {
-                let re = compile(&input.pattern)?;
-                if input.each {
-                    if re.is_match("") {
-                        return Err("pattern matches empty text".into());
-                    }
-                    self.search = Some(re);
-                    self.replacing = Some(text);
-                    self.replace_step(false);
-                } else {
-                    if let Mode::Edit { editor, .. } = &mut self.mode {
-                        self.note = format!("{} replaced", editor.replace_all(&re, &text));
-                    }
-                    self.search = Some(re);
-                }
+                self.panels[self.active].select_mask(text, on);
             }
         }
-        Ok(true)
+        Ok(())
     }
 
     #[cfg(test)]
@@ -681,6 +726,22 @@ impl App {
     }
 }
 
+/// Text of the search dialog row `label` (empty when the row is not there).
+fn row_text(rows: &[FormRow], label: &str) -> String {
+    rows.iter()
+        .find_map(|r| match r {
+            FormRow::Text(l, e) if *l == label => Some(e.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the checkbox `label` of the search dialog is on (false when the row is not there).
+fn row_on(rows: &[FormRow], label: &str) -> bool {
+    rows.iter()
+        .any(|r| matches!(r, FormRow::Check(l, true) if *l == label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::find_files::Found;
@@ -696,7 +757,7 @@ mod tests {
 
     use tc_core::panel::Panel;
 
-    use super::super::tests::{key, rows, two_panels, type_text, wait, with};
+    use super::super::tests::{key, rows, two_panels, type_keys, type_text, wait, with};
 
     #[test]
     fn edit_save_exit() {
@@ -779,8 +840,10 @@ mod tests {
         key(&mut app, KeyCode::F(4));
         wait(&mut app);
         with(&mut app, KeyCode::Char('r'), KeyModifiers::ALT);
-        type_text(&mut app, "ab");
-        type_text(&mut app, "X");
+        type_keys(&mut app, "ab");
+        key(&mut app, KeyCode::Tab);
+        type_keys(&mut app, "X");
+        key(&mut app, KeyCode::Enter);
         key(&mut app, KeyCode::Char('y')); // first ab -> X
         key(&mut app, KeyCode::Char('n')); // second skipped
         key(&mut app, KeyCode::Char('a')); // rest
@@ -826,30 +889,26 @@ mod tests {
         wait(&mut app);
 
         key(&mut app, KeyCode::F(7));
-        type_text(&mut app, "(");
-        assert_eq!(
-            app.input
-                .as_ref()
-                .unwrap()
-                .error
-                .as_deref()
-                .map(str::is_empty),
-            Some(false)
-        );
+        type_keys(&mut app, "(");
+        key(&mut app, KeyCode::Enter);
+        let err = app.search_form.as_ref().unwrap().error.as_deref();
+        assert!(err.is_some_and(|e| !e.is_empty()));
         key(&mut app, KeyCode::Backspace);
-        assert!(app.input.as_ref().unwrap().error.is_none());
-        type_text(&mut app, "ONE"); // smart case: uppercase is exact, no match
-        assert!(app.input.is_none());
+        assert!(app.search_form.as_ref().unwrap().error.is_none());
+        type_keys(&mut app, "ONE"); // smart case: uppercase is exact, no match
+        key(&mut app, KeyCode::Enter);
+        assert!(app.search_form.is_none());
         assert_eq!(app.note, "not found");
-        key(&mut app, KeyCode::F(3)); // next with the last search
         key(&mut app, KeyCode::F(7));
         key(&mut app, KeyCode::Esc);
+        assert!(app.search_form.is_none());
         key(&mut app, KeyCode::F(7));
-        type_text(&mut app, "one");
+        type_keys(&mut app, "one");
+        key(&mut app, KeyCode::Enter);
         assert_eq!(app.mode.editor_mut().unwrap().cursor, (0, 0));
-        key(&mut app, KeyCode::F(3));
+        with(&mut app, KeyCode::F(7), KeyModifiers::SHIFT); // next match
         assert_eq!(app.mode.editor_mut().unwrap().cursor, (1, 4));
-        key(&mut app, KeyCode::F(3));
+        with(&mut app, KeyCode::F(7), KeyModifiers::SHIFT);
         assert_eq!(app.mode.editor_mut().unwrap().cursor, (0, 0));
 
         let ctrl =
@@ -862,16 +921,61 @@ mod tests {
         ctrl(&mut app, 'z');
         assert_eq!(rows(&mut app), ["one", "two one", ""]);
 
-        key(&mut app, KeyCode::F(4));
-        type_text(&mut app, "o(n)e");
-        assert!(app.input.is_some());
-        type_text(&mut app, "[${1}]");
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "o(n)e");
+        key(&mut app, KeyCode::Tab);
+        type_keys(&mut app, "[${1}]");
+        assert!(app.search_form.is_some());
+        key(&mut app, KeyCode::Enter);
         assert_eq!(app.note, "2 replaced");
         assert_eq!(rows(&mut app), ["[n]", "two [n]", ""]);
 
         ctrl(&mut app, 'g');
         type_text(&mut app, "2");
         assert_eq!(app.mode.editor_mut().unwrap().cursor, (1, 0));
+    }
+
+    #[test]
+    fn editor_search_regex_groups_and_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "ab a+b\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        // regex on (default): groups are referenced in Replace with
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "(a)(b)");
+        key(&mut app, KeyCode::Tab);
+        type_keys(&mut app, "$2$1");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(rows(&mut app)[0], "ba a+b");
+        // regex off: Find and Replace with are plain text, `$0` included
+        with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "a+b");
+        key(&mut app, KeyCode::Tab);
+        type_keys(&mut app, "[$0]");
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Tab); // Replace, Confirm each, Regex
+        }
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(rows(&mut app)[0], "ba [$0]");
+    }
+
+    #[test]
+    fn search_dialog_f1_shows_regex_help() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(3));
+        key(&mut app, KeyCode::F(7));
+        assert!(app.search_form.is_some());
+        key(&mut app, KeyCode::F(1));
+        assert!(app.help);
+        assert_eq!(app.help_text().0, "Help: search");
+        assert!(app.help_entries().iter().any(|(l, _)| l.contains("group")));
     }
 
     #[test]

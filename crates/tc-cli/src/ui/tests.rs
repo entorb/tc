@@ -106,7 +106,7 @@ fn viewer_shows_find_prompt() {
         .iter()
         .map(ratatui::buffer::Cell::symbol)
         .collect();
-    assert!(screen.contains("Find (regex)"));
+    assert!(screen.contains(" Search ") && screen.contains("Regex"));
 }
 
 #[test]

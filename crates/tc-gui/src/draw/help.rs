@@ -4,7 +4,7 @@ use tc_app::app::App;
 use tc_app::fmt::{self};
 /// Help as a table: section titles, then key | info rows (continuation lines join the info).
 pub(super) fn show_help(ctx: &Context, app: &mut App) {
-    let title = fmt::help(&app.mode).0;
+    let title = app.help_text().0;
     let text = app.help_entries();
     let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::proportional(14.0)));
     let max_h = ctx.content_rect().height() * 0.7;

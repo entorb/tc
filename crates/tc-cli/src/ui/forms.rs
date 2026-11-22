@@ -7,8 +7,14 @@ use ratatui::widgets::{Clear, List, Paragraph};
 use super::popup::popup;
 use super::{BAR, PANEL, themed_block};
 use ratatui::widgets::ListState;
-use tc_app::app::{FindForm, Found, RenameForm, SettingsForm, Sync, SyncForm};
+use tc_app::app::{FindForm, Found, RenameForm, SearchForm, SettingsForm, Sync, SyncForm};
 use tc_app::fmt::{self, found_title, sync_footer, sync_row, sync_title};
+/// Search dialog over the viewer or editor.
+pub(super) fn draw_search_form(frame: &mut Frame, form: &SearchForm) -> (Rect, usize) {
+    let lines = form_lines(&form.rows, form.focus, form.error.as_deref());
+    draw_form(frame, " Search ", lines, form.focus, fmt::SEARCH_FORM_KEYS)
+}
+
 pub(super) fn draw_found(frame: &mut Frame, f: &Found, area: Rect) {
     let h = usize::from(area.height.saturating_sub(2)).max(1);
     let start = f.sel / h * h; // page-wise, so only visible rows are built

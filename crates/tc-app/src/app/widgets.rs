@@ -94,9 +94,17 @@ impl Mode {
 }
 
 impl App {
+    /// Rows and focus of the open form: the search dialog over the text, else the form screen.
+    fn form_rows_mut(&mut self) -> Option<(&[FormRow], &mut usize)> {
+        if let Some(f) = &mut self.search_form {
+            return Some((&f.rows, &mut f.focus));
+        }
+        self.mode.form_mut()
+    }
+
     /// Click on form row `row`: focuses it; a checkbox toggles, a choice cycles (as Space would).
     pub fn form_click(&mut self, row: usize) {
-        let Some((rows, focus)) = self.mode.form_mut() else {
+        let Some((rows, focus)) = self.form_rows_mut() else {
             return;
         };
         let Some(r) = rows.get(row) else { return };
@@ -109,7 +117,7 @@ impl App {
 
     /// Pick option `k` of choice row `row` (GUI dropdown); cycles with Space so the form reacts as to keys.
     pub fn form_choose(&mut self, row: usize, k: usize) {
-        let Some((rows, focus)) = self.mode.form_mut() else {
+        let Some((rows, focus)) = self.form_rows_mut() else {
             return;
         };
         let Some(FormRow::Choice(_, opts, i)) = rows.get(row) else {
@@ -124,7 +132,7 @@ impl App {
 
     /// Terminal click inside the form rows drawn at `form_area` (first row shown: `form_scroll`).
     pub(super) fn form_mouse(&mut self, col: u16, row: u16) -> bool {
-        if self.mode.form_mut().is_none() || !self.form_area.contains((col, row).into()) {
+        if self.form_rows_mut().is_none() || !self.form_area.contains((col, row).into()) {
             return false;
         }
         self.form_click(self.form_scroll + usize::from(row - self.form_area.y));

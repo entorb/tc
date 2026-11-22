@@ -8,6 +8,7 @@ impl App {
     /// F1 opens the help here: the footer screens plus lists and the conflict question.
     pub(super) fn takes_f1(&self) -> bool {
         self.footer_active()
+            || (self.search_form.is_some() && !self.help)
             || (self.input.is_none()
                 && !self.help
                 && match &self.mode {
@@ -17,10 +18,19 @@ impl App {
                 })
     }
 
+    /// Title and text of the F1 help as shown: the search dialog's own over the text.
+    pub fn help_text(&self) -> (&'static str, &'static str) {
+        if self.search_form.is_some() {
+            ("Help: search", fmt::HELP_SEARCH)
+        } else {
+            fmt::help(&self.mode)
+        }
+    }
+
     /// Help lines as shown (matching the filter, all when it is empty) with the key each runs
     /// (only the main help has keys). Built once per frame or key, not per line.
     pub fn help_entries(&self) -> Vec<(&'static str, Option<(KeyCode, KeyModifiers)>)> {
-        let (_, text) = fmt::help(&self.mode);
+        let (_, text) = self.help_text();
         let main = text == fmt::HELP_MAIN;
         fmt::help_filter(text, &self.help_filter.to_lowercase())
             .into_iter()
@@ -138,7 +148,7 @@ mod tests {
             (KeyCode::F(1), KeyModifiers::ALT),
         ] {
             app.on_key(KeyEvent::new(code, mods));
-            let title = fmt::help(&app.mode).0;
+            let title = app.help_text().0;
             key(&mut app, KeyCode::F(1));
             assert!(app.help && title != "Help", "{title} {code:?}");
             key(&mut app, KeyCode::Esc);

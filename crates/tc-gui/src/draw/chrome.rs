@@ -102,7 +102,7 @@ fn toolbar_group(ui: &mut Ui, app: &mut App, group: &[ToolItem]) {
 /// Holding Shift shows the Shift alternates; the tooltip is the key's F1 help.
 pub(super) fn footer(ui: &mut Ui, app: &mut App) {
     let shift = ui.input(|i| i.modifiers.shift);
-    let help = tc_app::fmt::help(&app.mode).1;
+    let help = app.help_text().1;
     ui.horizontal(|ui| {
         for &item in app.footer_keys() {
             let (label, code, mods) = if shift {

@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph};
 
 use tc_app::app::{App, MENUS, Mode, menu_drop};
 use tc_app::fmt::{
-    DATE_WIDTH, SIZE_WIDTH, dialog, entry_cols, fit, help, input_dialog, panel_info, panel_title,
+    DATE_WIDTH, SIZE_WIDTH, dialog, entry_cols, fit, input_dialog, panel_info, panel_title,
 };
 use tc_core::cmdline::LineEdit;
 use tc_core::syntax::Kind;
@@ -23,7 +23,8 @@ mod monitor;
 use self::monitor::{draw_procs, draw_stats};
 mod forms;
 use self::forms::{
-    draw_find_form, draw_found, draw_multi_rename, draw_settings, draw_sync, draw_sync_form,
+    draw_find_form, draw_found, draw_multi_rename, draw_search_form, draw_settings, draw_sync,
+    draw_sync_form,
 };
 
 // Norton Commander look: blue panels, light-cyan files, white dirs, cyan cursor bar.
@@ -219,7 +220,7 @@ fn draw_edit(frame: &mut Frame, area: Rect, prompt: &str, l: &LineEdit, style: S
 
 fn draw_input(frame: &mut Frame, app: &mut App) {
     if app.help {
-        let title = help(&app.mode).0;
+        let title = app.help_text().0;
         let text = app.help_entries();
         let lines = text.len();
         let [h] = Layout::horizontal([Constraint::Length(frame.area().width.min(72))])
@@ -263,6 +264,9 @@ fn draw_input(frame: &mut Frame, app: &mut App) {
     }
     if let Some(input) = &app.input {
         draw_dialog(frame, &input_dialog(input));
+    }
+    if let Some(form) = &app.search_form {
+        (app.form_area, app.form_scroll) = draw_search_form(frame, form);
     }
 }
 
