@@ -28,6 +28,9 @@ PgUp/PgDn       page up / down
 Home/End        first / last entry
 Alt+Left        history back
 Alt+Right       history forward
+Ctrl+K          sync browsing on / off: entering a directory or
+                going up repeats it in the other panel (local
+                only; off when it cannot follow)
 ~               home directory
 Ctrl+\\          root directory
 Ctrl+R          refresh (also the free space shown in the status line)

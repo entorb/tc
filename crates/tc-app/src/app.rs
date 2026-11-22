@@ -23,6 +23,7 @@ use tc_core::{Error, hotlist, ops, view::Viewer};
 use tc_remote::Prompt;
 
 mod bookmarks;
+mod browse_sync;
 mod compare;
 mod config;
 mod connect;
@@ -286,6 +287,8 @@ pub struct App {
     /// Visited directories (frecency) and the file they are saved to.
     pub popular: Vec<tc_core::popular::Popular>,
     pub popular_file: Option<PathBuf>,
+    /// Ctrl+K: navigation of the active panel is repeated in the other.
+    pub sync_browse: bool,
     /// Time and cell of the last left click, to detect double clicks (terminals send none).
     last_click: Option<(Instant, u16, u16)>,
     /// Command history (oldest first) and the file it is saved to.
@@ -376,6 +379,7 @@ impl App {
             hotlist_file: None,
             popular: Vec::new(),
             popular_file: None,
+            sync_browse: false,
             last_click: None,
             history: Vec::new(),
             history_file: None,
@@ -705,6 +709,7 @@ impl App {
             KeyCode::Char('n') => self.open_list(Mode::Connections(0)),
             KeyCode::Char('b') => self.open_list(Mode::Hotlist(0)),
             KeyCode::Char('z') => self.popular_open(),
+            KeyCode::Char('k') => self.toggle_browse_sync(),
             KeyCode::Char(' ') => self.spawn_stats(),
             KeyCode::Char('p') => {
                 let r = self.panels[self.active].remote().cloned();
@@ -916,13 +921,17 @@ impl App {
                 if let Some(file) = archive {
                     return self.spawn_archive(file);
                 }
+                let step =
+                    browse_sync::step(panel, code == KeyCode::Enter).filter(|_| self.sync_browse);
                 let result = if code == KeyCode::Enter {
                     panel.enter().map(drop)
                 } else {
                     panel.parent()
                 };
-                if let Err(e) = result {
-                    self.mode = Mode::Message(e.to_string());
+                match (result, step) {
+                    (Err(e), _) => self.mode = Mode::Message(e.to_string()),
+                    (Ok(()), Some(step)) => self.browse_follow(step),
+                    _ => {}
                 }
             }
             KeyCode::F(2) if panel.selection_info().0 > 1 => self.multi_rename(),

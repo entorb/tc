@@ -379,6 +379,9 @@ pub fn panel_title(app: &App, i: usize, sort_tag: bool) -> String {
     if panel.is_virtual() {
         title += " [found]";
     }
+    if app.sync_browse {
+        title += " [sync]";
+    }
     if let Some(dir) = panel.loading() {
         title += &format!(" [loading {}, Esc cancels]", dir.display());
     }

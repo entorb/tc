@@ -234,3 +234,30 @@ pub(super) fn type_text(app: &mut App, text: &str) {
 pub(super) fn rows(app: &mut App) -> Vec<String> {
     app.mode.editor_mut().unwrap().visible(5, 30)
 }
+
+#[test]
+fn sync_browsing_follows_enter_and_parent_and_stops_when_missing() {
+    let (l, r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for d in [l.path(), r.path()] {
+        std::fs::create_dir_all(d.join("a/sub")).unwrap();
+    }
+    std::fs::create_dir(l.path().join("only")).unwrap();
+    let mut app = two_panels(l.path(), r.path());
+    with(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert!(app.sync_browse);
+    key(&mut app, KeyCode::Down); // "a" (after "..")
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.panels[0].path(), l.path().join("a"));
+    assert_eq!(app.panels[1].path(), r.path().join("a"));
+    key(&mut app, KeyCode::Backspace);
+    assert_eq!(app.panels[0].path(), l.path());
+    assert_eq!(app.panels[1].path(), r.path());
+    // "only" is missing on the right: left goes, sync turns off
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.panels[0].current().unwrap().name, "only");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.panels[0].path(), l.path().join("only"));
+    assert_eq!(app.panels[1].path(), r.path());
+    assert!(!app.sync_browse && matches!(app.mode, Mode::Message(_)));
+}
