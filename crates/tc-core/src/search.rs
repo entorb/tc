@@ -57,14 +57,27 @@ impl Masks {
     }
 
     pub fn matches(&self, name: &str) -> bool {
+        // iterative: on a mismatch only the last `*` takes one more char, so O(p * n), not exponential
         fn glob(p: &[char], n: &[char]) -> bool {
-            match p.split_first() {
-                None => n.is_empty(),
-                Some(('*', rest)) => (0..=n.len()).any(|i| glob(rest, &n[i..])),
-                Some((c, rest)) => n
-                    .first()
-                    .is_some_and(|x| (*c == '?' || c == x) && glob(rest, &n[1..])),
+            let (mut pi, mut ni) = (0, 0);
+            let mut star: Option<(usize, usize)> = None;
+            while ni < n.len() {
+                match p.get(pi) {
+                    Some('*') => {
+                        star = Some((pi, ni));
+                        pi += 1;
+                    }
+                    Some(&c) if c == '?' || c == n[ni] => (pi, ni) = (pi + 1, ni + 1),
+                    _ => match star {
+                        Some((sp, sn)) => {
+                            star = Some((sp, sn + 1));
+                            (pi, ni) = (sp + 1, sn + 1);
+                        }
+                        None => return false,
+                    },
+                }
             }
+            p[pi..].iter().all(|&c| c == '*')
         }
         if self.masks.is_empty() {
             return true;
@@ -92,6 +105,16 @@ mod tests {
         assert!(!mask_match("a?c", "ac"));
         assert!(!Masks::with_case("*.RS", true).matches("main.rs"));
         assert!(Masks::with_case("*.RS", true).matches("main.RS"));
+        assert!(mask_match("*", ""));
+        assert!(mask_match("a**", "a"));
+        assert!(mask_match("*a*b", "xaybab"));
+        assert!(mask_match("*[1080p]*", "film [1080p].mkv"));
+        assert!(!mask_match("*a*b", "xaybba"));
+        // many stars on a long name: exponential before
+        assert!(!mask_match(
+            &format!("{}*b", "*a".repeat(20)),
+            &"a".repeat(200)
+        ));
     }
 
     #[test]
