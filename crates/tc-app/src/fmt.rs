@@ -364,7 +364,8 @@ pub fn entry_cols(app: &App, i: usize, e: &Entry, today: jiff::civil::Date) -> [
 }
 
 /// Panel title: tab, path and active flags (found, loading, sort, hidden, search, filter).
-pub fn panel_title(app: &App, i: usize) -> String {
+/// `sort_tag`: append the non-default sort key; GUI shows it as the header arrow instead.
+pub fn panel_title(app: &App, i: usize, sort_tag: bool) -> String {
     let panel = &app.panels[i];
     let mut title = panel.title();
     let tabs = app.tabs[i].len() + 1;
@@ -379,6 +380,7 @@ pub fn panel_title(app: &App, i: usize) -> String {
     }
     match panel.sort() {
         (SortKey::Name, false) => {}
+        _ if !sort_tag => {}
         (key, rev) => {
             let key = format!("{key:?}").to_lowercase();
             title += &format!(" [{key}{}]", if rev { " desc" } else { "" });

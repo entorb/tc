@@ -295,7 +295,7 @@ fn draw_panel(frame: &mut Frame, app: &mut App, i: usize, area: Rect) {
             ListItem::new(row).style(style)
         })
         .collect();
-    let title = panel_title(app, i);
+    let title = panel_title(app, i, true);
     let info = panel_info(app, i);
     let block = Block::bordered()
         .border_type(BorderType::Double)

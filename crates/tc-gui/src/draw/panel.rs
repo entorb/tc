@@ -34,7 +34,7 @@ pub(super) fn draw_panel(
         .stroke(stroke)
         .show(ui, |ui| {
             tab_bar(ui, app, i, &mut action);
-            let title = RichText::new(panel_title(app, i)).strong();
+            let title = RichText::new(panel_title(app, i, false)).strong();
             ui.add(Label::new(if active { title.color(ACCENT) } else { title }).truncate());
             let height = (ui.available_height() - 2.0 * row_h - 8.0).max(row_h);
             rows = ((height / row_h) as usize).saturating_sub(1).max(1);

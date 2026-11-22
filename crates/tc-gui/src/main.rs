@@ -40,9 +40,13 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new(open()?, open()?);
     app.load_config()?;
     app.start_update_check();
+    let title = match tc_app::app::VERSION {
+        Some(version) => format!("Torben's Commander {version}"),
+        None => "Torben's Commander".to_owned(),
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Torben's Commander")
+            .with_title(title)
             .with_inner_size([1280.0, 800.0]),
         // Ctrl+C/X/V reach the app as keys: egui swallows Ctrl+V when the clipboard holds no text (files)
         clipboard_shortcuts: false,
