@@ -4638,6 +4638,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "jiff",
+ "tc-app",
+ "tc-core",
+ "tc-remote",
+ "tempfile",
+]
+
+[[package]]
 name = "tc-app"
 version = "0.1.0"
 dependencies = [
@@ -4670,22 +4686,6 @@ dependencies = [
  "thiserror 2.0.21",
  "trash",
  "zip",
-]
-
-[[package]]
-name = "tc-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "eframe",
- "egui",
- "egui_extras",
- "jiff",
- "tc-app",
- "tc-core",
- "tc-remote",
- "tempfile",
 ]
 
 [[package]]

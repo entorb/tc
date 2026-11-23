@@ -15,7 +15,7 @@ pub const VERSION: Option<&str> = match option_env!("TC_VERSION") {
 
 const RELEASES: &str = "https://github.com/entorb/tc/releases/latest";
 const CHECK_DAILY: &str = "Check for updates daily";
-const FONT_SIZE: &str = "Font size (tc-gui)";
+const FONT_SIZE: &str = "Font size";
 /// Font scales 50 %..300 % in 10 % steps, index = `zoom * 10 - 5` (see `zoom_step`).
 const ZOOMS: [&str; 26] = [
     "50%", "60%", "70%", "80%", "90%", "100%", "110%", "120%", "130%", "140%", "150%", "160%",

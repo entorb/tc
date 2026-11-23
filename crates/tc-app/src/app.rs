@@ -225,7 +225,7 @@ pub struct App {
     pub help_scroll: usize,
     /// Text typed into the help filter (case-insensitive substring of each line).
     pub help_filter: String,
-    /// tc-gui font scale (Ctrl+= / Ctrl+-), saved in the settings.
+    /// Font scale (Ctrl+= / Ctrl+-), saved in the settings.
     pub zoom: f32,
     /// Selected line of the filtered help text.
     pub help_sel: usize,

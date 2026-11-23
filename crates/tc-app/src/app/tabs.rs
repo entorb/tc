@@ -83,7 +83,7 @@ impl App {
     }
 
     /// Shows tab `k` of `side` (click on a tab button).
-    /// Close tab `k` of `side` (tc-gui right click); the last tab of a side stays.
+    /// Close tab `k` of `side` (right click); the last tab of a side stays.
     pub fn close_tab(&mut self, side: usize, k: usize) {
         if !self.tabs[side].is_empty() {
             self.select_tab(side, k);

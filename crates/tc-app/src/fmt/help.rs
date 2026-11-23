@@ -58,9 +58,9 @@ Double click    open directory / archive, view file
 Click title     sort by name / size / date (again: reverse)
 Click F-bar     run the key shown on the label
 Click menu bar  open the F9 menu
-R-click tab     close the tab (tc-gui; not the last one)
-Click cmd line  type a command, like : (tc-gui)
-Shift held      F-bar shows the Shift actions (tc-gui)
+R-click tab     close the tab (not the last one)
+Click cmd line  type a command, like :
+Shift held      F-bar shows the Shift actions
 
 == Colors ==
 Dim entries     git-ignored (.gitignore, info/exclude, global
@@ -222,7 +222,7 @@ Click           focus a field; toggles a checkbox, cycles a choice
 == Options ==
 Check for updates daily: release builds ask GitHub for a
 newer release on the first start of a day and show it.
-Font size (tc-gui): Left/Right/Space change it; also Ctrl+=
+Font size: Left/Right/Space change it; also Ctrl+=
 and Ctrl+-.
 
 == Run ==

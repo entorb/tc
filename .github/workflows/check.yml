@@ -137,7 +137,7 @@ jobs:
       # Linux/Windows release binaries only for releases; macOS always, thin LTO outside releases
       - name: Build release
         if: inputs.release || runner.os == 'macOS'
-        run: cargo build --release --locked -p tc-gui
+        run: cargo build --release --locked -p tc
         env:
           # release tag built into the binary for the daily update check; empty: no check
           TC_VERSION: ${{ inputs.release && (inputs.tag_name || needs.core.outputs.next_tag) || '' }}
@@ -148,8 +148,8 @@ jobs:
         if: inputs.release || runner.os == 'macOS'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: tc-gui-${{ runner.os }}${{ runner.os == 'Linux' && runner.arch == 'ARM64' && '-arm64' || '' }}
-          path: target/release/tc-gui${{ runner.os == 'Windows' && '.exe' || '' }}
+          name: tc-${{ runner.os }}${{ runner.os == 'Linux' && runner.arch == 'ARM64' && '-arm64' || '' }}
+          path: target/release/tc${{ runner.os == 'Windows' && '.exe' || '' }}
           retention-days: 7
 
   e2e:
@@ -232,11 +232,11 @@ jobs:
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Invalid tag: $TAG"; exit 1; }
           # artifact zips drop the exec bit
-          chmod +x dist/tc-gui-Linux/tc-gui dist/tc-gui-macOS/tc-gui dist/tc-gui-Linux-arm64/tc-gui
-          mv dist/tc-gui-Linux/tc-gui dist/tc-gui-linux
-          mv dist/tc-gui-Linux-arm64/tc-gui dist/tc-gui-linux-arm64
-          mv dist/tc-gui-macOS/tc-gui dist/tc-gui-macos
-          mv dist/tc-gui-Windows/tc-gui.exe dist/tc-gui.exe
+          chmod +x dist/tc-Linux/tc dist/tc-macOS/tc dist/tc-Linux-arm64/tc
+          mv dist/tc-Linux/tc dist/tc-linux
+          mv dist/tc-Linux-arm64/tc dist/tc-linux-arm64
+          mv dist/tc-macOS/tc dist/tc-macos
+          mv dist/tc-Windows/tc.exe dist/tc.exe
           # generated notes plus a footer on how to start the unsigned macOS and Windows binaries
           NOTES="$RUNNER_TEMP/notes.md"
           gh api -X POST "repos/$GH_REPO/releases/generate-notes" -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" --jq .body > "$NOTES"
@@ -249,9 +249,9 @@ jobs:
           The binaries are not signed or notarized, so Gatekeeper blocks them. Clear the quarantine flag in Terminal, then run:
 
           ```sh
-          xattr -d com.apple.quarantine ./tc-gui-macos
-          chmod +x ./tc-gui-macos
-          ./tc-gui-macos
+          xattr -d com.apple.quarantine ./tc-macos
+          chmod +x ./tc-macos
+          ./tc-macos
           ```
 
           ### Running the Windows build
@@ -259,13 +259,13 @@ jobs:
           The binaries are not signed, so SmartScreen may show "Windows protected your PC": click **More info → Run anyway**. Or clear the download flag in PowerShell and run it from a terminal:
 
           ```powershell
-          Unblock-File .\tc-gui.exe
-          .\tc-gui.exe
+          Unblock-File .\tc.exe
+          .\tc.exe
           ```
           EOF
           gh release create "$TAG" --target "$GITHUB_SHA" --title "${TAG#v}${TITLE:+ $TITLE}" \
             --notes-file "$NOTES" ${PRERELEASE:+--prerelease} \
-            dist/tc-gui-linux dist/tc-gui-linux-arm64 dist/tc-gui-macos dist/tc-gui.exe
+            dist/tc-linux dist/tc-linux-arm64 dist/tc-macos dist/tc.exe
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

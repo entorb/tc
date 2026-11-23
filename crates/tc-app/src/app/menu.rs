@@ -1,4 +1,4 @@
-//! F-key footers, F9 menu bar and tc-gui toolbar: tables and their clicks.
+//! F-key footers, F9 menu bar and toolbar: tables and their clicks.
 
 use super::{App, Mode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
@@ -85,7 +85,7 @@ pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [
     ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
 ];
 
-/// Shift alternates of footer buttons (panels, File Stats); tc-gui shows them while Shift is held.
+/// Shift alternates of footer buttons (panels, File Stats); shown while Shift is held.
 pub(super) const SHIFT_FOOTER: [(&str, KeyCode, KeyModifiers); 1] =
     [("S-F4 Ext edit", KeyCode::F(4), KeyModifiers::SHIFT)];
 
@@ -241,7 +241,7 @@ pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
 /// Toolbar button: icon, tooltip, key sent when clicked.
 pub type ToolItem = (&'static str, &'static str, KeyCode, KeyModifiers);
 
-/// tc-gui toolbar groups (navigation, tools).
+/// Toolbar groups (navigation, tools).
 /// Icons must exist in egui's `emoji-icon-font`; the rest stays in the F9 menu.
 pub const TOOLBAR: [&[ToolItem]; 2] = [
     &[
