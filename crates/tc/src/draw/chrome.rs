@@ -1,7 +1,7 @@
 use super::{MUTED, icons, mono};
 use eframe::egui::{self, Align, Button, Id, Layout, RichText, Sense, Stroke, Ui, vec2};
-use tc_app::app::{App, MENUS, Mode, TOOLBAR, ToolItem};
-use tc_app::{KeyCode, KeyEvent, KeyModifiers};
+use tc::app::{App, MENUS, Mode, TOOLBAR, ToolItem};
+use tc::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
 /// Top menu bar (F9 or click); the open group drops down below its title.
 pub(super) fn menu_bar(ui: &mut Ui, app: &mut App) {
@@ -113,7 +113,7 @@ pub(super) fn footer(ui: &mut Ui, app: &mut App) {
             let clicked = ui
                 .add(Button::new(label).sense(Sense::CLICK))
                 .on_hover_ui(|ui| {
-                    ui.label(tc_app::fmt::key_help(help, label));
+                    ui.label(tc::fmt::key_help(help, label));
                 })
                 .clicked();
             if clicked && app.footer_active() {

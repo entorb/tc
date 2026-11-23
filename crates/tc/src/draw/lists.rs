@@ -6,12 +6,12 @@ use eframe::egui::{
     TextStyle, Ui, vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use tc_app::app::{App, Mode, Stats};
-use tc_app::fmt::{
+use tc::app::{App, Mode, Stats};
+use tc::fmt::{
     self, found_title, stats_footer, stats_row, stats_title, sync_footer, sync_row, sync_title,
 };
-use tc_app::fmt::{procs_footer, procs_header, procs_prompt};
-use tc_app::{KeyCode, KeyEvent, KeyModifiers};
+use tc::fmt::{procs_footer, procs_header, procs_prompt};
+use tc::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
 use tc_core::procs::ProcSort;

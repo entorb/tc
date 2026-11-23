@@ -1,8 +1,8 @@
 use super::chrome::text_box;
 use super::{ACCENT, MUTED, SELECT_BG, TEXT, modal};
 use eframe::egui::{self, Color32, Context, FontId, RichText, ScrollArea, Sense};
-use tc_app::app::App;
-use tc_app::fmt::{self};
+use tc::app::App;
+use tc::fmt::{self};
 use tc_core::cmdline::LineEdit;
 /// Help as a table: section titles, then key | info rows (continuation lines join the info).
 pub(super) fn show_help(ctx: &Context, app: &mut App) {

@@ -4647,18 +4647,6 @@ dependencies = [
  "egui",
  "egui_extras",
  "jiff",
- "tc-app",
- "tc-core",
- "tc-remote",
- "tempfile",
-]
-
-[[package]]
-name = "tc-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jiff",
  "ratatui",
  "regex",
  "tc-core",

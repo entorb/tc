@@ -5,10 +5,10 @@ use eframe::egui::{
     self, Button, Color32, ComboBox, Context, Label, Response, RichText, ScrollArea, Sense,
     TextStyle, Ui, vec2,
 };
-use tc_app::app::{App, FindForm, FormRow, Mode, PropsForm, RenameForm, SettingsForm, SyncForm};
-use tc_app::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
-use tc_app::fmt::{ProcInfo, procs_confirm, procs_info};
-use tc_app::{KeyCode, KeyEvent, KeyModifiers};
+use tc::app::{App, FindForm, FormRow, Mode, PropsForm, RenameForm, SettingsForm, SyncForm};
+use tc::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
+use tc::fmt::{ProcInfo, procs_confirm, procs_info};
+use tc::{KeyCode, KeyEvent, KeyModifiers};
 
 /// What a mouse did in a form; applied through the app like the matching keys.
 enum FormAct {

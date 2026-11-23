@@ -5,9 +5,9 @@ use eframe::egui::{
     Color32, Response, RichText, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob,
     vec2,
 };
-use tc_app::app::{App, Mode};
-use tc_app::fmt::{self, Mark, editor_info};
-use tc_app::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind, Rect};
+use tc::app::{App, Mode};
+use tc::fmt::{self, Mark, editor_info};
+use tc::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind, Rect};
 use tc_core::syntax::{self, Kind};
 /// Monospace cell size.
 pub(super) fn cell(ui: &Ui) -> Vec2 {

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use eframe::egui::{self, ViewportCommand};
-use tc_app::app::{App, Mode};
-use tc_app::{KeyModifiers, MouseEvent, MouseEventKind};
+use tc::app::{App, Mode};
+use tc::{KeyModifiers, MouseEvent, MouseEventKind};
 use tc_core::panel::Panel;
 use tc_core::view::Viewer;
 
@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new(open()?, open()?);
     app.load_config()?;
     app.start_update_check();
-    let title = match tc_app::app::VERSION {
+    let title = match tc::app::VERSION {
         Some(version) => format!("Torben's Commander {version}"),
         None => "Torben's Commander".to_owned(),
     };
@@ -118,7 +118,7 @@ impl Gui {
             match keys::translate(ev, alt && !typed) {
                 // in the file panel Ctrl+V pastes files; elsewhere it pastes text into the prompt or editor
                 Some(keys::Input::Key(k))
-                    if k.code == tc_app::KeyCode::Char('v')
+                    if k.code == tc::KeyCode::Char('v')
                         && k.modifiers == KeyModifiers::CONTROL
                         && !self.app.panel_keys() =>
                 {

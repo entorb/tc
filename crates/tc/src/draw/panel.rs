@@ -3,8 +3,8 @@ use eframe::egui::{
     self, Align, Button, Color32, Label, Layout, RichText, Sense, Stroke, TextStyle, Ui,
 };
 use egui_extras::{Column, TableBuilder};
-use tc_app::app::App;
-use tc_app::fmt::{entry_cols, panel_info, panel_title};
+use tc::app::App;
+use tc::fmt::{entry_cols, panel_info, panel_title};
 use tc_core::panel::SortKey;
 enum Action {
     Sort(SortKey),
