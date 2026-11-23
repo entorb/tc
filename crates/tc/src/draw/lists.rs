@@ -1,14 +1,14 @@
-use super::chrome::{line_edit, list_button};
-use super::viewer::cell;
-use super::{ACCENT, MUTED, TEXT};
+use super::chrome::line_edit;
+use super::{ACCENT, MARK, MUTED, TEXT};
 use eframe::egui::{
-    Align, Align2, Color32, FontId, Label, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
-    TextStyle, Ui, vec2,
+    Align, Align2, Color32, FontId, Label, Layout, Pos2, ProgressBar, Rect, RichText, Sense,
+    Stroke, StrokeKind, TextStyle, Ui, vec2,
 };
-use egui_extras::{Column, TableBuilder};
+use egui_extras::{Column, TableBuilder, TableRow};
 use tc::app::{App, Mode, Stats};
 use tc::fmt::{
-    self, found_title, stats_footer, stats_row, stats_title, sync_footer, sync_row, sync_title,
+    self, StatsCols, found_cols, found_title, stats_cols, stats_footer, stats_title, sync_cols,
+    sync_footer, sync_title,
 };
 use tc::fmt::{procs_footer, procs_header, procs_prompt};
 use tc::{KeyCode, KeyEvent, KeyModifiers};
@@ -16,22 +16,70 @@ use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
 use tc_core::procs::ProcSort;
 use tc_core::stats::treemap::Tile;
-/// One clickable list row; `Some(double)` when clicked.
-fn list_row(ui: &mut Ui, text: String, selected: bool) -> Option<bool> {
-    let r = list_button(ui, text, selected, true);
-    if r.double_clicked() {
-        Some(true)
-    } else {
-        r.clicked().then_some(false)
+/// Row height and rows per page of a table below a title (page-wise: only the page holding the cursor is built).
+fn page_rows(ui: &Ui) -> (f32, usize) {
+    let row_h = ui.text_style_height(&TextStyle::Body) + 6.0;
+    let h = ((ui.available_height() / row_h) as usize)
+        .saturating_sub(1)
+        .max(1);
+    (row_h, h)
+}
+
+fn right(ui: &mut Ui, text: impl Into<String>) {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.label(text.into())
+    });
+}
+
+fn left(ui: &mut Ui, text: impl Into<String>) {
+    ui.add(Label::new(text.into()).truncate());
+}
+
+/// Header cells; the columns in `right_cols` are right-aligned.
+fn head_row(mut head: TableRow, titles: &[&str], right_cols: &[usize]) {
+    for (k, title) in titles.iter().enumerate() {
+        head.col(|ui| {
+            let t = RichText::new(*title).strong().color(MUTED);
+            if right_cols.contains(&k) {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(t));
+            } else {
+                ui.label(t);
+            }
+        });
     }
 }
 
-/// Rows of a page-wise list (like the terminal): only the page holding `sel` is built.
-fn page_rows(ui: &Ui) -> usize {
-    // list rows are labels, spaced apart unlike the painted text grid
-    let row = cell(ui).y + ui.spacing().item_spacing.y;
-    let avail = ui.available_height() + ui.spacing().item_spacing.y;
-    ((avail / row) as usize).max(1)
+/// Click table of `shown` rows from `start`; `fill` draws one row's cells. `Some((index, double))` on click.
+fn click_table(
+    ui: &mut Ui,
+    cols: &[Column],
+    titles: &[&str],
+    right_cols: &[usize],
+    (row_h, start, shown, sel): (f32, usize, usize, usize),
+    mut fill: impl FnMut(&mut TableRow, usize),
+) -> Option<(usize, bool)> {
+    let mut clicked = None;
+    let mut table = TableBuilder::new(ui)
+        .striped(false)
+        .vscroll(false)
+        .sense(Sense::CLICK);
+    for c in cols {
+        table = table.column(*c);
+    }
+    table
+        .header(row_h, |head| head_row(head, titles, right_cols))
+        .body(|body| {
+            body.rows(row_h, shown, |mut row| {
+                let i = start + row.index();
+                row.set_selected(i == sel);
+                fill(&mut row, i);
+                let r = row.response();
+                if r.clicked() || r.double_clicked() {
+                    clicked = Some((i, r.double_clicked()));
+                }
+            });
+        });
+    clicked
 }
 
 pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
@@ -39,14 +87,22 @@ pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
         return;
     };
     ui.label(RichText::new(found_title(f)).strong().color(ACCENT));
-    let h = page_rows(ui);
+    let (row_h, h) = page_rows(ui);
     let start = f.sel / h * h;
-    let mut clicked = None;
-    for (k, e) in f.shown().enumerate().skip(start).take(h) {
-        if let Some(double) = list_row(ui, fmt::found_row(e), k == f.sel) {
-            clicked = Some((k, double));
-        }
-    }
+    let rows: Vec<[String; 2]> = f.shown().skip(start).take(h).map(found_cols).collect();
+    let cols = [Column::exact(80.0), Column::remainder().clip(true)];
+    let clicked = click_table(
+        ui,
+        &cols,
+        &["Size", "Path"],
+        &[0],
+        (row_h, start, rows.len(), f.sel),
+        |row, i| {
+            let [size, text] = &rows[i - start];
+            row.col(|ui| right(ui, size.as_str()));
+            row.col(|ui| left(ui, text.as_str()));
+        },
+    );
     app.page = h;
     if let Some((k, double)) = clicked {
         f.sel = k;
@@ -63,18 +119,50 @@ pub(super) fn draw_sync(ui: &mut Ui, app: &mut App) {
     };
     let today = jiff::ZonedDateTime::now().date();
     ui.label(RichText::new(sync_title(s)).strong().color(ACCENT));
-    let h = page_rows(ui);
+    let (row_h, h) = page_rows(ui);
     let start = s.sel / h * h;
-    let mut clicked = None;
-    for (k, it) in s.shown().enumerate().skip(start).take(h) {
-        if list_row(ui, sync_row(it, today), k == s.sel).is_some() {
-            clicked = Some(k);
-        }
-    }
-    if let Some(k) = clicked {
+    let rows: Vec<[String; 6]> = (s.shown().skip(start).take(h))
+        .map(|it| sync_cols(it, today))
+        .collect();
+    let cols = [
+        Column::exact(80.0),
+        Column::exact(110.0),
+        Column::exact(60.0),
+        Column::exact(80.0),
+        Column::exact(110.0),
+        Column::remainder().clip(true),
+    ];
+    let titles = [
+        "Left size",
+        "Left date",
+        "Action",
+        "Right size",
+        "Right date",
+        "Path",
+    ];
+    let clicked = click_table(
+        ui,
+        &cols,
+        &titles,
+        &[0, 3],
+        (row_h, start, rows.len(), s.sel),
+        |row, i| sync_cells(row, &rows[i - start]),
+    );
+    if let Some((k, _)) = clicked {
         s.sel = k;
     }
     app.page = h;
+}
+
+fn sync_cells(row: &mut TableRow, c: &[String; 6]) {
+    row.col(|ui| right(ui, c[0].as_str()));
+    row.col(|ui| left(ui, c[1].as_str()));
+    row.col(|ui| {
+        ui.centered_and_justified(|ui| ui.label(c[2].as_str()));
+    });
+    row.col(|ui| right(ui, c[3].as_str()));
+    row.col(|ui| left(ui, c[4].as_str()));
+    row.col(|ui| left(ui, c[5].as_str()));
 }
 
 /// Status line of File Stats (totals or its `:` prompt) and processes (footer or prompt).
@@ -165,23 +253,32 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
         _ => return,
     };
     ui.label(RichText::new(stats_title(st)).strong().color(ACCENT));
-    let h = page_rows(ui);
+    let (row_h, h) = page_rows(ui);
     let start = st.sel / h * h;
-    let rows: Vec<String> = st
+    let rows: Vec<StatsCols> = st
         .shown()
         .skip(start)
         .take(h)
-        .map(|n| stats_row(st, n))
+        .map(|n| stats_cols(st, n))
         .collect();
     let sel = st.sel;
     let list = |ui: &mut Ui| {
-        let mut clicked = None;
-        for (k, row) in rows.into_iter().enumerate() {
-            if let Some(double) = list_row(ui, row, start + k == sel) {
-                clicked = Some((start + k, double));
-            }
-        }
-        clicked
+        let cols = [
+            Column::exact(14.0),
+            Column::exact(90.0),
+            Column::exact(55.0),
+            Column::exact(100.0),
+            Column::remainder().clip(true),
+        ];
+        let titles = ["", "Size", "Share", "", "Name"];
+        click_table(
+            ui,
+            &cols,
+            &titles,
+            &[1, 2],
+            (row_h, start, rows.len(), sel),
+            |row, i| stats_cells(row, &rows[i - start]),
+        )
     };
     let width = ui.available_width();
     let clicked = if width >= MAP_MIN_WIDTH {
@@ -211,16 +308,27 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
     }
 }
 
+fn stats_cells(row: &mut TableRow, c: &StatsCols) {
+    row.col(|ui| {
+        if c.marked {
+            ui.label(RichText::new("*").color(MARK));
+        }
+    });
+    row.col(|ui| right(ui, c.value.as_str()));
+    row.col(|ui| right(ui, format!("{:.1}%", c.share * 100.0)));
+    row.col(|ui| {
+        ui.add(ProgressBar::new(c.share as f32).desired_width(ui.available_width()));
+    });
+    row.col(|ui| left(ui, c.name.as_str()));
+}
+
 /// Process monitor: title, summary, column titles (click sorts), page of rows (click selects).
 pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
     let Mode::Procs(p) = &mut app.mode else {
         return;
     };
     ui.label(RichText::new(procs_header(p)).color(TEXT));
-    let row_h = ui.text_style_height(&TextStyle::Body) + 6.0;
-    let h = ((ui.available_height() / row_h) as usize)
-        .saturating_sub(1)
-        .max(1);
+    let (row_h, h) = page_rows(ui);
     let start = p.sel / h * h;
     let shown = p.rows.len().saturating_sub(start).min(h);
     let (mut sort, mut clicked) = (None, None);

@@ -861,7 +861,7 @@ mod tests {
         };
         let lines: Vec<_> = f.list.iter().map(|h| h.line.clone().unwrap().0).collect();
         assert_eq!(lines, [2, 4]);
-        assert!(fmt::found_row(&f.list[1]).ends_with("b.txt:4: hello two"));
+        assert!(fmt::found_cols(&f.list[1])[1].ends_with("b.txt:4: hello two"));
         // F3 opens the second hit at its line; closing the viewer brings the list back
         key(&mut app, KeyCode::Down);
         key(&mut app, KeyCode::F(3));

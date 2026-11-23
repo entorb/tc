@@ -29,11 +29,6 @@ pub use help::{
     HELP_VIEW, HelpLine, help, help_filter, help_line, key_help,
 };
 
-/// Length of "YY-MM-DD HH:MM".
-pub const DATE_WIDTH: usize = 14;
-/// Length of "1023.9 K".
-pub const SIZE_WIDTH: usize = 8;
-
 /// `1234567` as `1,234,567`.
 pub fn thousands(n: u64) -> String {
     let digits = n.to_string();
@@ -470,8 +465,8 @@ pub fn found_title(f: &Found) -> String {
     )
 }
 
-/// Find result row: size (blank for directories), full path and the matching line if any.
-pub fn found_row(h: &Hit) -> String {
+/// Find result cells: size (blank for directories), full path and the matching line if any.
+pub fn found_cols(h: &Hit) -> [String; 2] {
     let e = &h.entry;
     let size = if e.is_dir {
         String::new()
@@ -479,10 +474,11 @@ pub fn found_row(h: &Hit) -> String {
         human(e.size)
     };
     let name = e.name.to_string_lossy();
-    match &h.line {
-        Some((n, text)) => format!("{size:>9}  {name}:{n}: {text}"),
-        None => format!("{size:>9}  {name}"),
-    }
+    let text = match &h.line {
+        Some((n, text)) => format!("{name}:{n}: {text}"),
+        None => name.into_owned(),
+    };
+    [size, text]
 }
 
 /// Sync screen title: both directories and the options.
@@ -508,27 +504,18 @@ pub fn sync_title(s: &Sync) -> String {
     )
 }
 
-/// Sync row: left size and date, action, right size and date, path.
-pub fn sync_row(it: &Item, today: jiff::civil::Date) -> String {
+/// Sync row cells: left size and date, action, right size and date, path.
+pub fn sync_cols(it: &Item, today: jiff::civil::Date) -> [String; 6] {
     let side = |e: &Option<Entry>| match e {
-        Some(e) if e.is_dir => {
-            format!("{:>SIZE_WIDTH$} {:DATE_WIDTH$}", "<DIR>", date_of(e, today))
-        }
-        Some(e) => format!(
-            "{:>SIZE_WIDTH$} {:DATE_WIDTH$}",
-            human(e.size),
-            date_of(e, today)
-        ),
-        None => " ".repeat(SIZE_WIDTH + 1 + DATE_WIDTH),
+        Some(e) if e.is_dir => ["<DIR>".to_string(), date_of(e, today)],
+        Some(e) => [human(e.size), date_of(e, today)],
+        None => [String::new(), String::new()],
     };
     let slash = if it.is_dir() { "/" } else { "" };
-    format!(
-        "{} {:^5} {}  {}{slash}",
-        side(&it.left),
-        it.action.symbol(),
-        side(&it.right),
-        it.rel.display()
-    )
+    let [ls, ld] = side(&it.left);
+    let [rs, rd] = side(&it.right);
+    let path = format!("{}{slash}", it.rel.display());
+    [ls, ld, it.action.symbol().to_string(), rs, rd, path]
 }
 
 /// Message of `c` on a sync row: equal, first difference, or the error.
@@ -649,26 +636,29 @@ pub fn kind_rgb(k: TileKind, shade: u8) -> (u8, u8, u8) {
     (d(r), d(g), d(b))
 }
 
-/// File Stats row: value, share, text bar and name.
-pub fn stats_row(st: &Stats, n: &Node) -> String {
-    const BAR_WIDTH: usize = 10;
+/// File Stats row cells.
+pub struct StatsCols {
+    pub marked: bool,
+    pub value: String,
+    /// Share of the browsed directory, 0..=1.
+    pub share: f64,
+    pub name: String,
+}
+
+pub fn stats_cols(st: &Stats, n: &Node) -> StatsCols {
     let value = |n: &Node| if st.by_files { n.files } else { n.size };
     let total = value(st.current()).max(1);
-    let share = value(n) as f64 / total as f64;
-    let filled = ((share * BAR_WIDTH as f64).round() as usize).min(BAR_WIDTH);
-    let bar = "#".repeat(filled) + &" ".repeat(BAR_WIDTH - filled);
-    let shown = if st.by_files {
-        thousands(value(n))
-    } else {
-        human(value(n))
-    };
     let slash = if n.is_dir { "/" } else { "" };
-    let mark = if st.is_marked(n) { '*' } else { ' ' };
-    format!(
-        "{mark}{shown:>11} {:>5.1}% [{bar}] {}{slash}",
-        share * 100.0,
-        n.name.to_string_lossy()
-    )
+    StatsCols {
+        marked: st.is_marked(n),
+        value: if st.by_files {
+            thousands(value(n))
+        } else {
+            human(value(n))
+        },
+        share: value(n) as f64 / total as f64,
+        name: format!("{}{slash}", n.name.to_string_lossy()),
+    }
 }
 
 /// File Stats info popup text; `modified` only when known without a network round trip.
