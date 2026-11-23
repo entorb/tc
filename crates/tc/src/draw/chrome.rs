@@ -126,9 +126,9 @@ pub(super) fn footer(ui: &mut Ui, app: &mut App) {
     });
 }
 
-/// Prompt and command being typed; a click starts typing like `:`.
+/// Prompt and command being typed; only shown in command mode (`:`).
 pub(super) fn cmdline(ui: &mut Ui, app: &mut App) {
-    let r = ui.horizontal(|ui| {
+    ui.horizontal(|ui| {
         let prompt = format!("{}> ", app.panels[app.active].path().display());
         ui.label(RichText::new(prompt).font(mono()).color(MUTED));
         if let Mode::Cmd(l) = &app.mode {
@@ -136,15 +136,6 @@ pub(super) fn cmdline(ui: &mut Ui, app: &mut App) {
         }
         ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
     });
-    // only while idle: a click sense on top of the text box would take its mouse
-    if matches!(app.mode, Mode::Normal)
-        && app.idle()
-        && (r.response.interact(Sense::CLICK))
-            .on_hover_cursor(egui::CursorIcon::Text)
-            .clicked()
-    {
-        app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
-    }
 }
 
 /// Single-line text of `l` with a caret at its cursor.

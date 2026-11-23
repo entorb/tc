@@ -78,7 +78,7 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         }
         if own {
             egui::Panel::bottom("status").show(ui, |ui| status_line(ui, app));
-        } else {
+        } else if matches!(app.mode, Mode::Cmd(_)) {
             egui::Panel::bottom("cmd").show(ui, |ui| cmdline(ui, app));
         }
         egui::CentralPanel::default().show(ui, |ui| match &app.mode {
