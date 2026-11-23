@@ -19,6 +19,26 @@ pub(super) fn with(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 #[test]
+fn set_caret_moves_cursor_by_chars_and_clamps_without_editing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = two_panels(dir.path(), dir.path());
+    key(&mut app, KeyCode::Char(':'));
+    for c in "aé日b".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    let cur = |app: &App| match &app.mode {
+        Mode::Cmd(l) => l.cur,
+        _ => usize::MAX,
+    };
+    app.set_caret(2);
+    assert_eq!(cur(&app), 3);
+    app.set_caret(99);
+    assert_eq!(cur(&app), "aé日b".len());
+    app.set_caret(0);
+    assert_eq!(cur(&app), 0);
+}
+
+#[test]
 fn left_right_navigate_dirs_only() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("d")).unwrap();

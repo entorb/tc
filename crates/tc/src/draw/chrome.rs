@@ -181,7 +181,8 @@ pub(super) fn text_box(ui: &mut Ui, l: &LineEdit, focused: bool) -> egui::Respon
     }
     // without keys, only the mouse moves egui's caret: hand it to the app (see `apply_caret`)
     // `out.state`, not `out.cursor_range`: egui handles the mouse after computing the latter
-    if let Some(c) = out.state.cursor.char_range()
+    if focused
+        && let Some(c) = out.state.cursor.char_range()
         && c.primary.index.0 != caret
     {
         ui.ctx()
@@ -211,18 +212,14 @@ fn caret_id() -> Id {
     Id::unique("tc-text-box-caret")
 }
 
-/// Caret a click put into the focused text box, applied as Home + Right keys like the keyboard would.
+/// Caret a click put into the focused text box, set in the app's field.
 pub(super) fn apply_caret(ctx: &Context, app: &mut App) {
     let Some(n) = ctx.data_mut(|d| d.remove_temp::<usize>(caret_id())) else {
         return;
     };
-    // the help filter has no caret of its own, and Home there scrolls the help
-    if app.help {
-        return;
-    }
-    app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-    for _ in 0..n {
-        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    // the help filter has no caret of its own
+    if !app.help {
+        app.set_caret(n);
     }
 }
 

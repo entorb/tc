@@ -251,7 +251,8 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
                 format!("{t}\n\n[y] Trust and save to known_hosts   [Esc] Cancel"),
             ),
             Some((Prompt::Password(label), l)) => {
-                let masked = LineEdit::from("*".repeat(l.text.chars().count()));
+                let mut masked = LineEdit::from("*".repeat(l.text.chars().count()));
+                masked.cur = l.text[..l.cur].chars().count();
                 edit(label, "", &masked, OK_CANCEL)
             }
             None => text("Connecting", format!("{}\n\n[Esc] Cancel", c.url)),

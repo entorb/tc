@@ -12,6 +12,8 @@ pub enum Input {
 pub fn translate(ev: &Event, alt: bool) -> Option<Input> {
     let key = |code, mods| Some(Input::Key(KeyEvent::new(code, mods)));
     match ev {
+        // an IME commit with control chars (a "\n" from Enter) is not text; Enter arrives as a key
+        Event::Ime(ImeEvent::Commit(t)) if t.chars().any(char::is_control) => None,
         // a focused text box turns the platform IME on: its typing arrives as Commit, not Text
         Event::Text(t) | Event::Ime(ImeEvent::Commit(t)) if !alt => {
             let mut chars = t.chars();
@@ -219,6 +221,7 @@ mod tests {
             code(&commit("é"), false),
             Some((KeyCode::Char('é'), KeyModifiers::NONE))
         );
+        assert!(translate(&commit("\n"), false).is_none());
         assert!(matches!(translate(&commit("日本"), false), Some(Input::Paste(t)) if t == "日本"));
         // macOS German layout: Option+5 types "[" (text wins), Option+b types "∫" (Alt+b wins)
         let bracket = [press(Key::Num5, Modifiers::ALT), Event::Text("[".into())];

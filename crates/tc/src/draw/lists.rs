@@ -19,7 +19,9 @@ use tc_core::stats::treemap::Tile;
 /// Row height and rows per page of a table below a title (page-wise: only the page holding the cursor is built).
 fn page_rows(ui: &Ui) -> (f32, usize) {
     let row_h = ui.text_style_height(&TextStyle::Body) + 6.0;
-    let h = ((ui.available_height() / row_h) as usize)
+    // egui_extras adds the item spacing under every row
+    let step = row_h + ui.spacing().item_spacing.y;
+    let h = ((ui.available_height() / step) as usize)
         .saturating_sub(1)
         .max(1);
     (row_h, h)
@@ -262,6 +264,7 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
         .map(|n| stats_cols(st, n))
         .collect();
     let sel = st.sel;
+    let size = if st.by_files { "Files" } else { "Size" };
     let list = |ui: &mut Ui| {
         let cols = [
             Column::exact(14.0),
@@ -270,7 +273,7 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
             Column::exact(100.0),
             Column::remainder().clip(true),
         ];
-        let titles = ["", "Size", "Share", "", "Name"];
+        let titles = ["", size, "Share", "", "Name"];
         click_table(
             ui,
             &cols,

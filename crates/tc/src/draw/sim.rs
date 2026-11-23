@@ -178,3 +178,41 @@ fn text_box_keys_once_and_click_moves_caret() {
     run(&mut app, &mut look, vec![Event::Text("x".into())]);
     assert!(matches!(&app.mode, Mode::Cmd(l) if l.text == "xabc"));
 }
+
+#[test]
+/// Tab and a click never give egui focus to dialog widgets: the app alone gets Enter / Space.
+fn dialog_buttons_take_no_egui_focus() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    let run = |app: &mut App, look: &mut Look, ev: Vec<Event>| frame(&ctx, app, look, ev);
+    run(
+        &mut app,
+        &mut look,
+        vec![press(Key::ArrowDown, Modifiers::NONE)],
+    );
+    run(&mut app, &mut look, vec![press(Key::F8, Modifiers::NONE)]);
+    assert!(matches!(app.mode, Mode::Confirm(..)), "F8 opens a confirm");
+    let shown = run(&mut app, &mut look, vec![]);
+    run(&mut app, &mut look, vec![press(Key::Tab, Modifiers::NONE)]);
+    assert!(
+        ctx.memory(eframe::egui::Memory::focused).is_none(),
+        "Tab: {shown}"
+    );
+    let p = text_pos(&ctx, &mut app, &mut look, "Delete") + egui::vec2(2.0, 4.0);
+    let button = |pressed| Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    run(&mut app, &mut look, vec![Event::PointerMoved(p)]);
+    run(&mut app, &mut look, vec![button(true)]);
+    run(&mut app, &mut look, vec![button(false)]);
+    assert!(
+        ctx.memory(eframe::egui::Memory::focused).is_none(),
+        "click: {shown}"
+    );
+}

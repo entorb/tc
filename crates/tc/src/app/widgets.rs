@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::hotlist;
 
-use super::{App, Mode};
+use super::{App, Connecting, Mode, link::LinkAsk, xfer::Xfer};
+use tc_remote::Prompt;
 
 /// One line of a form: a text field, a checkbox or a choice (options, selected).
 #[derive(Clone)]
@@ -95,7 +96,66 @@ impl Mode {
     }
 }
 
+fn text_row(rows: &mut [FormRow], focus: usize) -> Option<&mut LineEdit> {
+    match rows.get_mut(focus) {
+        Some(FormRow::Text(_, l)) => Some(l),
+        _ => None,
+    }
+}
+
+impl Mode {
+    /// The text field keys go to now, if any.
+    fn line_mut(&mut self) -> Option<&mut LineEdit> {
+        match self {
+            Mode::Cmd(l)
+            | Mode::Transfer(_, _, l)
+            | Mode::Mkdir(l)
+            | Mode::Link(LinkAsk { line: l, .. })
+            | Mode::NewFile(l)
+            | Mode::HotlistAlias(_, l)
+            | Mode::ConnEdit(_, l)
+            | Mode::Editor(_, l)
+            | Mode::Connecting(Connecting {
+                ask: Some((Prompt::Password(_), l)),
+                ..
+            })
+            | Mode::Xfer(Xfer {
+                rename: Some(l), ..
+            }) => Some(l),
+            Mode::FindForm(f) => text_row(&mut f.rows, f.focus),
+            Mode::SyncForm(f) => text_row(&mut f.rows, f.focus),
+            Mode::MultiRename(f) => text_row(&mut f.rows, f.focus),
+            Mode::Settings(f) => text_row(&mut f.rows, f.focus),
+            Mode::Props(f) => text_row(&mut f.rows, f.focus),
+            Mode::Procs(p) => p
+                .draft
+                .as_mut()
+                .and_then(|d| text_row(&mut d.rows, d.focus)),
+            _ => None,
+        }
+    }
+}
+
 impl App {
+    /// Mouse caret: puts the cursor of the focused text field before char `chars` (clamped).
+    /// No text changes, so no per-key side effects.
+    pub fn set_caret(&mut self, chars: usize) {
+        let line = if let Some(i) = &mut self.input {
+            Some(&mut i.text)
+        } else if let Some(f) = &mut self.search_form {
+            text_row(&mut f.rows, f.focus)
+        } else {
+            self.mode.line_mut()
+        };
+        if let Some(l) = line {
+            l.cur = l
+                .text
+                .char_indices()
+                .nth(chars)
+                .map_or(l.text.len(), |(i, _)| i);
+        }
+    }
+
     /// Rows and focus of the open form: the search dialog over the text, else the form screen.
     fn form_rows_mut(&mut self) -> Option<(&[FormRow], &mut usize)> {
         if let Some(f) = &mut self.search_form {
