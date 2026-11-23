@@ -62,9 +62,7 @@ pub fn delete_all(
             if p.cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
             }
-            if let Ok(mut cur) = p.current.lock() {
-                cur.clone_from(t);
-            }
+            p.current_is(t);
             ops::trash(t)?;
             p.add(c);
             each();

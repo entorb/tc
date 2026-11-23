@@ -35,6 +35,12 @@ impl Progress {
         self.files.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn current_is(&self, path: &Path) {
+        if let Ok(mut cur) = self.current.lock() {
+            path.clone_into(&mut cur);
+        }
+    }
+
     pub(crate) fn dir_done(&self) {
         self.dirs_done.fetch_add(1, Ordering::Relaxed);
     }
@@ -251,27 +257,86 @@ pub fn delete(path: &Path) -> Result<()> {
 }
 
 /// Like [`delete`], counting removed bytes, files and directories into `p`; stops on cancel.
-// shortcut: a directory swapped for a symlink between the type check and read_dir is followed
-// (std remove_dir_all guards this); upgrade to an openat-based walk if that matters
+/// Unix walks by directory handle (`openat` with `O_NOFOLLOW`, `unlinkat`), so a directory
+/// swapped for a symlink mid-delete is never followed.
+#[cfg(unix)]
+pub fn remove(path: &Path, p: &Progress) -> Result<()> {
+    use rustix::fs::{CWD, Mode, OFlags, openat};
+    let meta = fs::symlink_metadata(path).map_err(io_err(path))?;
+    let (Some(name), true) = (path.file_name(), meta.is_dir()) else {
+        // files, symlinks and odd roots (`/`, `..`): one unlink, nothing to descend into
+        if p.cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        p.current_is(path);
+        delete(path)?;
+        p.file_done(meta.len());
+        return Ok(());
+    };
+    let parent = path.parent().filter(|d| !d.as_os_str().is_empty());
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let dir = openat(CWD, parent.unwrap_or(Path::new(".")), flags, Mode::empty())
+        .map_err(|e| io_err(path)(e.into()))?;
+    unix_remove::at(&dir, name, path, p)
+}
+
+#[cfg(unix)]
+mod unix_remove {
+    use super::{Error, Ordering, Progress, Result, io_err};
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat, unlinkat};
+    use std::ffi::{OsStr, OsString};
+    use std::os::fd::{AsFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    /// Remove `name` inside the open directory `dir`; `path` is only for messages.
+    pub(super) fn at(dir: impl AsFd, name: &OsStr, path: &Path, p: &Progress) -> Result<()> {
+        let err = |e: rustix::io::Errno| io_err(path)(e.into());
+        if p.cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let st = statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(err)?;
+        if FileType::from_raw_mode(st.st_mode) != FileType::Directory {
+            p.current_is(path);
+            // a directory swapped in meanwhile makes this fail (EISDIR), never recurse
+            unlinkat(&dir, name, AtFlags::empty()).map_err(err)?;
+            p.file_done(u64::try_from(st.st_size).unwrap_or(0));
+            return Ok(());
+        }
+        let sub = open_dir(&dir, name).map_err(err)?;
+        // names first: removing while reading can skip entries on some file systems
+        let names: Vec<OsString> = Dir::read_from(&sub)
+            .map_err(err)?
+            .map(|e| e.map(|e| OsStr::from_bytes(e.file_name().to_bytes()).to_owned()))
+            .filter(|n| n.as_ref().map_or(true, |n| n != "." && n != ".."))
+            .collect::<rustix::io::Result<_>>()
+            .map_err(err)?;
+        for n in names {
+            at(&sub, &n, &path.join(&n), p)?;
+        }
+        unlinkat(&dir, name, AtFlags::REMOVEDIR).map_err(err)?;
+        p.dir_done();
+        Ok(())
+    }
+
+    /// Fails (ELOOP / ENOTDIR) when `name` is a symlink, even one to a directory.
+    pub(super) fn open_dir(dir: impl AsFd, name: &OsStr) -> rustix::io::Result<OwnedFd> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        openat(dir, name, flags, Mode::empty())
+    }
+}
+
+/// Like [`delete`], counting into `p`: std's `remove_dir_all` guards against symlink swaps, so
+/// progress moves once per path.
+#[cfg(not(unix))]
 pub fn remove(path: &Path, p: &Progress) -> Result<()> {
     if p.cancel.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
-    let meta = fs::symlink_metadata(path).map_err(io_err(path))?;
-    if !meta.is_dir() {
-        if let Ok(mut cur) = p.current.lock() {
-            cur.clear();
-            cur.push(path);
-        }
-        fs::remove_file(path).map_err(io_err(path))?;
-        p.file_done(meta.len());
-        return Ok(());
-    }
-    for item in fs::read_dir(path).map_err(io_err(path))? {
-        remove(&item.map_err(io_err(path))?.path(), p)?;
-    }
-    fs::remove_dir(path).map_err(io_err(path))?;
-    p.dir_done();
+    let c = count(path, &p.cancel);
+    p.current_is(path);
+    delete(path)?;
+    p.add(c);
     Ok(())
 }
 
@@ -924,6 +989,18 @@ mod tests {
         }
         assert_eq!(p.files.load(Ordering::Relaxed), 3);
         assert_eq!(p.dirs_done.load(Ordering::Relaxed), 2);
+    }
+
+    /// The guard against a directory swapped for a symlink mid-delete.
+    #[cfg(unix)]
+    #[test]
+    fn remove_never_opens_a_symlink_as_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("real"), tmp.path().join("swapped")).unwrap();
+        let dir = fs::File::open(tmp.path()).unwrap();
+        assert!(super::unix_remove::open_dir(&dir, OsStr::new("real")).is_ok());
+        assert!(super::unix_remove::open_dir(&dir, OsStr::new("swapped")).is_err());
     }
 
     #[test]

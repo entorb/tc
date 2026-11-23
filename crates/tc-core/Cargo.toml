@@ -28,3 +28,6 @@ lzma-rust2 = { version = "0.25.0", features = ["xz", "encoder"] }
 
 [lints]
 workspace = true
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }

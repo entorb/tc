@@ -195,9 +195,7 @@ impl Side {
             r.remove_dir(&path)?;
             pr.dir_done();
         } else {
-            if let Ok(mut cur) = pr.current.lock() {
-                p.clone_into(&mut cur);
-            }
+            pr.current_is(p);
             r.remove_file(&path)?;
             pr.file_done(e.size);
         }
