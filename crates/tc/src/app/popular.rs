@@ -1,7 +1,7 @@
 //! Popular directories (Ctrl+Z): visited directories ranked by frecency.
 
 use super::{App, Mode, list_nav, list_rows};
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use crate::{KeyCode, KeyEvent};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tc_core::popular;
 
@@ -77,7 +77,7 @@ impl App {
 mod tests {
     use super::super::Mode;
     use super::super::tests::{key, two_panels, type_keys, with};
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use crate::{KeyCode, KeyModifiers};
     use tc_core::popular;
 
     #[test]

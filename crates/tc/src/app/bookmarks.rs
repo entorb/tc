@@ -1,7 +1,7 @@
 //! Hotlist (Ctrl+D) of bookmarked directories.
 
 use super::{App, Filter, Mode, REMOTE, edit_key, list_nav, list_rows};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
 use tc_core::hotlist;
 
@@ -125,7 +125,7 @@ mod tests {
 
     use super::super::{App, ListRow, Mode};
 
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
 
     use tc_core::panel::Panel;
 

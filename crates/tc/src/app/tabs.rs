@@ -1,14 +1,9 @@
 //! Panel tabs and mouse input on the panels.
 
 use super::{App, Mode};
-use crate::fmt::{DATE_WIDTH, SIZE_WIDTH};
-use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
-use ratatui::widgets::ListState;
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::mem;
 use std::path::Path;
-use std::time::{Duration, Instant};
 use tc_core::archive::Format;
 use tc_core::panel::SortKey;
 
@@ -23,7 +18,6 @@ impl App {
                 Ok(p) => {
                     bg.push_back(mem::replace(&mut self.panels[side], p));
                     self.tab[side] += 1;
-                    self.lists[side] = ListState::default();
                     return;
                 }
                 Err(e) => {
@@ -56,7 +50,6 @@ impl App {
         } else if code != KeyCode::Char('w') {
             return;
         }
-        self.lists[side] = ListState::default();
         // the directory may have changed while the tab was hidden
         if let Err(e) = self.panels[side].reload() {
             self.mode = Mode::Message(e.to_string());
@@ -99,72 +92,9 @@ impl App {
         }
     }
 
-    /// Wheel / touchpad scroll in viewer, editor and active file list (editor: moves the cursor, the window follows).
-    pub fn on_mouse(&mut self, ev: MouseEvent) {
-        if self.help {
-            if ev.kind == MouseEventKind::Down(MouseButton::Left)
-                && self.help_area.contains((ev.column, ev.row).into())
-            {
-                let row = usize::from(ev.row - self.help_area.y);
-                self.help_click(self.help_scroll + row);
-            }
-            return;
-        }
-        // process info popup: a click outside it closes it, inside does nothing
-        if let Mode::Procs(p) = &mut self.mode
-            && p.info.is_some()
-            && ev.kind == MouseEventKind::Down(MouseButton::Left)
-        {
-            if !self.proc_info_area.contains((ev.column, ev.row).into()) {
-                p.info = None;
-            }
-            return;
-        }
-        if ev.kind == MouseEventKind::Down(MouseButton::Left)
-            && (self.footer_click(ev)
-                || self.stats_click(ev.column, ev.row)
-                || self.form_mouse(ev.column, ev.row))
-        {
-            return;
-        }
-        if let MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) =
-            ev.kind
-            && self.input.is_none()
-            && self.search_form.is_none()
-            && self.replacing.is_none()
-            && let Mode::Edit {
-                editor,
-                error: None,
-            } = &mut self.mode
-        {
-            let a = self.edit_text;
-            if a.contains((ev.column, ev.row).into()) {
-                let extend = ev.kind != MouseEventKind::Down(MouseButton::Left)
-                    || ev.modifiers.contains(KeyModifiers::SHIFT);
-                editor.click(
-                    usize::from(ev.row - a.y),
-                    usize::from(ev.column - a.x),
-                    usize::from(a.width),
-                    extend,
-                );
-            }
-            return;
-        }
-        if ev.kind == MouseEventKind::Down(MouseButton::Left) {
-            if self.input.is_none()
-                && matches!(self.mode, Mode::Normal | Mode::Menu(..))
-                && self.menu_click(ev)
-            {
-                return;
-            }
-            return self.click(ev);
-        }
-        let lines = match ev.kind {
-            MouseEventKind::ScrollUp => -3,
-            MouseEventKind::ScrollDown => 3,
-            _ => return,
-        };
-        if self.input.is_some() {
+    /// Wheel / touchpad scroll by `lines` in viewer, editor and process list (editor: moves the cursor, the window follows).
+    pub fn on_wheel(&mut self, lines: isize) {
+        if self.help || self.input.is_some() {
             return;
         }
         match &mut self.mode {
@@ -181,61 +111,22 @@ impl App {
                 let last = p.rows.len().saturating_sub(1);
                 p.sel = p.sel.saturating_add_signed(lines).min(last);
             }
-            // the panel under the pointer scrolls, the active panel stays
-            Mode::Normal => {
-                let at = (ev.column, ev.row).into();
-                let i = (0..2).find(|&i| self.areas[i].contains(at));
-                self.panels[i.unwrap_or(self.active)].move_cursor(lines);
-            }
             _ => {}
         }
     }
 
-    /// Left click on a file row moves the cursor there (and activates the panel); with Shift it selects the range from the old cursor.
-    pub(super) fn click(&mut self, ev: MouseEvent) {
-        if self.input.is_some() || !matches!(self.mode, Mode::Normal) {
-            return;
-        }
-        let Some(i) = (0..2).find(|&i| self.areas[i].contains((ev.column, ev.row).into())) else {
-            return;
-        };
-        let area = self.areas[i];
-        if ev.row == area.y {
-            // title row: columns of the size and date fields sort by them
-            let col = usize::from(ev.column - area.x).saturating_sub(1);
-            let w = usize::from(area.width).saturating_sub(2);
-            let key = if col >= w.saturating_sub(DATE_WIDTH) {
-                SortKey::Date
-            } else if col >= w.saturating_sub(DATE_WIDTH + 1 + SIZE_WIDTH) {
-                SortKey::Size
-            } else {
-                SortKey::Name
-            };
-            return self.sort_by(i, key);
-        }
-        // first row is the border
-        let Some(row) = usize::from(ev.row - area.y).checked_sub(1) else {
-            return;
-        };
-        let idx = self.lists[i].offset() + row;
-        if idx >= self.panels[i].entries().len()
-            || row >= usize::from(area.height.saturating_sub(2))
+    /// Press (or drag, `extend`) on the editor text at `row`, `col` of a `width` columns wide text area.
+    pub fn editor_click(&mut self, row: usize, col: usize, width: usize, extend: bool) {
+        if self.input.is_none()
+            && self.search_form.is_none()
+            && self.replacing.is_none()
+            && let Mode::Edit {
+                editor,
+                error: None,
+            } = &mut self.mode
         {
-            return;
+            editor.click(row, col, width, extend);
         }
-        let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
-        let double = !shift && self.double_click(ev.column, ev.row);
-        self.click_entry(i, idx, shift, double);
-    }
-
-    /// Registers a left click; true if it is the second at the same cell within 400 ms.
-    pub(super) fn double_click(&mut self, col: u16, row: u16) -> bool {
-        let now = Instant::now();
-        let double = self.last_click.is_some_and(|(t, c, r)| {
-            (c, r) == (col, row) && now.duration_since(t) < Duration::from_millis(400)
-        });
-        self.last_click = (!double).then_some((now, col, row));
-        double
     }
 
     /// Sort panel `i` by `key` (same key again reverses) and make it active.
@@ -275,10 +166,7 @@ mod tests {
 
     use super::super::App;
 
-    use ratatui::crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
-    use ratatui::layout::Rect;
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
 
     use tc_core::panel::{Panel, SortKey};
 
@@ -324,7 +212,6 @@ mod tests {
         let (l, r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         std::fs::write(l.path().join(".h"), "").unwrap();
         let mut app = two_panels(l.path(), r.path());
-        app.areas = [Rect::new(0, 0, 40, 10), Rect::new(40, 0, 40, 10)];
         with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
         assert_eq!(app.panels[0].path(), r.path());
         with(&mut app, KeyCode::Char('='), KeyModifiers::ALT); // right gets left's dir
@@ -332,12 +219,7 @@ mod tests {
         with(&mut app, KeyCode::Char('\\'), KeyModifiers::CONTROL);
         settle(&mut app); // listing may take over the 50 ms wait on a loaded machine
         assert!(app.panels[0].path().parent().is_none());
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 40 + 20,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        });
+        app.sort_by(1, SortKey::Size); // click on the size column title
         assert_eq!(app.panels[1].sort().0, SortKey::Size);
         with(&mut app, KeyCode::F(5), KeyModifiers::CONTROL); // active panel is 1 now: by date
         assert_eq!(app.panels[1].sort().0, SortKey::Date);
@@ -353,48 +235,16 @@ mod tests {
             std::fs::write(dir.join(n), "").unwrap();
         }
         let mut app = App::new(Panel::open(&dir).unwrap(), Panel::open(&dir).unwrap());
-        app.areas = [Rect::new(0, 0, 40, 10), Rect::new(40, 0, 40, 10)];
         let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
         app.on_key(shift(KeyCode::Down)); // ".." is not selectable
         app.on_key(shift(KeyCode::Down));
         assert_eq!(app.panels[0].targets().len(), 1);
-        let click = |app: &mut App, column, row, modifiers| {
-            app.on_mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column,
-                row,
-                modifiers,
-            })
-        };
-        click(&mut app, 45, 3, KeyModifiers::NONE); // row 3 = entry 2 ("b") in right panel
+        app.click_entry(1, 2, false, false); // entry 2 ("b") in right panel
         assert_eq!((app.active, app.panels[1].cursor()), (1, 2));
-        click(&mut app, 45, 5, KeyModifiers::SHIFT); // entries 2..=4
+        app.click_entry(1, 4, true, false); // entries 2..=4
         assert_eq!(app.panels[1].targets().len(), 3);
-        click(&mut app, 45, 1, KeyModifiers::NONE); // ".." twice quickly: enters the parent
         let before = app.panels[1].path().to_path_buf();
-        click(&mut app, 45, 1, KeyModifiers::NONE);
+        app.click_entry(1, 0, false, true); // double click on "..": enters the parent
         assert_ne!(app.panels[1].path(), before);
-    }
-
-    #[test]
-    fn wheel_moves_the_cursor_of_the_panel_under_the_pointer_by_3() {
-        let dir = tempfile::tempdir().unwrap();
-        for n in 0..10 {
-            std::fs::write(dir.path().join(format!("f{n}")), "x").unwrap();
-        }
-        let mut app = two_panels(dir.path(), dir.path());
-        app.areas = [Rect::new(0, 0, 10, 10), Rect::new(10, 0, 10, 10)];
-        let wheel = |app: &mut App, kind, column| {
-            app.on_mouse(MouseEvent {
-                kind,
-                column,
-                row: 2,
-                modifiers: KeyModifiers::NONE,
-            })
-        };
-        wheel(&mut app, MouseEventKind::ScrollDown, 12);
-        assert_eq!((app.panels[0].cursor(), app.panels[1].cursor()), (0, 3));
-        wheel(&mut app, MouseEventKind::ScrollUp, 12);
-        assert_eq!(app.panels[1].cursor(), 0);
     }
 }

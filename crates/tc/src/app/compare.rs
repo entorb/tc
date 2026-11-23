@@ -1,7 +1,7 @@
 //! Compare panels (Ctrl+Y): choose what to select, repeat the last choice with Enter.
 
 use super::{App, Mode};
-use ratatui::crossterm::event::KeyCode;
+use crate::KeyCode;
 use tc_core::panel::CompareKind;
 
 impl App {

@@ -10,9 +10,7 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Rect;
-use ratatui::widgets::ListState;
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
 use tc_core::archive::{Archive, Format, TempDir};
 use tc_core::cmdline::{self, LineEdit};
@@ -47,8 +45,7 @@ pub use editor::{Ask, Input, SearchForm, Step};
 pub use file_stats::Stats;
 pub use find_files::{FindForm, Found, FoundSort};
 pub use menu::{
-    FOOTER, MENUS, MenuItem, PROCS_FOOTER, STATS_FOOTER, TOOLBAR, ToolItem, help_action, menu_drop,
-    menu_x, zoom_step,
+    FOOTER, MENUS, MenuItem, PROCS_FOOTER, STATS_FOOTER, TOOLBAR, ToolItem, help_action, zoom_step,
 };
 pub use multi_rename::RenameForm;
 use multi_rename::{RenameBatch, rename_rows};
@@ -198,21 +195,6 @@ pub struct App {
     pub tabs: [VecDeque<Panel>; 2],
     /// Position of the visible tab per side, for the title.
     pub tab: [usize; 2],
-    /// Scroll state per panel, kept across frames so the list does not jump.
-    pub lists: [ListState; 2],
-    /// Screen area of each panel, set by the UI, used for mouse clicks.
-    pub areas: [Rect; 2],
-    /// Screen area of the footer bar, set by the UI, used for mouse clicks.
-    pub footer: Rect,
-    /// Screen area of the help text (set by the CLI UI), for clicks.
-    pub help_area: Rect,
-    /// Outer area of the process info popup, for clicks outside it.
-    pub proc_info_area: Rect,
-    /// Form rows on screen (set by the CLI UI) and the first row shown there, for clicks.
-    pub form_area: Rect,
-    pub form_scroll: usize,
-    /// Inner area of the File Stats treemap on screen (empty when hidden), for mouse clicks.
-    pub stats_map: Rect,
     pub active: usize,
     pub mode: Mode,
     pub quit: bool,
@@ -245,8 +227,6 @@ pub struct App {
     search_regex: bool,
     /// Search dialog of the viewer / editor (F3, F7, Ctrl+F), open over the text.
     pub search_form: Option<SearchForm>,
-    /// Text area of the editor, set by the UI, used for mouse clicks.
-    pub edit_text: Rect,
     /// Text for the main loop to put on the system clipboard (OSC 52).
     pub copied: Option<String>,
     /// Files copied or cut with Ctrl+C / Ctrl+X, until pasted (a cut is pasted once).
@@ -300,8 +280,6 @@ pub struct App {
     pub popular_file: Option<PathBuf>,
     /// Ctrl+K: navigation of the active panel is repeated in the other.
     pub sync_browse: bool,
-    /// Time and cell of the last left click, to detect double clicks (terminals send none).
-    last_click: Option<(Instant, u16, u16)>,
     /// Command history (oldest first) and the file it is saved to.
     pub history: Vec<String>,
     pub history_file: Option<PathBuf>,
@@ -335,14 +313,6 @@ impl App {
             free: Default::default(),
             tabs: Default::default(),
             tab: [0; 2],
-            lists: Default::default(),
-            areas: Default::default(),
-            footer: Rect::default(),
-            help_area: Rect::default(),
-            proc_info_area: Rect::default(),
-            form_area: Rect::default(),
-            form_scroll: 0,
-            stats_map: Rect::default(),
             active: 0,
             mode: Mode::Normal,
             quit: false,
@@ -361,7 +331,6 @@ impl App {
             exact: false,
             search_regex: true,
             search_form: None,
-            edit_text: Rect::default(),
             copied: None,
             file_clip: None,
             last_host: Vec::new(),
@@ -392,7 +361,6 @@ impl App {
             popular: Vec::new(),
             popular_file: None,
             sync_browse: false,
-            last_click: None,
             history: Vec::new(),
             history_file: None,
             run: None,
@@ -737,7 +705,6 @@ impl App {
                 self.panels.swap(0, 1);
                 self.tabs.swap(0, 1);
                 self.tab.swap(0, 1);
-                self.lists.swap(0, 1);
                 if let Some(job) = &mut self.dir_job {
                     job.0 = 1 - job.0;
                 }
@@ -748,8 +715,7 @@ impl App {
                     self.mode = Mode::Message(e.to_string());
                 }
             }
-            // terminals send Ctrl+\ as 0x1c, which crossterm reports as '4'
-            KeyCode::Char('\\' | '4') => {
+            KeyCode::Char('\\') => {
                 let panel = &mut self.panels[self.active];
                 let root = panel.path().ancestors().last().map(Path::to_owned);
                 let result = match root {

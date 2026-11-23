@@ -4,7 +4,7 @@
 #[cfg(unix)]
 use super::form_text;
 use super::{App, Done, FormRow, Mode, form_checked};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 #[cfg(unix)]
 use tc_core::cmdline::LineEdit;

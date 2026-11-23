@@ -4,7 +4,7 @@ use super::{
     App, Filter, FormRow, Mode, PresetKind, form_checked, form_text, paste_line, preset_key,
     rows_from_line, rows_to_line,
 };
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
@@ -592,7 +592,7 @@ mod tests {
 
     use super::super::{App, Filter, Mode};
     use crate::fmt;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
 
     use std::ffi::OsString;
     use std::path::Path;

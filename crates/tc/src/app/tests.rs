@@ -3,8 +3,8 @@ use super::menu::{
     SHIFT_FOOTER, SYNC_FOOTER, VIEW_FOOTER,
 };
 use super::*;
+use crate::KeyModifiers;
 use crate::fmt;
-use ratatui::crossterm::event::KeyModifiers;
 
 pub(super) fn key(app: &mut App, code: KeyCode) {
     app.on_key(KeyEvent::new(code, KeyModifiers::NONE));

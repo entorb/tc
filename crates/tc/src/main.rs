@@ -1,4 +1,4 @@
-//! Torben's Commander desktop app: the `tc-cli` app logic drawn with egui.
+//! Torben's Commander desktop app: `tc::app` drawn with egui.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod draw;
@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use eframe::egui::{self, ViewportCommand};
+use tc::KeyModifiers;
 use tc::app::{App, Mode};
-use tc::{KeyModifiers, MouseEvent, MouseEventKind};
 use tc_core::panel::Panel;
 use tc_core::view::Viewer;
 
@@ -143,16 +143,7 @@ impl Gui {
         while self.wheel.abs() >= WHEEL_STEP {
             let up = self.wheel > 0.0;
             self.wheel -= WHEEL_STEP.copysign(self.wheel);
-            self.app.on_mouse(MouseEvent {
-                kind: if up {
-                    MouseEventKind::ScrollUp
-                } else {
-                    MouseEventKind::ScrollDown
-                },
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            });
+            self.app.on_wheel(if up { -3 } else { 3 });
         }
     }
 

@@ -1,7 +1,7 @@
 //! Copy, move, delete and Ctrl+C / Ctrl+X / Ctrl+V of files: workers, conflicts, progress.
 
 use super::{App, Done, Mode, Op, READ_ONLY, edit_key};
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use crate::{KeyCode, KeyEvent};
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::mem;
@@ -505,7 +505,7 @@ mod tests {
     use super::super::xfer::{FileClip, delete_text};
     use super::super::{App, Mode, Op};
 
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use crate::{KeyCode, KeyModifiers};
 
     use std::ffi::OsStr;
 

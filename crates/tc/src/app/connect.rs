@@ -1,7 +1,7 @@
 //! Remote sessions: connect (Ctrl+N list, host key and password prompts), fetch for the editor, disconnect.
 
 use super::{App, Done, Filter, Mode, VIEW_CAP, edit_key, list_nav, list_rows};
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use crate::{KeyCode, KeyEvent};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -225,7 +225,7 @@ mod tests {
 
     use super::super::Mode;
 
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use crate::{KeyCode, KeyModifiers};
 
     use std::path::PathBuf;
     use std::sync::Arc;

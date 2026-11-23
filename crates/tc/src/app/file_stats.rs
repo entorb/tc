@@ -2,7 +2,7 @@
 
 use super::{App, Filter, Mode, REMOTE, delete_question, delete_text};
 use crate::fmt;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -320,30 +320,6 @@ pub(super) fn spawn_scan(
 }
 
 impl App {
-    /// Left click on the File Stats treemap: cursor to the tile's entry, double click opens a
-    /// directory. True if the click hit the chart.
-    pub(super) fn stats_click(&mut self, col: u16, row: u16) -> bool {
-        let area = self.stats_map;
-        let Mode::Stats(st) = &mut self.mode else {
-            return false;
-        };
-        if !area.contains((col, row).into()) {
-            return false;
-        }
-        if st.confirm.is_some() || st.scanning() {
-            return true;
-        }
-        let (x, y) = (f32::from(col - area.x) + 0.5, f32::from(row - area.y) + 0.5);
-        let Some(r) = st.map_row(x, y) else {
-            return true;
-        };
-        st.sel = r;
-        if self.double_click(col, row) {
-            self.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        }
-        true
-    }
-
     /// Ctrl+Space: File Stats of the active panel's directory.
     pub(super) fn spawn_stats(&mut self) {
         let panel = &self.panels[self.active];
@@ -564,7 +540,7 @@ mod tests {
 
     use super::super::{App, Mode};
 
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use crate::{KeyCode, KeyModifiers};
 
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};

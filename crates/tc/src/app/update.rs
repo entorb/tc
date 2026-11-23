@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, FormRow, Mode, form_checked, zoom_step};
 
@@ -164,10 +164,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
-    use ratatui::layout::Rect;
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
     use tc_core::panel::Panel;
 
     use super::{App, CHECK_DAILY, FormRow, Mode, due, form_checked, is_newer, parse_version};
@@ -217,24 +214,14 @@ mod tests {
     }
 
     #[test]
-    fn click_toggles_checkbox_cli_and_gui() {
+    fn click_toggles_checkbox_and_picks_choice() {
         let mut a = app();
         a.open_settings();
-        // GUI reports the row
         a.form_click(0);
         assert!(matches!(&a.mode, Mode::Settings(f) if !form_checked(&f.rows, CHECK_DAILY)));
         a.form_click(5); // past the rows: ignored
-        // CLI: click inside the drawn rows
-        (a.form_area, a.form_scroll) = (Rect::new(10, 5, 40, 3), 0);
-        let click = |row| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 12,
-            row,
-            modifiers: KeyModifiers::NONE,
-        };
-        a.on_mouse(click(5));
+        a.form_click(0);
         assert!(matches!(&a.mode, Mode::Settings(f) if form_checked(&f.rows, CHECK_DAILY)));
-        a.on_mouse(click(9)); // outside
         // GUI dropdown picks an option, forwards and backwards
         let choice = |a: &App| match &a.mode {
             Mode::Settings(f) => match f.rows[1] {

@@ -5,9 +5,8 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::KeyCode;
 use anyhow::Context;
-use ratatui::crossterm::event::KeyCode;
-use ratatui::widgets::ListState;
 use tc_core::panel::Panel;
 use tc_core::{cmdline, hotlist, popular, settings};
 
@@ -159,7 +158,6 @@ impl App {
             self.panels[side] = shown;
             self.tabs[side] = list;
             self.tab[side] = tab;
-            self.lists[side] = ListState::default();
         }
         if let Some(a) = num("active").filter(|&a| a < 2) {
             self.active = a;
@@ -206,7 +204,7 @@ impl App {
 mod tests {
     use std::path::PathBuf;
 
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
     use tc_core::panel::Panel;
     use tc_core::settings;
 
@@ -295,9 +293,9 @@ mod tests {
         settings::save(&dir.join("settings"), &[]).unwrap();
         std::fs::write(dir.join("mine.txt"), "keep").unwrap();
         a.ask_reset_config();
-        a.on_key(KeyCode::Char('x').into()); // not an answer: still asking
+        a.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)); // not an answer: still asking
         assert!(matches!(a.mode, Mode::ResetConfig(_)));
-        a.on_key(KeyCode::Char('y').into());
+        a.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(matches!(&a.mode, Mode::Message(m) if m.starts_with("Deleted 2")));
         assert!(dir.join("mine.txt").exists() && !dir.join("settings").exists());
         assert!(a.config_dir.is_none());
@@ -316,7 +314,7 @@ mod tests {
             KeyCode::Enter,
             KeyCode::F(7),
         ] {
-            a.on_key(k.into());
+            a.on_key(KeyEvent::new(k, KeyModifiers::NONE));
         }
         a.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
         let form = a.search_form.as_ref().unwrap();

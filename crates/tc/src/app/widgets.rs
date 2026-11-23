@@ -1,6 +1,6 @@
 //! Shared dialog pieces: form rows, line editing, `/` list filter, saved presets.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -130,15 +130,6 @@ impl App {
         for _ in 0..steps {
             self.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         }
-    }
-
-    /// Terminal click inside the form rows drawn at `form_area` (first row shown: `form_scroll`).
-    pub(super) fn form_mouse(&mut self, col: u16, row: u16) -> bool {
-        if self.form_rows_mut().is_none() || !self.form_area.contains((col, row).into()) {
-            return false;
-        }
-        self.form_click(self.form_scroll + usize::from(row - self.form_area.y));
-        true
     }
 }
 

@@ -1,7 +1,7 @@
 //! Symbolic and hard links (F9 → File): the cursor entry linked into the other panel's directory.
 
 use super::{App, Mode, edit_key};
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use crate::{KeyCode, KeyEvent};
 use std::path::{Path, PathBuf};
 use tc_core::cmdline::LineEdit;
 use tc_core::ops;
@@ -91,7 +91,7 @@ impl App {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use ratatui::crossterm::event::KeyModifiers;
+    use crate::KeyModifiers;
     use tc_core::panel::Panel;
 
     #[test]

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread::{self, JoinHandle};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
 use tc_core::sync::{Action, Item};
 use tc_core::vfs::Side;
@@ -501,7 +501,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{App, Mode};
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
     use std::fs;
     use std::time::Duration;
     use tc_core::panel::Panel;

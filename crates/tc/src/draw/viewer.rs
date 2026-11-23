@@ -7,7 +7,6 @@ use eframe::egui::{
 };
 use tc::app::{App, Mode};
 use tc::fmt::{self, Mark, editor_info};
-use tc::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind, Rect};
 use tc_core::syntax::{self, Kind};
 /// Monospace cell size.
 pub(super) fn cell(ui: &Ui) -> Vec2 {
@@ -170,32 +169,25 @@ pub(super) fn draw_editor(ui: &mut Ui, app: &mut App) {
     }
     ui.label(RichText::new(editor_info(editor, &note)).color(MUTED));
     app.page = rows;
-    app.edit_text = Rect::new(gutter as u16, 0, width as u16, rows as u16);
-    if let Some(ev) = editor_mouse(ui, &r, c) {
-        app.on_mouse(ev);
+    if let Some((row, col, extend)) = editor_mouse(ui, &r, c)
+        && row < rows
+        && let Some(col) = col.checked_sub(gutter).filter(|&x| x < width)
+    {
+        app.editor_click(row, col, width, extend);
     }
 }
 
-/// Press or drag on the editor text as a terminal mouse event in cell units (see `App::edit_text`).
-fn editor_mouse(ui: &Ui, r: &Response, c: Vec2) -> Option<MouseEvent> {
+/// Press or drag on the editor text: cell row and column (gutter included), and whether it extends the selection.
+fn editor_mouse(ui: &Ui, r: &Response, c: Vec2) -> Option<(usize, usize, bool)> {
     let pressed = r.hovered() && ui.input(|i| i.pointer.primary_pressed());
-    let kind = if pressed {
-        MouseEventKind::Down(MouseButton::Left)
-    } else if r.dragged() {
-        MouseEventKind::Drag(MouseButton::Left)
-    } else {
+    if !pressed && !r.dragged() {
         return None;
-    };
+    }
     let pos = r.interact_pointer_pos().or(r.hover_pos())? - r.rect.min;
-    let shift = ui.input(|i| i.modifiers.shift);
-    Some(MouseEvent {
-        kind,
-        column: (pos.x / c.x).max(0.0) as u16,
-        row: (pos.y / c.y).max(0.0) as u16,
-        modifiers: if shift {
-            KeyModifiers::SHIFT
-        } else {
-            KeyModifiers::NONE
-        },
-    })
+    let extend = !pressed || ui.input(|i| i.modifiers.shift);
+    Some((
+        (pos.y / c.y).max(0.0) as usize,
+        (pos.x / c.x).max(0.0) as usize,
+        extend,
+    ))
 }

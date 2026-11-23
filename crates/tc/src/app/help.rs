@@ -2,7 +2,7 @@
 
 use super::{App, Mode, help_action};
 use crate::fmt;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 
 impl App {
     /// F1 opens the help here: the footer screens plus lists and the conflict question.
@@ -134,7 +134,7 @@ mod tests {
 
     use super::super::{App, Mode};
     use crate::fmt;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
 
     use tc_core::panel::Panel;
 

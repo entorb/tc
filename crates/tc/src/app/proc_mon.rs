@@ -2,7 +2,7 @@
 
 use super::widgets::form_text;
 use super::{FormRow, edit_key};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -292,7 +292,7 @@ mod tests {
     use super::super::{App, Mode};
     use crate::fmt;
 
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use crate::{KeyCode, KeyModifiers};
 
     use tc_core::procs::ProcSort;
 

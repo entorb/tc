@@ -1,8 +1,7 @@
 //! F-key footers, F9 menu bar and toolbar: tables and their clicks.
 
 use super::{App, Mode};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
-use ratatui::layout::Rect;
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Footer bar items of one screen: label, key sent when clicked.
 pub(super) type Footer = [(&'static str, KeyCode, KeyModifiers)];
@@ -187,22 +186,6 @@ pub fn zoom_step(zoom: f32, dir: i8) -> f32 {
     ((zoom * 10.0).round() + f32::from(dir)).clamp(5.0, 30.0) / 10.0
 }
 
-pub(super) fn menu_title_width(group: usize) -> u16 {
-    MENUS[group].0.len() as u16 + 2
-}
-
-/// Column of a menu title in the bar (shared by the UI and mouse clicks).
-pub fn menu_x(group: usize) -> u16 {
-    (0..group).map(menu_title_width).sum()
-}
-
-/// Screen area of an open menu group (below the bar, with border).
-pub fn menu_drop(group: usize) -> Rect {
-    let items = MENUS[group].1;
-    let w = items.iter().map(|i| i.0.len()).max().unwrap_or(0) as u16 + 4;
-    Rect::new(menu_x(group), 1, w, items.len() as u16 + 2)
-}
-
 /// Key a main-help line describes (its first column equals a [`MENUS`] key), if any.
 pub fn help_action(line: &str) -> Option<(KeyCode, KeyModifiers)> {
     let col = line.split("  ").next()?.trim();
@@ -291,23 +274,6 @@ impl App {
                 ))
     }
 
-    /// Click on a footer label sends its key; only where the screen takes keys that way.
-    pub(super) fn footer_click(&mut self, ev: MouseEvent) -> bool {
-        if !self.footer.contains((ev.column, ev.row).into()) || !self.footer_active() {
-            return false;
-        }
-        let mut x = self.footer.x;
-        for &(label, code, mods) in self.footer_keys() {
-            let end = x + label.len() as u16;
-            if (x..end).contains(&ev.column) {
-                self.on_key(KeyEvent::new(code, mods));
-                break;
-            }
-            x = end + 2;
-        }
-        true
-    }
-
     /// F-key bar of the current screen.
     pub fn footer_keys(&self) -> &'static Footer {
         match &self.mode {
@@ -361,52 +327,16 @@ impl App {
         let (_, c, m) = MENUS[group].1[sel];
         self.on_key(KeyEvent::new(c, m));
     }
-
-    /// Left click while the menu bar is shown (row 0) or open. True if the click was used.
-    pub(super) fn menu_click(&mut self, ev: MouseEvent) -> bool {
-        let (col, row) = (ev.column, ev.row);
-        let open = if let Mode::Menu(g, _) = self.mode {
-            Some(g)
-        } else {
-            None
-        };
-        if row == 0
-            && let Some(g) = (0..MENUS.len()).find(|&g| {
-                let x = menu_x(g);
-                (x..x + menu_title_width(g)).contains(&col)
-            })
-        {
-            self.mode = if open == Some(g) {
-                Mode::Normal
-            } else {
-                Mode::Menu(g, 0)
-            };
-            return true;
-        }
-        let Some(g) = open else { return false };
-        let r = menu_drop(g);
-        if r.contains((col, row).into()) {
-            // rows inside the border are entries
-            if row > r.y && row + 1 < r.y + r.height && col > r.x && col + 1 < r.x + r.width {
-                self.menu_run(g, usize::from(row - r.y - 1));
-            }
-        } else {
-            self.mode = Mode::Normal;
-        }
-        true
-    }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use super::super::menu::{FIND_FORM_FOOTER, FOOTER, MENUS, N, menu_x};
+    use super::super::menu::{FIND_FORM_FOOTER, FOOTER, MENUS, N};
 
     use super::super::{App, Mode};
 
-    use ratatui::crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
 
     use tc_core::panel::Panel;
 
@@ -442,18 +372,5 @@ mod tests {
         }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::Mkdir(_)));
-
-        // click the "Go" title, then its first entry (home directory)
-        app.mode = Mode::Normal;
-        let click = |col, row| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: col,
-            row,
-            modifiers: KeyModifiers::NONE,
-        };
-        app.on_mouse(click(menu_x(1), 0));
-        assert!(matches!(app.mode, Mode::Menu(1, _)));
-        app.on_mouse(click(menu_x(1) + 2, 2));
-        assert!(matches!(app.mode, Mode::Normal));
     }
 }

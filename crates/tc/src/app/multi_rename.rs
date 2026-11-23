@@ -5,7 +5,7 @@ use super::{
     rows_from_line, rows_to_line,
 };
 use crate::fmt;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, Write};
@@ -428,7 +428,7 @@ mod tests {
 
     use super::super::{App, Mode, Op};
 
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use crate::{KeyCode, KeyModifiers};
 
     use super::super::tests::{key, two_panels, type_keys, wait, with};
 

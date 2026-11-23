@@ -1,7 +1,7 @@
 //! Viewer (F3) and editor (F4): keys, find / replace / goto prompts, load and save.
 
 use super::{App, Done, FormRow, Mode, edit_key};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::thread;
 use tc_core::cmdline::{self, LineEdit};
@@ -748,7 +748,7 @@ mod tests {
 
     use super::super::{App, Filter, Mode, Step};
 
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::{KeyCode, KeyEvent, KeyModifiers};
 
     use std::sync::Arc;
     use std::sync::mpsc;
