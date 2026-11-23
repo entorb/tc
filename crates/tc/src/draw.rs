@@ -14,7 +14,7 @@ mod dialogs;
 mod help;
 use self::dialogs::overlays;
 mod chrome;
-use self::chrome::{cmdline, footer, menu_bar, toolbar};
+use self::chrome::{apply_caret, cmdline, footer, menu_bar, toolbar};
 
 const ACCENT: Color32 = Color32::from_rgb(90, 160, 255);
 const MARK: Color32 = Color32::from_rgb(255, 200, 60);
@@ -95,4 +95,5 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         });
     }
     overlays(ui.ctx(), app);
+    apply_caret(ui.ctx(), app);
 }

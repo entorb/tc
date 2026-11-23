@@ -1,6 +1,6 @@
 //! egui input events as the terminal key events `App` handles, so both front ends share all key logic.
 
-use eframe::egui::{Event, Key, Modifiers};
+use eframe::egui::{Event, ImeEvent, Key, Modifiers};
 use tc::{KeyCode, KeyEvent, KeyModifiers};
 
 pub enum Input {
@@ -12,7 +12,8 @@ pub enum Input {
 pub fn translate(ev: &Event, alt: bool) -> Option<Input> {
     let key = |code, mods| Some(Input::Key(KeyEvent::new(code, mods)));
     match ev {
-        Event::Text(t) if !alt => {
+        // a focused text box turns the platform IME on: its typing arrives as Commit, not Text
+        Event::Text(t) | Event::Ime(ImeEvent::Commit(t)) if !alt => {
             let mut chars = t.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) => key(KeyCode::Char(c), KeyModifiers::NONE),
@@ -140,7 +141,8 @@ fn char_key(k: Key, mods: KeyModifiers) -> Option<KeyCode> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Event, Input, Key, KeyCode, KeyModifiers, Modifiers, is_alt_char, option_typed, translate,
+        Event, ImeEvent, Input, Key, KeyCode, KeyModifiers, Modifiers, is_alt_char, option_typed,
+        translate,
     };
 
     fn press(key: Key, modifiers: Modifiers) -> Event {
@@ -212,6 +214,12 @@ mod tests {
             assert_eq!(code(&ev, false), want, "{ev:?}");
         }
         assert_eq!(code(&Event::Text("ç".into()), true), None);
+        let commit = |t: &str| Event::Ime(ImeEvent::Commit(t.into()));
+        assert_eq!(
+            code(&commit("é"), false),
+            Some((KeyCode::Char('é'), KeyModifiers::NONE))
+        );
+        assert!(matches!(translate(&commit("日本"), false), Some(Input::Paste(t)) if t == "日本"));
         // macOS German layout: Option+5 types "[" (text wins), Option+b types "∫" (Alt+b wins)
         let bracket = [press(Key::Num5, Modifiers::ALT), Event::Text("[".into())];
         assert!(option_typed(&bracket) && is_alt_char(&bracket[0]));

@@ -125,3 +125,56 @@ fn procs_keys_in_gui() {
     assert!(app.help, "F1");
     assert_eq!(app.footer_keys()[3].0, "s Interval");
 }
+
+/// Screen position of the painted text `want`.
+fn text_pos(ctx: &egui::Context, app: &mut App, look: &mut Look, want: &str) -> egui::Pos2 {
+    let input = RawInput {
+        screen_rect: Some(SCREEN),
+        ..Default::default()
+    };
+    let out = ctx.run_ui(input, |ui| draw(ui, app, look));
+    out.shapes
+        .into_iter()
+        .find_map(|c| match c.shape {
+            egui::Shape::Text(t) if t.galley.text() == want => Some(t.pos),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+/// The command line is an egui TextEdit: keys reach the app once, a click moves the app's caret.
+fn text_box_keys_once_and_click_moves_caret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    let run = |app: &mut App, look: &mut Look, ev: Vec<Event>| frame(&ctx, app, look, ev);
+    run(&mut app, &mut look, vec![Event::Text(":".into())]);
+    let typed = ["a", "b", "c"].map(|t| Event::Text(t.into())).to_vec();
+    run(&mut app, &mut look, typed);
+    let shown = run(
+        &mut app,
+        &mut look,
+        vec![press(Key::ArrowLeft, Modifiers::NONE)],
+    );
+    assert!(
+        shown.contains("abc") && !shown.contains("abcabc"),
+        "{shown}"
+    );
+    assert!(matches!(&app.mode, Mode::Cmd(l) if l.text == "abc" && l.cur == 2));
+    let p = text_pos(&ctx, &mut app, &mut look, "abc") + egui::vec2(1.0, 4.0);
+    let button = |pressed| Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    run(&mut app, &mut look, vec![Event::PointerMoved(p)]);
+    run(&mut app, &mut look, vec![button(true)]);
+    run(&mut app, &mut look, vec![button(false)]);
+    assert!(matches!(&app.mode, Mode::Cmd(l) if l.text == "abc" && l.cur == 0));
+    // typing after the click lands at the new caret
+    run(&mut app, &mut look, vec![Event::Text("x".into())]);
+    assert!(matches!(&app.mode, Mode::Cmd(l) if l.text == "xabc"));
+}
