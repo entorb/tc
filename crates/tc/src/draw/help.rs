@@ -15,6 +15,7 @@ pub(super) fn show_help(ctx: &Context, app: &mut App) {
     app.help_scroll = app.help_scroll.min(text.len().saturating_sub(rows));
     let offset = app.help_scroll as f32 * row_h;
     let mut clicked = None;
+    let mut scrolled = None;
     modal("help").show(ctx, |ui| {
         ui.set_width(640.0);
         ui.heading(title);
@@ -23,7 +24,7 @@ pub(super) fn show_help(ctx: &Context, app: &mut App) {
             text_box(ui, &LineEdit::from(app.help_filter.clone()), true);
         });
         ui.separator();
-        ScrollArea::vertical()
+        let out = ScrollArea::vertical()
             .max_height(max_h)
             .vertical_scroll_offset(offset)
             .show(ui, |ui| {
@@ -50,7 +51,12 @@ pub(super) fn show_help(ctx: &Context, app: &mut App) {
                     }
                 }
             });
+        scrolled = Some(out.state.clamped_offset().y);
     });
+    // wheel and scrollbar drag move egui's offset; keep the app's row in sync
+    if let Some(y) = scrolled {
+        app.help_scroll = (y / row_h).round() as usize;
+    }
     if let Some(i) = clicked {
         app.help_click(i);
     }
