@@ -6,7 +6,7 @@ Torben's Commander (`tc`): cross-platform (Windows, macOS, Linux) two-panel file
 
 Docs in the same change as the feature:
 
-- F1 help (`crates/tc-app/src/fmt/help.rs` `HELP_*`) is the reference: every key and its behavior.
+- F1 help (`crates/tc/src/fmt/help.rs` `HELP_*`) is the reference: every key and its behavior.
 - [README.md](README.md) is the overview: one line per feature (key, what it does, limits). No key tables, no per-key detail.
 
 File operations touch user data. Never delete, overwrite or truncate without an explicit user action; on failure leave source intact, report the error, and clean up partial targets.
@@ -17,11 +17,9 @@ Layers flow inward: front ends and backends depend on core, never the reverse.
 
 - `crates/tc-core`: panels, file ops, VFS traits, viewer/editor, find, sync, archives. No UI deps.
 - `crates/tc-remote`: SFTP / FTP / FTPS backends implementing `tc-core` VFS.
-- `crates/tc-app`: UI state shared by both front ends (`app.rs` `Mode` state machine, `app/<feature>.rs`, `fmt.rs` help and rendering helpers). No drawing.
-- `crates/tc-cli`: ratatui TUI binary (`main.rs`, `ui.rs` + `ui/<screen>.rs`), draws `tc_app::app`.
-- `crates/tc-gui`: egui front end reusing `tc_app::app`; only drawing, mouse and toolbar (`draw.rs` + `draw/<screen>.rs`, `keys.rs`).
+- `crates/tc`: the egui app, binary `tc`. Library part: UI state (`app.rs` `Mode` state machine, `app/<feature>.rs`, `fmt.rs` help and rendering helpers), no drawing. Binary part: drawing, mouse and toolbar (`draw.rs` + `draw/<screen>.rs`, `keys.rs`).
 
-Before editing a crate, read its `AGENTS.md` (`crates/tc-core/AGENTS.md`, `crates/tc-app/AGENTS.md`).
+Before editing a crate, read its `AGENTS.md` (`crates/tc-core/AGENTS.md`, `crates/tc/AGENTS.md`).
 
 ## Known Pitfalls
 
@@ -32,10 +30,10 @@ Each of these shipped as a bug once.
 - FTP has no exclusive create: refuse writes when the target listing fails instead of risking an overwrite.
 - Child processes (external editor, `ssh`, clipboard tools): wait or reap them; no zombies.
 - Windows: pass shell commands raw to `cmd /C` (no Rust arg quoting); Ctrl+Insert is taken by the system, offer Alt+Shift+C.
-- Terminals: Ctrl+M arrives as Enter, Ctrl+F-keys and Alt keys may be eaten (macOS). Every feature needs an F9 menu entry.
+- macOS may eat Ctrl+F-keys and Alt keys. Every feature needs an F9 menu entry.
 - Read state (cursor name, selection) before replacing the data it points into (File Stats rescan bug).
 - Empty filter + Enter keeps the list; it is not "filter matches nothing".
-- `tc-gui`: toolbar hidden on sub-screens (File Stats, Find results, Sync, Processes), disabled in dialogs and prompts; icons come from one loaded emoji font.
+- Toolbar hidden on sub-screens (File Stats, Find results, Sync, Processes), disabled in dialogs and prompts; icons come from one loaded emoji font.
 - Footer keys must appear in their F1 help: test `footer_keys_are_documented_in_their_help` in `app.rs`.
 
 ## Reference Code
@@ -52,13 +50,13 @@ Each of these shipped as a bug once.
 
 - `codegraph_explore` first to find or understand code, and before changing a symbol with callers: verbatim source, callers, blast radius. Treat output as read; no grep re-verification. Shell: `codegraph explore "<query>"`.
 - Skip it when the location is already known (file and line from a previous result, compiler error or test), for docs, config and scripts (not indexed), and for scripted moves or renames checked by the compiler.
-- Grep/Read only for config, docs, or a detail it missed. Files near 1000 lines (`tc-app` `app.rs`, `app/editor.rs`, `fmt.rs`): read ranges, never whole.
+- Grep/Read only for config, docs, or a detail it missed. Files near 1000 lines (`tc` `app.rs`, `app/editor.rs`, `fmt.rs`): read ranges, never whole.
 - "files changed after last sync" or stale results: `codegraph sync`. Stale lock: `codegraph unlock`. Last resort: `codegraph index`.
 - Templates: `projectPath: /code/tc/templates/<repo>`; no index yet: `codegraph init templates/<repo>`. Check how `mc` / `doublecmd` / `krusader` / `yazi` solve a problem before designing ours.
 
 ### Context7 (mandatory)
 
-Before using a crate API new to this code, upgrading a crate, or a toolchain feature / CLI flag: `resolve-library-id` → `query-docs`, one concept per query. Key crates: ratatui, crossterm, egui/eframe, russh, russh-sftp, suppaftp, tokio, ropey, regex, zip, tar, sysinfo. Fallback: `docs.rs/<crate>/<version>`.
+Before using a crate API new to this code, upgrading a crate, or a toolchain feature / CLI flag: `resolve-library-id` → `query-docs`, one concept per query. Key crates: egui/eframe, russh, russh-sftp, suppaftp, tokio, ropey, regex, zip, tar, sysinfo. Fallback: `docs.rs/<crate>/<version>`.
 
 ### SonarQube Cloud
 
@@ -104,7 +102,7 @@ Tests:
 1. `scripts/run_checks.sh` passes.
 2. Non-trivial logic tested; remote changes have `live_*` tests; file ops follow `crates/tc-core/AGENTS.md`.
 3. Context7 consulted for new crate APIs.
-4. UI changes: follow the checklist in `crates/tc-app/AGENTS.md`.
+4. UI changes: follow the checklist in `crates/tc/AGENTS.md`.
 5. Continues improvement:
    - if a complex problem was solved or a bug created and fixed, update AGENTS.md files to prevent similar issues in future.
    - if many tokens where used on a task, suggest ways for future token reduction

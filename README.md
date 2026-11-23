@@ -34,39 +34,33 @@ Adding features of
 - **Synchronize directories**: Ctrl+E
 - **Multi-file-rename**: Ctrl+M with undo
 
-**F1** shows every key of the current screen (type to filter, Enter runs the key). **F9** opens a menu with every feature, for terminals that swallow keys. This README is the overview; F1 is the reference.
+**F1** shows every key of the current screen (type to filter, Enter runs the key). **F9** opens a menu with every feature. This README is the overview; F1 is the reference.
 
-## Front ends
-
-- `tc-cli`: terminal UI
-- `tc-gui`: desktop UI with icons, mouse, toolbar, tab buttons and system clipboard
-
-Both share the app logic (`crates/tc-app` library): keys, dialogs and F1 help are identical.
+Desktop app (egui) with icons, mouse, toolbar, tab buttons and system clipboard.
 
 ## Build and run
 
 Needs stable Rust (`rustup`, edition 2024). From the repo root:
 
 ```sh
-scripts/run-cli.sh/.cmd    # terminal UI
-scripts/run-gui.sh/.cmd    # desktop UI
+scripts/run.sh/.cmd        # build and run tc
 sh scripts/build.sh/.cmd   # release binaries into target/release
 scripts/run_checks.sh/.cmd # same checks as CI
 ```
 
-Both open in the current directory; extra arguments are passed on. On Linux `tc-gui` needs X11 or Wayland with `libxkbcommon` and OpenGL.
+Opens in the current directory; extra arguments are passed on. On Linux `tc` needs X11 or Wayland with `libxkbcommon` and OpenGL.
 
 Downloaded binaries are not signed:
 
-- macOS: `xattr -d com.apple.quarantine ./tc-cli && chmod +x ./tc-cli` (same for `tc-gui`)
-- Windows: SmartScreen **More info → Run anyway**, or `Unblock-File .\tc-cli.exe`
+- macOS: `xattr -d com.apple.quarantine ./tc-macos && chmod +x ./tc-macos`
+- Windows: SmartScreen **More info → Run anyway**, or `Unblock-File .\tc.exe`
 
 ## Features
 
 ### Panels
 
 - Norton Commander look; two panels with tabs (Ctrl+T); local tabs are restored at start
-- tc-gui font size (Ctrl+= / Ctrl+-, F9 → Tools → Settings) is saved with the session
+- Font size (Ctrl+= / Ctrl+-, F9 → Tools → Settings) is saved with the session
 - Left / Right go to the parent / into the directory under the cursor
 - Status line shows the free space of the local filesystem (not remote, archive or found lists)
 - Directories load in a worker; huge or slow directories stay usable, Esc cancels
@@ -83,12 +77,12 @@ Downloaded binaries are not signed:
 
 ### File operations
 
-- F5 copy, F6 move in a worker with progress, speed, ETA; Esc cancels and removes the partial target
+- F5 copy, F6 move, F8 delete in a worker; after 2 s a popup shows bytes, files, dirs done / total with rates per second and an ETA (regression on bytes, refreshed each second); Esc cancels and removes the partial target
 - Conflict dialog: overwrite, skip, rename, newer only (also for all). Overwrite goes through a temp file and rename; a move deletes the source only after success
 - F2 / Shift+F6 rename (F2 with several marked opens multi-rename), F7 mkdir, F8 delete (trash or permanent)
 - Symlink and hard link (F9 → File): link to the cursor entry in the other panel's directory, target and link path editable; never replaces an existing path; local panels only, hard links to files only
 - Properties (Alt+Enter, F9 → File): info on the marked entries or the cursor entry; Unix: mode (octal with rwx preview), owner and group, optionally recursive; elsewhere the read-only flag; one file: prefilled, only changed fields applied; several or a directory: empty fields, filled ones applied to all; symlinks keep their mode and are never followed; local panels only
-- Multi-rename (Ctrl+M): name / extension masks with placeholders, regex find / replace, case, counter, live preview, presets, history, names from a pasted list or the editor, undo of the last batch. Duplicate or invalid names are refused before anything moves. `tc-cli`: terminals send Ctrl+M as Enter, use F9 → File
+- Multi-rename (Ctrl+M): name / extension masks with placeholders, regex find / replace, case, counter, live preview, presets, history, names from a pasted list or the editor, undo of the last batch. Duplicate or invalid names are refused before anything moves.
 
 ### Search and analysis
 
@@ -107,7 +101,7 @@ Downloaded binaries are not signed:
 ### Command line
 
 - `:` runs a command in the panel directory (`sh -c`, Windows `cmd /C`), history saved. On an SFTP panel via the system `ssh -t`
-- `tc-gui` has no terminal: output opens in the viewer, interactive commands do not work
+- No terminal: output opens in the viewer, interactive commands do not work
 - Limits: blocks tc while running, no `cd` tracking, no completion
 - Terminal here: opens the system terminal in the active local directory (`$TERMINAL`, else first installed emulator; macOS Terminal, Windows `cmd`); not on remote or archive panels
 
@@ -128,7 +122,7 @@ Downloaded binaries are not signed:
 ### Viewer (F3) and editor (F4)
 
 - Viewer streams from disk (multi-GB files): search, go to line or %, wrap, line numbers, encoding detection; `h` hex view (offset, 16 bytes, ASCII; reads only the visible rows; `g` takes an offset `0x..`/decimal/`N%`, find jumps to the row of the matching line); Alt+Left/Right (or Alt+b/f, as macOS terminals send Option+arrows) view the previous / next file of the panel it was opened from (panel cursor follows; skips directories and media files; local and find-result panels only, no wrap at the ends)
-- Editor: undo / redo, selection, clipboard (OSC 52 in terminals), find / replace in one dialog (F3; regex with `$1` groups or plain text, case, one by one; matches within a line), go to line, wrap, line numbers, bracket match, encoding and CRLF detection; warns when the file changed on disk. Files over 1 GB or free RAM offer the viewer
+- Editor: undo / redo, selection, clipboard, find / replace in one dialog (F3; regex with `$1` groups or plain text, case, one by one; matches within a line), go to line, wrap, line numbers, bracket match, encoding and CRLF detection; warns when the file changed on disk. Files over 1 GB or free RAM offer the viewer
 - Markdown: save (and F5) adds blank lines around headings, lists and ``` blocks, one undo step; never removes lines
 - Syntax colors for common languages (rs, c/cpp, js/ts, java, go, py, sh, rb, lua, php, sql, toml/yaml, properties, json, html/xml, md); per row only, multi-line strings and comments may color wrong
 - Shift+F4 opens the cursor file (or a new one) in an external editor (`code`)

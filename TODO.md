@@ -13,7 +13,7 @@
 
 - if dirs/files are selected, and ncdu is stated, use only the selected ones, not the unselected ones
 
-## tc-cli-F1 help
+## F1 help
 
 - help window too small
 - cursor shall reach each items, but only some can be activated. that is better that today jumping over some and not knowing why

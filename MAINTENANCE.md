@@ -17,7 +17,7 @@
     - multi-rename
     - search file
     - ...
-  - in tc-gui use icons, ensure they are consistent
+  - use icons, ensure they are consistent
 
 ## Code Review Performance
 
