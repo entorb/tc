@@ -297,6 +297,37 @@ mod tests {
         }
     }
 
+    /// Counted delete of a tree: bytes, files, dirs done match the scanned totals; nothing left.
+    #[test]
+    #[ignore = "needs a server"]
+    fn live_delete_counts() {
+        use std::sync::atomic::Ordering;
+        for l in live("delete") {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("t");
+            std::fs::create_dir_all(src.join("s")).unwrap();
+            std::fs::write(src.join("a"), "hello").unwrap();
+            std::fs::write(src.join("s/b"), "").unwrap();
+            let remote = l.base.join("del");
+            put(&l, &src, &remote, false).unwrap();
+            let side = tc_core::vfs::Side::Remote(l.r.clone());
+            let p = tc_core::ops::Progress::default();
+            tc_core::vfs::delete_all(&side, std::slice::from_ref(&remote), false, &p, || {})
+                .unwrap();
+            assert!(gone(&l, &remote), "{}", l.var);
+            let got = [
+                &p.done,
+                &p.files,
+                &p.dirs_done,
+                &p.total,
+                &p.files_total,
+                &p.dirs,
+            ];
+            let got = got.map(|c| c.load(Ordering::Relaxed));
+            assert_eq!(got, [5, 2, 2, 5, 2, 2], "{}", l.var);
+        }
+    }
+
     /// Spaces, quotes, `$`, backticks, unicode and a leading dash survive upload, listing,
     /// the server-side `find` scan (shell quoting) and download.
     #[test]

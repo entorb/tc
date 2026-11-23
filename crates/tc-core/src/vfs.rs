@@ -17,7 +17,7 @@ use crate::{Error, Result, io_err};
 pub mod mem;
 mod xfer;
 
-pub use xfer::{is_newer, scan, transfer};
+pub use xfer::{delete_all, is_newer, scan, transfer};
 
 const CHUNK: usize = 1 << 20;
 
@@ -170,21 +170,38 @@ impl Side {
 
     /// Delete a file or directory tree; symlinks are removed as links, their targets are never touched.
     pub fn delete(&self, p: &Path) -> Result<()> {
+        match self {
+            Side::Remote(_) => self.delete_with(p, &ops::Progress::default()),
+            Side::Local => ops::delete(p),
+        }
+    }
+
+    /// Like [`Side::delete`], counting into `pr`; stops on cancel.
+    pub fn delete_with(&self, p: &Path, pr: &ops::Progress) -> Result<()> {
         let Side::Remote(r) = self else {
-            return ops::delete(p);
+            return ops::remove(p, pr);
         };
+        if pr.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(crate::Error::Cancelled);
+        }
         let path = rpath(p);
         let Some(e) = r.lstat(&path)? else {
             return Err(io_err(p)(io::ErrorKind::NotFound.into()));
         };
         if e.is_dir && !e.is_symlink {
             for name in self.names(p)? {
-                self.delete(&p.join(name))?;
+                self.delete_with(&p.join(name), pr)?;
             }
-            r.remove_dir(&path)
+            r.remove_dir(&path)?;
+            pr.dir_done();
         } else {
-            r.remove_file(&path)
+            if let Ok(mut cur) = pr.current.lock() {
+                p.clone_into(&mut cur);
+            }
+            r.remove_file(&path)?;
+            pr.file_done(e.size);
         }
+        Ok(())
     }
 }
 

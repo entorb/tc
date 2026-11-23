@@ -101,6 +101,9 @@ Ctrl+M          multi-rename: masks, counter, find / replace
 F7              make directory
 F8              delete: y / Enter trash, p permanent,
                 n / Esc cancel (remote panels: only p)
+                copy / move / delete over 2 s: progress of
+                bytes, files, dirs with rates per second, ETA;
+                Esc cancels
 Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
 Ctrl+C          copy files
 Ctrl+X          cut files

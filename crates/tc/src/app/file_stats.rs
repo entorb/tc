@@ -15,7 +15,7 @@ use tc_core::ops;
 use tc_core::panel::Entry;
 use tc_core::stats::treemap::{self, Tile};
 use tc_core::stats::{self, Node};
-use tc_core::vfs::{Remote, Side};
+use tc_core::vfs::{self, Remote, Side};
 
 /// File Stats: the scanned tree and the directory being browsed.
 pub struct Stats {
@@ -463,39 +463,16 @@ impl App {
         let names: Vec<OsString> = (st.targets().into_iter())
             .map(|i| st.current().children[i].name.clone())
             .collect();
-        if let Some(r) = st.remote.clone() {
-            let count = Arc::new(AtomicUsize::new(0));
-            st.deleting = Some((names.clone(), count.clone()));
-            self.stats = Some(st);
-            let side = Side::Remote(r);
-            return self.spawn_xfer((side.clone(), side.clone()), move |_, _| {
-                names.iter().try_for_each(|n| {
-                    side.delete(&dir.join(n))?;
-                    count.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
-                })
-            });
-        }
-        // in order, the first error stops the batch
-        let mut done = Vec::new();
-        let mut error = None;
-        for name in names {
-            let target = dir.join(&name);
-            let result = if to_trash {
-                ops::trash(&target)
-            } else {
-                ops::delete(&target)
-            };
-            if let Err(e) = result {
-                error = Some(e.to_string());
-                break;
-            }
-            done.push(name);
-        }
-        st.drop_names(&done);
-        // `tick` brings the stats back once any error message is closed
+        let count = Arc::new(AtomicUsize::new(0));
+        st.deleting = Some((names.clone(), count.clone()));
+        let side = st.remote.clone().map_or(Side::Local, Side::Remote);
         self.stats = Some(st);
-        self.finish(error);
+        let paths: Vec<PathBuf> = names.iter().map(|n| dir.join(n)).collect();
+        self.spawn_xfer((side.clone(), side.clone()), move |p, _| {
+            vfs::delete_all(&side, &paths, to_trash, p, || {
+                count.fetch_add(1, Ordering::Relaxed);
+            })
+        });
     }
 
     /// F3 view, F4 edit, Shift+F4 external editor on the selected file of File Stats.
@@ -563,6 +540,7 @@ mod tests {
         assert!(tmp.path().join("big").exists());
         key(&mut app, KeyCode::F(8));
         key(&mut app, KeyCode::Char('p'));
+        wait(&mut app);
         app.tick();
         assert!(!tmp.path().join("big").exists());
         match &app.mode {
@@ -732,6 +710,7 @@ mod tests {
         let Mode::Stats(st) = &app.mode else { panic!() };
         assert!(st.confirm.as_ref().is_some_and(|t| t.contains("2 items (")));
         key(&mut app, KeyCode::Char('p'));
+        wait(&mut app);
         app.tick();
         assert!(!tmp.path().join("a").exists() && !tmp.path().join("b").exists());
         assert!(tmp.path().join("c").exists());
@@ -767,6 +746,7 @@ mod tests {
         key(&mut app, KeyCode::Insert); // ro
         key(&mut app, KeyCode::F(8));
         key(&mut app, KeyCode::Char('p'));
+        wait(&mut app);
         assert!(matches!(app.mode, Mode::Message(_)));
         app.tick();
         key(&mut app, KeyCode::Esc);
@@ -831,6 +811,7 @@ mod tests {
         // delete acts on the shown row, not on the first child
         key(&mut app, KeyCode::F(8));
         key(&mut app, KeyCode::Char('p'));
+        wait(&mut app);
         app.tick();
         assert!(!tmp.path().join("gamma").exists() && tmp.path().join("Alpha").exists());
         assert!(shown(&app).is_empty());

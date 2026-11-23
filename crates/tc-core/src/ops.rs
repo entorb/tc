@@ -22,7 +22,7 @@ pub struct Progress {
     pub files_total: AtomicU64,
     /// `total` and `files_total` are final.
     pub scanned: AtomicBool,
-    /// File Stats scan: directories found / directories whose listing is read.
+    /// Directories in total / done (copy, move, delete); File Stats scan: found / listing read.
     pub dirs: AtomicU64,
     pub dirs_done: AtomicU64,
     /// File being copied.
@@ -30,35 +30,80 @@ pub struct Progress {
 }
 
 impl Progress {
-    fn file_done(&self, bytes: u64) {
+    pub(crate) fn file_done(&self, bytes: u64) {
         self.done.fetch_add(bytes, Ordering::Relaxed);
         self.files.fetch_add(1, Ordering::Relaxed);
     }
+
+    pub(crate) fn dir_done(&self) {
+        self.dirs_done.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Add `c` to the done counters.
+    pub(crate) fn add(&self, c: Counts) {
+        self.done.fetch_add(c.bytes, Ordering::Relaxed);
+        self.files.fetch_add(c.files, Ordering::Relaxed);
+        self.dirs_done.fetch_add(c.dirs, Ordering::Relaxed);
+    }
+
+    /// Store `c` as the final totals.
+    pub(crate) fn set_total(&self, c: Counts) {
+        self.total.store(c.bytes, Ordering::Relaxed);
+        self.files_total.store(c.files, Ordering::Relaxed);
+        self.dirs.store(c.dirs, Ordering::Relaxed);
+        self.scanned.store(true, Ordering::Release);
+    }
 }
 
-/// Count bytes and files below `paths` (symlinks not followed, unreadable parts skipped; the
-/// copy reports those errors) so progress has a total. Stops early on cancel.
+/// Bytes, files (also symlinks) and directories below a path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Counts {
+    pub bytes: u64,
+    pub files: u64,
+    pub dirs: u64,
+}
+
+impl std::ops::AddAssign for Counts {
+    fn add_assign(&mut self, o: Self) {
+        self.bytes += o.bytes;
+        self.files += o.files;
+        self.dirs += o.dirs;
+    }
+}
+
+/// Count bytes, files and directories below `paths` (symlinks not followed, unreadable parts
+/// skipped; the copy reports those errors) so progress has a total. Stops early on cancel.
 pub fn scan(paths: &[PathBuf], p: &Progress) {
-    let (mut bytes, mut files) = (0, 0);
-    let mut stack = paths.to_vec();
+    let mut sum = Counts::default();
+    for path in paths {
+        sum += count(path, &p.cancel);
+    }
+    if !p.cancel.load(Ordering::Relaxed) {
+        p.set_total(sum);
+    }
+}
+
+/// [`Counts`] below `path`; symlinks count as files and are not followed.
+pub fn count(path: &Path, cancel: &AtomicBool) -> Counts {
+    let mut c = Counts::default();
+    let mut stack = vec![path.to_owned()];
     while let Some(path) = stack.pop() {
-        if p.cancel.load(Ordering::Relaxed) {
-            return;
+        if cancel.load(Ordering::Relaxed) {
+            break;
         }
         let Ok(meta) = fs::symlink_metadata(&path) else {
             continue;
         };
         if meta.is_dir() {
+            c.dirs += 1;
             let items = fs::read_dir(&path).into_iter().flatten().flatten();
             stack.extend(items.map(|i| i.path()));
         } else {
-            files += 1;
-            bytes += meta.len();
+            c.files += 1;
+            c.bytes += meta.len();
         }
     }
-    p.total.store(bytes, Ordering::Relaxed);
-    p.files_total.store(files, Ordering::Relaxed);
-    p.scanned.store(true, Ordering::Release);
+    c
 }
 
 /// Answer to a name conflict on a file or symlink.
@@ -115,6 +160,7 @@ fn place(src: &Path, target: &Path, mv: bool, ctx: &mut Ctx) -> Result<()> {
                 let item = item.map_err(io_err(src))?;
                 place(&item.path(), &target.join(item.file_name()), mv, ctx)?;
             }
+            ctx.p.dir_done();
             // non-empty (skipped files) stays, never force-removed
             if mv {
                 let _ = fs::remove_dir(src);
@@ -204,6 +250,31 @@ pub fn delete(path: &Path) -> Result<()> {
     .map_err(io_err(path))
 }
 
+/// Like [`delete`], counting removed bytes, files and directories into `p`; stops on cancel.
+// shortcut: a directory swapped for a symlink between the type check and read_dir is followed
+// (std remove_dir_all guards this); upgrade to an openat-based walk if that matters
+pub fn remove(path: &Path, p: &Progress) -> Result<()> {
+    if p.cancel.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
+    let meta = fs::symlink_metadata(path).map_err(io_err(path))?;
+    if !meta.is_dir() {
+        if let Ok(mut cur) = p.current.lock() {
+            cur.clear();
+            cur.push(path);
+        }
+        fs::remove_file(path).map_err(io_err(path))?;
+        p.file_done(meta.len());
+        return Ok(());
+    }
+    for item in fs::read_dir(path).map_err(io_err(path))? {
+        remove(&item.map_err(io_err(path))?.path(), p)?;
+    }
+    fs::remove_dir(path).map_err(io_err(path))?;
+    p.dir_done();
+    Ok(())
+}
+
 /// Create directory `name` inside `parent`. `name` must be a single path component.
 pub fn mkdir(parent: &Path, name: &OsStr) -> Result<PathBuf> {
     let path = parent.join(single_name(name)?);
@@ -289,6 +360,7 @@ fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> Result<()> {
             let item = item.map_err(io_err(src))?;
             copy_tree(&item.path(), &dst.join(item.file_name()), p)?;
         }
+        p.dir_done();
         // after the contents, so a read-only source dir does not block them
         fs::set_permissions(dst, meta.permissions()).map_err(io_err(dst))
     } else {
@@ -825,5 +897,42 @@ mod tests {
         super::copy(&src, &tmp.path().join("c"), &mut |_, _| Decision::Skip, &p).unwrap();
         assert_eq!(p.done.load(Ordering::Relaxed), 2);
         assert_eq!(p.files.load(Ordering::Relaxed), 2);
+        assert_eq!(p.dirs.load(Ordering::Relaxed), 2);
+        assert_eq!(p.dirs_done.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_counts_and_keeps_symlink_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tree(tmp.path());
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), "k").unwrap();
+        std::os::unix::fs::symlink(&outside, src.join("sub/link")).unwrap();
+        let p = Progress::default();
+        scan(std::slice::from_ref(&src), &p);
+        remove(&src, &p).unwrap();
+        assert!(!src.exists());
+        assert!(outside.join("keep").exists());
+        for (done, total) in [
+            (&p.done, &p.total),
+            (&p.files, &p.files_total),
+            (&p.dirs_done, &p.dirs),
+        ] {
+            assert_eq!(done.load(Ordering::Relaxed), total.load(Ordering::Relaxed));
+        }
+        assert_eq!(p.files.load(Ordering::Relaxed), 3);
+        assert_eq!(p.dirs_done.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn remove_stops_on_cancel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tree(tmp.path());
+        let p = Progress::default();
+        p.cancel.store(true, Ordering::Relaxed);
+        assert!(matches!(remove(&src, &p), Err(Error::Cancelled)));
+        assert!(src.join("a.txt").exists());
     }
 }

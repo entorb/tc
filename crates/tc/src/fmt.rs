@@ -80,37 +80,41 @@ pub fn fmt_date(z: &jiff::ZonedDateTime, today: jiff::civil::Date) -> String {
 
 pub fn progress_text(x: &Xfer) -> String {
     let p = &x.progress;
-    let (done, files) = (
-        p.done.load(Ordering::Relaxed),
-        p.files.load(Ordering::Relaxed),
-    );
+    let load = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
     let current = p
         .current
         .lock()
         .map(|c| c.display().to_string())
         .unwrap_or_default();
-    let (total, of) = if p.scanned.load(Ordering::Acquire) {
-        let (t, f) = (
-            p.total.load(Ordering::Relaxed),
-            p.files_total.load(Ordering::Relaxed),
-        );
-        (human(t), format!("{} / {f}", files.min(f)))
-    } else {
-        ("scanning...".to_owned(), files.to_string())
-    };
-    let remaining = p.total.load(Ordering::Relaxed).saturating_sub(done) as f64;
-    let speed = x
-        .eta
-        .rate()
-        .map_or("--".to_owned(), |r| format!("{}/s", human(r as u64)));
-    let eta = match x.eta.eta(remaining) {
-        Some(s) if p.scanned.load(Ordering::Acquire) => hms(s as u64),
-        _ => "--".to_owned(),
-    };
-    format!(
-        "{current}\n{} / {total}   files {of}\n{speed}   ETA {eta}\n\n[Esc] Cancel",
-        human(done)
-    )
+    let scanned = p.scanned.load(Ordering::Acquire);
+    let total = |t: String| if scanned { t } else { "scanning...".to_owned() };
+    let [bytes, files, dirs] = x.shown.rates.map(|r| r.unwrap_or(0.0));
+    let rate = |r: Option<f64>, s: String| r.map_or("--".to_owned(), |_| s);
+    let rows = [
+        (
+            "bytes",
+            human(load(&p.done)),
+            total(human(load(&p.total))),
+            rate(x.shown.rates[0], format!("{}/s", human(bytes as u64))),
+        ),
+        (
+            "files",
+            load(&p.files).to_string(),
+            total(load(&p.files_total).to_string()),
+            rate(x.shown.rates[1], format!("{files:.1}/s")),
+        ),
+        (
+            "dirs",
+            load(&p.dirs_done).to_string(),
+            total(load(&p.dirs).to_string()),
+            rate(x.shown.rates[2], format!("{dirs:.1}/s")),
+        ),
+    ];
+    let rows: Vec<String> = (rows.iter())
+        .map(|(l, d, t, r)| format!("{l:<6} {:>20}   {r}", format!("{d} / {t}")))
+        .collect();
+    let eta = x.shown.eta.map_or("--".to_owned(), |s| hms(s as u64));
+    format!("{current}\n{}\nETA {eta}\n\n[Esc] Cancel", rows.join("\n"))
 }
 
 pub fn hms(s: u64) -> String {

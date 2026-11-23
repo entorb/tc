@@ -54,15 +54,49 @@ pub struct Xfer {
     pub(super) rx: Receiver<XMsg>,
     pub(super) reply: mpsc::Sender<Answer>,
     pub progress: Arc<ops::Progress>,
-    /// Fed from `App::tick`.
-    pub eta: Estimator,
+    /// Bytes, files, directories over time, fed from `App::tick`.
+    pub(super) rates: [Estimator; 3],
+    /// Rates of `rates` and the ETA in seconds, refreshed once a second.
+    pub shown: Shown,
     pub(super) started: Instant,
+}
+
+#[derive(Default)]
+pub struct Shown {
+    pub at: Option<Instant>,
+    pub rates: [Option<f64>; 3],
+    pub eta: Option<f64>,
 }
 
 impl Xfer {
     /// Quick copies finish before a popup would only flicker.
     pub fn visible(&self) -> bool {
-        self.ask.is_some() || self.started.elapsed() > Duration::from_secs(1)
+        self.ask.is_some() || self.started.elapsed() > Duration::from_secs(2)
+    }
+
+    /// Feed the regressions; the shown rates and ETA change at most once a second.
+    fn sample(&mut self, now: Instant) {
+        let p = &self.progress;
+        let done = [&p.done, &p.files, &p.dirs_done].map(|c| c.load(Ordering::Relaxed) as f64);
+        let secs = now.duration_since(self.started).as_secs_f64();
+        for (e, d) in self.rates.iter_mut().zip(done) {
+            e.push(secs, d);
+        }
+        if self
+            .shown
+            .at
+            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1))
+        {
+            return;
+        }
+        let remaining = p.total.load(Ordering::Relaxed) as f64 - done[0];
+        self.shown = Shown {
+            at: Some(now),
+            rates: self.rates.each_ref().map(Estimator::rate),
+            eta: (p.scanned.load(Ordering::Acquire))
+                .then(|| self.rates[0].eta(remaining))
+                .flatten(),
+        };
     }
 
     pub(super) fn answer(&mut self, a: Answer) {
@@ -230,21 +264,11 @@ impl App {
 
     pub(super) fn delete(&mut self, targets: &[PathBuf], to_trash: bool) {
         let side = self.panels[self.active].side();
-        if side.remote().is_some() {
-            let targets = targets.to_vec();
-            let sides = (side.clone(), side.clone());
-            return self.spawn_xfer(sides, move |_, _| {
-                targets.iter().try_for_each(|t| side.delete(t))
-            });
-        }
-        let result = targets.iter().try_for_each(|src| {
-            if to_trash {
-                ops::trash(src)
-            } else {
-                ops::delete(src)
-            }
+        let targets = targets.to_vec();
+        let sides = (side.clone(), side.clone());
+        self.spawn_xfer(sides, move |p, _| {
+            vfs::delete_all(&side, &targets, to_trash, p, || {})
         });
-        self.finish(result.err().map(|e| e.to_string()));
     }
 
     /// Copy or move to `text`. A relative `text` is in the active panel (rename), an absolute
@@ -415,7 +439,8 @@ impl App {
             rx,
             reply,
             progress,
-            eta: Estimator::default(),
+            rates: Default::default(),
+            shown: Shown::default(),
             started: Instant::now(),
         });
     }
@@ -449,8 +474,7 @@ impl App {
         let Mode::Xfer(x) = &mut self.mode else {
             return;
         };
-        let done = x.progress.done.load(Ordering::Relaxed);
-        x.eta.push(x.started.elapsed().as_secs_f64(), done as f64);
+        x.sample(Instant::now());
         match x.rx.try_recv() {
             Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
             Ok(XMsg::Done(error)) => {
@@ -507,7 +531,11 @@ mod tests {
 
     use crate::{KeyCode, KeyModifiers};
 
+    use super::{Shown, Xfer};
     use std::ffi::OsStr;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
 
     use tc_core::panel::Panel;
 
@@ -538,6 +566,7 @@ mod tests {
         assert!(dir.path().join("a").exists() && dir.path().join("d").exists());
         key(&mut app, KeyCode::F(8));
         key(&mut app, KeyCode::Char('p'));
+        wait(&mut app);
         assert!(!dir.path().join("a").exists() && !dir.path().join("d").exists());
     }
 
@@ -630,6 +659,48 @@ mod tests {
         key(&mut app, KeyCode::Enter);
         wait(&mut app);
         assert!(left.path().join("copy").is_dir());
+    }
+
+    #[test]
+    fn rates_refresh_once_a_second_and_show_all_units() {
+        let (_tx, rx) = mpsc::channel();
+        let (reply, _answers) = mpsc::channel();
+        let t0 = Instant::now();
+        let mut x = Xfer {
+            ask: None,
+            rename: None,
+            rx,
+            reply,
+            progress: Arc::default(),
+            rates: Default::default(),
+            shown: Shown::default(),
+            started: t0,
+        };
+        let p = x.progress.clone();
+        p.total.store(1000, Ordering::Relaxed);
+        p.scanned.store(true, Ordering::Release);
+        let step = |x: &mut Xfer, ms: u64| {
+            let n = ms / 10;
+            p.done.store(n * 2, Ordering::Relaxed);
+            p.files.store(n, Ordering::Relaxed);
+            p.dirs_done.store(n / 10, Ordering::Relaxed);
+            x.sample(t0 + Duration::from_millis(ms));
+        };
+        step(&mut x, 0);
+        assert_eq!(x.shown.rates, [None; 3]);
+        for ms in (250..=750).step_by(250) {
+            step(&mut x, ms);
+        }
+        assert_eq!(x.shown.rates, [None; 3], "no refresh within 1 s");
+        step(&mut x, 1000);
+        let [b, f, d] = x.shown.rates.map(Option::unwrap);
+        assert!((b - 200.0).abs() < 1.0 && (f - 100.0).abs() < 1.0 && (d - 10.0).abs() < 1.0);
+        assert!((x.shown.eta.unwrap() - 4.0).abs() < 0.1);
+        let text = crate::fmt::progress_text(&x);
+        assert!(
+            text.contains("dirs") && text.contains("100.0/s") && text.contains("ETA 0:04"),
+            "{text}"
+        );
     }
 
     #[test]

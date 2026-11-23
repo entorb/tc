@@ -13,7 +13,7 @@ pub fn scan(side: &Side, paths: &[PathBuf], p: &Progress) {
     if matches!(side, Side::Local) {
         return ops::scan(paths, p);
     }
-    let (mut bytes, mut files) = (0, 0);
+    let mut c = ops::Counts::default();
     // (path, selected): selected paths are followed, symlinked directories below them are not (as in transfer)
     let mut stack: Vec<(PathBuf, bool)> = paths.iter().map(|p| (p.clone(), true)).collect();
     while let Some((path, selected)) = stack.pop() {
@@ -24,22 +24,59 @@ pub fn scan(side: &Side, paths: &[PathBuf], p: &Progress) {
             continue;
         }
         match side.stat(&path) {
-            Ok(Some(e)) if e.is_dir => stack.extend(
-                side.names(&path)
-                    .into_iter()
-                    .flatten()
-                    .map(|n| (path.join(n), false)),
-            ),
+            Ok(Some(e)) if e.is_dir => {
+                c.dirs += 1;
+                stack.extend(
+                    side.names(&path)
+                        .into_iter()
+                        .flatten()
+                        .map(|n| (path.join(n), false)),
+                );
+            }
             Ok(Some(e)) => {
-                files += 1;
-                bytes += e.size;
+                c.files += 1;
+                c.bytes += e.size;
             }
             _ => {}
         }
     }
-    p.total.store(bytes, Ordering::Relaxed);
-    p.files_total.store(files, Ordering::Relaxed);
-    p.scanned.store(true, Ordering::Release);
+    p.set_total(c);
+}
+
+/// Delete `paths` in order (local: to the trash or permanently, remote: permanently), counting
+/// into `p`; `each` runs after every finished path. Stops at the first error or cancel.
+pub fn delete_all(
+    side: &Side,
+    paths: &[PathBuf],
+    trash: bool,
+    p: &Progress,
+    mut each: impl FnMut(),
+) -> Result<()> {
+    if trash && matches!(side, Side::Local) {
+        let counts: Vec<_> = paths.iter().map(|t| ops::count(t, &p.cancel)).collect();
+        p.set_total(counts.iter().fold(ops::Counts::default(), |mut a, &c| {
+            a += c;
+            a
+        }));
+        for (t, &c) in paths.iter().zip(&counts) {
+            if p.cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            if let Ok(mut cur) = p.current.lock() {
+                cur.clone_from(t);
+            }
+            ops::trash(t)?;
+            p.add(c);
+            each();
+        }
+        return Ok(());
+    }
+    scan(side, paths, p);
+    for t in paths {
+        side.delete_with(t, p)?;
+        each();
+    }
+    Ok(())
 }
 
 /// True when `s` was modified after `t`.
@@ -123,6 +160,7 @@ impl Xfer<'_> {
                         self.place(&child, &t.join(&name), ask)?;
                     }
                 }
+                self.p.dir_done();
                 // non-empty (skipped files) stays
                 if self.mv {
                     let _ = self.src.delete_empty_dir(s);
@@ -232,6 +270,7 @@ impl Xfer<'_> {
             let is_dir = self.src.stat(&s)?.is_some_and(|e| e.is_dir);
             self.copy_tree(&s, &t, is_dir)?;
         }
+        self.p.dir_done();
         Ok(())
     }
 
@@ -441,6 +480,41 @@ mod tests {
         go(&r, "/d/a", &r, "/f/a", true, Decision::Overwrite).unwrap();
         assert_eq!(m.get("/f/a").unwrap(), b"a");
         assert!(m.get("/d/a").is_none());
+    }
+
+    #[test]
+    fn delete_all_counts_remote_and_local() {
+        let m = Mem::new();
+        let r = Side::Remote(m.clone());
+        m.dir("/d");
+        m.dir("/d/s");
+        m.put("/d/a", b"abc");
+        m.put("/d/s/b", b"de");
+        m.put("/c", b"f");
+        let p = Progress::default();
+        let mut each = 0;
+        let paths = [PathBuf::from("/d"), PathBuf::from("/c")];
+        delete_all(&r, &paths, false, &p, || each += 1).unwrap();
+        assert_eq!(m.paths(), ["/"]);
+        assert_eq!(each, 2);
+        let got = [
+            &p.done,
+            &p.files,
+            &p.dirs_done,
+            &p.total,
+            &p.files_total,
+            &p.dirs,
+        ];
+        assert_eq!(got.map(|c| c.load(Ordering::Relaxed)), [6, 3, 2, 6, 3, 2]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("d")).unwrap();
+        fs::write(tmp.path().join("d/a"), "abc").unwrap();
+        let p = Progress::default();
+        delete_all(&Side::Local, &[tmp.path().join("d")], false, &p, || {}).unwrap();
+        assert!(!tmp.path().join("d").exists());
+        let got = [&p.done, &p.files, &p.dirs_done];
+        assert_eq!(got.map(|c| c.load(Ordering::Relaxed)), [3, 1, 1]);
     }
 
     /// Cancel during a 2 GiB sparse upload: never read whole, no partial remote file.
