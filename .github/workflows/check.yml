@@ -137,7 +137,7 @@ jobs:
       # Linux/Windows release binaries only for releases; macOS always, thin LTO outside releases
       - name: Build release
         if: inputs.release || runner.os == 'macOS'
-        run: cargo build --release --locked -p tc-cli -p tc-gui
+        run: cargo build --release --locked -p tc-gui
         env:
           # release tag built into the binary for the daily update check; empty: no check
           TC_VERSION: ${{ inputs.release && (inputs.tag_name || needs.core.outputs.next_tag) || '' }}
@@ -145,14 +145,6 @@ jobs:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.release && '1' || '16' }}
 
       - name: Upload binary
-        if: inputs.release || runner.os == 'macOS'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: tc-cli-${{ runner.os }}${{ runner.os == 'Linux' && runner.arch == 'ARM64' && '-arm64' || '' }}
-          path: target/release/tc-cli${{ runner.os == 'Windows' && '.exe' || '' }}
-          retention-days: 7
-
-      - name: Upload desktop binary
         if: inputs.release || runner.os == 'macOS'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
@@ -240,12 +232,7 @@ jobs:
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Invalid tag: $TAG"; exit 1; }
           # artifact zips drop the exec bit
-          chmod +x dist/tc-cli-Linux/tc-cli dist/tc-cli-macOS/tc-cli dist/tc-gui-Linux/tc-gui dist/tc-gui-macOS/tc-gui \
-            dist/tc-cli-Linux-arm64/tc-cli dist/tc-gui-Linux-arm64/tc-gui
-          mv dist/tc-cli-Linux/tc-cli dist/tc-cli-linux
-          mv dist/tc-cli-Linux-arm64/tc-cli dist/tc-cli-linux-arm64
-          mv dist/tc-cli-macOS/tc-cli dist/tc-cli-macos
-          mv dist/tc-cli-Windows/tc-cli.exe dist/tc-cli.exe
+          chmod +x dist/tc-gui-Linux/tc-gui dist/tc-gui-macOS/tc-gui dist/tc-gui-Linux-arm64/tc-gui
           mv dist/tc-gui-Linux/tc-gui dist/tc-gui-linux
           mv dist/tc-gui-Linux-arm64/tc-gui dist/tc-gui-linux-arm64
           mv dist/tc-gui-macOS/tc-gui dist/tc-gui-macos
@@ -261,18 +248,6 @@ jobs:
 
           The binaries are not signed or notarized, so Gatekeeper blocks them. Clear the quarantine flag in Terminal, then run:
 
-          The binaries are not signed or notarized, so Gatekeeper blocks them ("Apple could not verify “tc-cli” is free of malware"). Clear the quarantine flag in Terminal, then run:
-
-          Terminal UI:
-
-          ```sh
-          xattr -d com.apple.quarantine ./tc-cli-macos
-          chmod +x ./tc-cli-macos
-          ./tc-cli-macos
-          ```
-
-          Desktop window:
-
           ```sh
           xattr -d com.apple.quarantine ./tc-gui-macos
           chmod +x ./tc-gui-macos
@@ -284,20 +259,12 @@ jobs:
           The binaries are not signed, so SmartScreen may show "Windows protected your PC": click **More info → Run anyway**. Or clear the download flag in PowerShell and run it from a terminal:
 
           ```powershell
-          Unblock-File .\tc-cli.exe
-          .\tc-cli.exe
-          ```
-
-          Desktop window (opens a window instead of needing a terminal):
-
-          ```powershell
           Unblock-File .\tc-gui.exe
           .\tc-gui.exe
           ```
           EOF
           gh release create "$TAG" --target "$GITHUB_SHA" --title "${TAG#v}${TITLE:+ $TITLE}" \
             --notes-file "$NOTES" ${PRERELEASE:+--prerelease} \
-            dist/tc-cli-linux dist/tc-cli-linux-arm64 dist/tc-cli-macos dist/tc-cli.exe \
             dist/tc-gui-linux dist/tc-gui-linux-arm64 dist/tc-gui-macos dist/tc-gui.exe
         env:
           GH_TOKEN: ${{ github.token }}

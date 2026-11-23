@@ -40,8 +40,7 @@ Ctrl+D          add this directory to the bookmarks
 Ctrl+U          swap panels
 Ctrl+T          new tab
 Ctrl+W          close tab
-Ctrl+=/Ctrl+-   font size (tc-gui, saved; terminals: use
-                the terminal's zoom)
+Ctrl+=/Ctrl+-   font size (saved)
 Ctrl+PgDn       next tab
 Ctrl+Tab        next tab
 Ctrl+PgUp       previous tab
@@ -99,7 +98,6 @@ F6              move
 F2              rename; with several marked: multi-rename
 Shift+F6        rename
 Ctrl+M          multi-rename: masks, counter, find / replace
-                (tc-cli: use F9 -> File, Enter is Ctrl+M)
 F7              make directory
 F8              delete: y / Enter trash, p permanent,
                 n / Esc cancel (remote panels: only p)
@@ -513,7 +511,7 @@ Shift+arrows    select
 Ctrl+A          select all
 Ctrl+C          copy (also system clipboard)
 Ctrl+X          cut
-Ctrl+V          paste (terminal paste works too)
+Ctrl+V          paste
 Ctrl+K / F8     delete selection or line
 Ctrl+D          duplicate line
 Alt+W           wrap on / off
