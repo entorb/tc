@@ -552,6 +552,11 @@ impl Panel {
         self.change_dir(path)
     }
 
+    /// Directory history, oldest first, and the index of the shown entry.
+    pub fn history(&self) -> (&[PathBuf], usize) {
+        (&self.history, self.pos)
+    }
+
     /// Step back (`-1`) or forward (`1`) in the directory history.
     pub fn history_step(&mut self, delta: isize) -> Result<()> {
         let Some(i) = self

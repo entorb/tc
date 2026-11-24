@@ -1,16 +1,19 @@
-use super::{ACCENT, LINK, Look, MARK, MUTED, TEXT};
+use super::{ACCENT, LINK, Look, MARK, MUTED, TEXT, icons};
 use eframe::egui::{
     self, Align, Button, Color32, Label, Layout, RichText, Sense, Stroke, TextStyle, Ui,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::App;
+use tc::app::{App, Mode};
 use tc::fmt::{entry_cols, panel_info, panel_title};
+use tc::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::panel::SortKey;
 enum Action {
     Sort(SortKey),
     Click(usize, bool, bool),
     Tab(usize),
     CloseTab(usize),
+    /// Title button: activate the panel, then run the key.
+    Key(KeyCode, KeyModifiers),
 }
 
 pub(super) fn draw_panel(
@@ -30,12 +33,11 @@ pub(super) fn draw_panel(
         Stroke::new(1.0, MUTED)
     };
     let mut rows = 1;
-    egui::Frame::group(ui.style())
+    let frame = egui::Frame::group(ui.style())
         .stroke(stroke)
         .show(ui, |ui| {
             tab_bar(ui, app, i, &mut action);
-            let title = RichText::new(panel_title(app, i, false)).strong();
-            ui.add(Label::new(if active { title.color(ACCENT) } else { title }).truncate());
+            title_row(ui, app, i, &mut action);
             let height = (ui.available_height() - 2.0 * row_h - 8.0).max(row_h);
             rows = ((height / row_h) as usize).saturating_sub(1).max(1);
             let panel = &app.panels[i];
@@ -79,13 +81,61 @@ pub(super) fn draw_panel(
             ui.add(Label::new(RichText::new(panel_info(app, i)).color(MUTED)).truncate());
         });
     app.page = rows;
+    // a click anywhere in the panel (empty rows, title, status) activates it
+    if action.is_none()
+        && ui.input(|inp| inp.pointer.primary_pressed())
+        && frame.response.contains_pointer()
+    {
+        app.focus_panel(i);
+    }
     match action {
         Some(Action::Sort(key)) => app.sort_by(i, key),
         Some(Action::Click(idx, shift, double)) => app.click_entry(i, idx, shift, double),
         Some(Action::Tab(k)) => app.select_tab(i, k),
         Some(Action::CloseTab(k)) => app.close_tab(i, k),
+        Some(Action::Key(code, mods)) => {
+            app.focus_panel(i);
+            if app.active == i && matches!(app.mode, Mode::Normal) {
+                app.on_key(KeyEvent::new(code, mods));
+            }
+        }
         None => {}
     }
+}
+
+/// Path title, with the bookmarks and directory history buttons at its right end.
+fn title_row(ui: &mut Ui, app: &App, i: usize, action: &mut Option<Action>) {
+    const BUTTONS: [(&str, &str, KeyCode, KeyModifiers); 2] = [
+        (
+            "🕒",
+            "Directory history (Alt+Down)",
+            KeyCode::Down,
+            KeyModifiers::ALT,
+        ),
+        (
+            "★",
+            "Bookmarks: go, add, edit (Ctrl+B)",
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        ),
+    ];
+    let title = RichText::new(panel_title(app, i, false)).strong();
+    let title = if i == app.active {
+        title.color(ACCENT)
+    } else {
+        title
+    };
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        for (icon, tip, code, mods) in BUTTONS {
+            let b = Button::new(RichText::new(icon).font(icons())).frame(false);
+            if ui.add(b.sense(Sense::CLICK)).on_hover_text(tip).clicked() {
+                *action = Some(Action::Key(code, mods));
+            }
+        }
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ui.add(Label::new(title).truncate());
+        });
+    });
 }
 
 fn tab_bar(ui: &mut Ui, app: &App, i: usize, action: &mut Option<Action>) {

@@ -156,10 +156,14 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) -> Option<FormAct> {
 
 fn list_rows(ui: &mut Ui, rows: &[String], sel: usize) -> Option<FormAct> {
     let mut act = None;
+    // scroll to the selection only when it moved: every frame never settles on fractional DPI (flicker, CPU)
+    let id = ui.scope_id().with("list-sel");
+    let follow = ui.data(|d| d.get_temp::<(usize, usize)>(id)) != Some((sel, rows.len()));
+    ui.data_mut(|d| d.insert_temp(id, (sel, rows.len())));
     ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
         for (k, p) in rows.iter().enumerate() {
             let r = list_button(ui, p.as_str(), k == sel, false);
-            if k == sel {
+            if k == sel && follow {
                 r.scroll_to_me(None);
             }
             if r.clicked() || r.double_clicked() {

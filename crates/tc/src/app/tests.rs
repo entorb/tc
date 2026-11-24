@@ -284,3 +284,54 @@ fn sync_browsing_follows_enter_and_parent_and_stops_when_missing() {
     assert_eq!(app.panels[1].path(), r.path());
     assert!(!app.sync_browse && matches!(app.mode, Mode::Message(_)));
 }
+
+#[test]
+fn dir_history_lists_newest_first_and_steps_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let mut app = two_panels(tmp.path(), tmp.path());
+    app.go(0, a.clone());
+    settle(&mut app);
+    app.go(0, b.clone());
+    settle(&mut app);
+    with(&mut app, KeyCode::Down, KeyModifiers::ALT);
+    let Mode::DirHistory(rows, 0) = &app.mode else {
+        panic!("no history list")
+    };
+    assert_eq!(rows[..2], [b.clone(), a.clone()]);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    settle(&mut app);
+    assert_eq!(app.panels[0].path(), a);
+    // a history step: forward still leads to b
+    with(&mut app, KeyCode::Right, KeyModifiers::ALT);
+    settle(&mut app);
+    assert_eq!(app.panels[0].path(), b);
+}
+
+#[test]
+fn delete_is_f8_and_ctrl_arrow_opens_cursor_dir_in_other_panel() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("d")).unwrap();
+    let mut app = two_panels(tmp.path(), tmp.path());
+    settle(&mut app);
+    app.active = 1;
+    let row = app.panels[1]
+        .entries()
+        .iter()
+        .position(|e| e.name == "d")
+        .unwrap();
+    app.panels[1].set_cursor(row);
+    // Ctrl+Right from the right panel points away from the left one: nothing
+    with(&mut app, KeyCode::Right, KeyModifiers::CONTROL);
+    settle(&mut app);
+    assert_eq!(app.panels[0].path(), tmp.path());
+    with(&mut app, KeyCode::Left, KeyModifiers::CONTROL);
+    settle(&mut app);
+    assert_eq!(app.panels[0].path(), tmp.path().join("d"));
+    assert_eq!(app.active, 1);
+    key(&mut app, KeyCode::Delete);
+    assert!(matches!(app.mode, Mode::Confirm(Op::Delete, ..)));
+}

@@ -107,6 +107,8 @@ pub enum Mode {
     Compare(usize),
     /// Mount points, selected row and the panel Enter jumps.
     Drives(Vec<PathBuf>, usize, usize),
+    /// Alt+Down: the active panel's directory history, newest first, and the selected row.
+    DirHistory(Vec<PathBuf>, usize),
     Message(String),
     /// Find files form (Ctrl+F): fields and checkboxes, one focused.
     FindForm(FindForm),
@@ -469,6 +471,7 @@ impl App {
             Mode::Compare(sel) => self.compare_key(key.code, sel),
             Mode::Menu(group, sel) => self.menu_key(key.code, group, sel),
             Mode::Drives(rows, sel, panel) => self.drives_key(key.code, rows, sel, panel),
+            Mode::DirHistory(rows, sel) => self.dir_history_key(key.code, rows, sel),
             Mode::Found(f) => self.found_key(key, f),
             Mode::FindForm(form) => self.find_form_key(key, form),
             Mode::MultiRename(form) => self.multi_rename_key(key, form),
@@ -620,18 +623,11 @@ impl App {
                 self.mode = Mode::Drives(hotlist::mounts(), 0, usize::from(n == 2));
             }
             KeyCode::Char('=') if alt => {
-                let panel = &self.panels[self.active];
-                let path = panel.path().to_owned();
-                match panel.remote().cloned() {
-                    Some(r) => {
-                        if let Err(e) = self.panels[1 - self.active].open_remote(r, path) {
-                            self.mode = Mode::Message(e.to_string());
-                        }
-                    }
-                    None => self.go(1 - self.active, path),
-                }
+                let path = self.panels[self.active].path().to_owned();
+                self.open_in_other(path);
             }
             KeyCode::Char('c' | 'C') if alt && shift => self.copy_paths(),
+            KeyCode::Down if alt => self.dir_history_open(),
             KeyCode::Up | KeyCode::Down if shift => {
                 let panel = &mut self.panels[self.active];
                 let c = panel.cursor();
@@ -728,6 +724,15 @@ impl App {
                 }
             }
             KeyCode::Insert => self.copy_paths(),
+            // Ctrl+Left in the right panel, Ctrl+Right in the left: cursor dir into the other panel
+            KeyCode::Left | KeyCode::Right if (code == KeyCode::Left) == (self.active == 1) => {
+                let panel = &self.panels[self.active];
+                let dir = (panel.current())
+                    .filter(|e| e.is_dir && !e.is_parent() && !panel.is_virtual())
+                    .filter(|_| panel.archive().is_none())
+                    .map_or_else(|| panel.path().to_owned(), |e| panel.path().join(&e.name));
+                self.open_in_other(dir);
+            }
             KeyCode::Char('t' | 'w')
             | KeyCode::PageUp
             | KeyCode::PageDown
@@ -851,6 +856,7 @@ impl App {
         // Left goes up like Backspace; Right opens only dirs and archives, never runs a file
         let code = match code {
             KeyCode::Left => KeyCode::Backspace,
+            KeyCode::Delete => KeyCode::F(8),
             KeyCode::Right
                 if panel
                     .current()
@@ -961,6 +967,18 @@ impl App {
         let (p, d) = (progress.clone(), dir.clone());
         thread::spawn(move || ops::scan(&[d], &p));
         self.dir_job = Some((self.active, dir, progress));
+    }
+
+    /// Show `path` of the active panel (local or same remote) in the other panel.
+    fn open_in_other(&mut self, path: PathBuf) {
+        match self.panels[self.active].remote().cloned() {
+            Some(r) => {
+                if let Err(e) = self.panels[1 - self.active].open_remote(r, path) {
+                    self.mode = Mode::Message(e.to_string());
+                }
+            }
+            None => self.go(1 - self.active, path),
+        }
     }
 
     fn go(&mut self, i: usize, path: PathBuf) {

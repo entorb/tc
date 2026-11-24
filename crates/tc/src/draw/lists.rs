@@ -1,10 +1,11 @@
 use super::chrome::line_edit;
 use super::{ACCENT, MARK, MUTED, TEXT};
 use eframe::egui::{
-    Align, Align2, Color32, FontId, Label, Layout, Pos2, ProgressBar, Rect, RichText, Sense,
-    Stroke, StrokeKind, TextStyle, Ui, vec2,
+    self, Align, Align2, Color32, FontId, Label, Layout, Pos2, ProgressBar, Rect, RichText, Sense,
+    Shape, Stroke, StrokeKind, TextStyle, Ui, epaint::Mesh, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
+use std::sync::Arc;
 use tc::app::{App, Mode, Stats};
 use tc::fmt::{
     self, StatsCols, found_cols, found_title, stats_cols, stats_footer, stats_title, sync_cols,
@@ -206,12 +207,7 @@ fn stats_chart(ui: &mut Ui, st: &mut Stats) -> Option<(usize, bool)> {
     st.treemap(rect.width(), rect.height(), u8::MAX, 4.0, 2.0);
     let sel = st.selected_index();
     let at = |t: &Tile| Rect::from_min_size(rect.min + vec2(t.x, t.y), vec2(t.w, t.h));
-    let outline = Stroke::new(1.0, Color32::from_black_alpha(160));
-    for t in st.tiles() {
-        let (r, g, b) = fmt::kind_rgb(t.kind, t.depth % 2);
-        painter.rect_filled(at(t), 0.0, Color32::from_rgb(r, g, b));
-        painter.rect_stroke(at(t), 0.0, outline, StrokeKind::Inside);
-    }
+    painter.add(Shape::Mesh(tiles_mesh(ui.ctx(), rect, st.tiles())));
     let dir = st.current();
     for t in st.tiles().iter().filter(|t| t.depth == 0) {
         let r = at(t);
@@ -248,6 +244,36 @@ fn stats_chart(ui: &mut Ui, st: &mut Stats) -> Option<(usize, bool)> {
     hit.map(|r| (r, resp.double_clicked()))
 }
 
+/// Tiles as one mesh (outline quad, fill quad inset by 1 px), rebuilt only when the tiles or
+/// the area changed: re-tessellating thousands of stroked rects every frame costs a CPU core.
+fn tiles_mesh(ctx: &egui::Context, rect: Rect, tiles: &[Tile]) -> Arc<Mesh> {
+    type Cached = (Rect, Vec<Tile>, Arc<Mesh>);
+    let id = egui::Id::unique("stats-treemap-mesh");
+    if let Some(mesh) = ctx.data(|d| {
+        d.get_temp::<Cached>(id)
+            .filter(|(r, t, _)| *r == rect && t.as_slice() == tiles)
+            .map(|c| c.2)
+    }) {
+        return mesh;
+    }
+    let mut mesh = Mesh::default();
+    let outline = Color32::from_rgb(20, 20, 20);
+    for t in tiles {
+        let r = Rect::from_min_size(rect.min + vec2(t.x, t.y), vec2(t.w, t.h));
+        let (red, g, b) = fmt::kind_rgb(t.kind, t.depth % 2);
+        let fill = Color32::from_rgb(red, g, b);
+        if r.width() > 2.0 && r.height() > 2.0 {
+            mesh.add_colored_rect(r, outline);
+            mesh.add_colored_rect(r.shrink(1.0), fill);
+        } else {
+            mesh.add_colored_rect(r, fill);
+        }
+    }
+    let mesh = Arc::new(mesh);
+    ctx.data_mut(|d| d.insert_temp::<Cached>(id, (rect, tiles.to_vec(), mesh.clone())));
+    mesh
+}
+
 pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
     let (st, cmd): (&mut Stats, Option<&LineEdit>) = match (&mut app.mode, &mut app.stats) {
         (Mode::Stats(st), _) => (st, None),
@@ -265,6 +291,11 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
         .collect();
     let sel = st.sel;
     let size = if st.by_files { "Files" } else { "Size" };
+    let name = if st.filter.active() {
+        "Name 🔍"
+    } else {
+        "Name"
+    };
     let list = |ui: &mut Ui| {
         let cols = [
             Column::exact(14.0),
@@ -273,7 +304,7 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
             Column::exact(100.0),
             Column::remainder().clip(true),
         ];
-        let titles = ["", size, "Share", "", "Name"];
+        let titles = ["", size, "Share", "", name];
         click_table(
             ui,
             &cols,

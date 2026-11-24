@@ -2,6 +2,7 @@
 
 use super::{App, Filter, Mode, REMOTE, edit_key, list_nav, list_rows};
 use crate::{KeyCode, KeyEvent, KeyModifiers};
+use std::path::PathBuf;
 use tc_core::cmdline::LineEdit;
 use tc_core::hotlist;
 
@@ -38,6 +39,39 @@ impl App {
         {
             self.mode = Mode::Message(e.to_string());
         }
+    }
+
+    /// Alt+Down: the active panel's visited directories, newest first.
+    pub(super) fn dir_history_open(&mut self) {
+        let rows = self.panels[self.active]
+            .history()
+            .0
+            .iter()
+            .rev()
+            .cloned()
+            .collect();
+        self.mode = Mode::DirHistory(rows, 0);
+    }
+
+    /// Enter steps the panel's history to the row, so remote panels stay on their server.
+    pub(super) fn dir_history_key(&mut self, code: KeyCode, rows: Vec<PathBuf>, sel: usize) {
+        let last = rows.len().saturating_sub(1);
+        let mut sel = sel.min(last);
+        match code {
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => return,
+            KeyCode::Up => sel = sel.saturating_sub(1),
+            KeyCode::Down => sel = (sel + 1).min(last),
+            KeyCode::Enter if !rows.is_empty() => {
+                let panel = &mut self.panels[self.active];
+                let delta = (last - sel) as isize - panel.history().1 as isize;
+                if let Err(e) = panel.history_step(delta) {
+                    self.mode = Mode::Message(e.to_string());
+                }
+                return;
+            }
+            _ => {}
+        }
+        self.mode = Mode::DirHistory(rows, sel);
     }
 
     /// Bookmark or connection list, shown without a filter.

@@ -28,6 +28,8 @@ PgUp/PgDn       page up / down
 Home/End        first / last entry
 Alt+Left        history back
 Alt+Right       history forward
+Alt+Down        directory history of the panel (also the 🕒 button
+                top right of the panel; ★ next to it: bookmarks)
 Ctrl+K          sync browsing on / off: entering a directory or
                 going up repeats it in the other panel (local
                 only; off when it cannot follow)
@@ -45,6 +47,8 @@ Ctrl+PgDn       next tab
 Ctrl+Tab        next tab
 Ctrl+PgUp       previous tab
 Alt+=           other panel to this directory
+Ctrl+Left       right panel: cursor directory into the left panel
+Ctrl+Right      left panel: cursor directory into the right panel
 Ctrl+F3         sort by name (Ctrl+F4 ext, F5 date, F6 size;
                 again: reverse)
 Esc             clear filter, leave found list
@@ -93,14 +97,15 @@ F3              view (media: preview)
 F4              edit (media: default application)
 Shift+F4        edit in external editor (asks the name,
                 creates a missing file)
-F5              copy
+F5              copy (Windows without symlink rights: directory
+                links become junctions, file links copies)
 F6              move
 F2              rename; with several marked: multi-rename
 Shift+F6        rename
 Ctrl+M          multi-rename: masks, counter, find / replace
 F7              make directory
 F8              delete: y / Enter trash, p permanent,
-                n / Esc cancel (remote panels: only p)
+                n / Esc cancel (remote panels: only p); also Delete
                 copy / move / delete over 2 s: progress of
                 bytes, files, dirs with rates per second, ETA;
                 Esc cancels
@@ -145,7 +150,8 @@ Tab             show and sort by size / file count (count
                 mode treemap: dirs only by file count, 2 levels)
 F5              rescan the browsed directory, totals above update
 /               filter the entries by name: Enter keeps,
-                Esc clears
+                Esc clears; 🔍 on the Name column while active
+Wheel           move cursor 3 entries
 
 == Files ==
 F3              view file
@@ -398,6 +404,11 @@ Esc / q / F10   close
 == Drives (Alt+F1 / Alt+F2) ==
 Up/Down         move
 Enter           go to the mount point
+Esc / q / F10   close
+
+== Directory history (Alt+Down) ==
+Up/Down         move, newest on top
+Enter           go there (a history step: back / forward stay)
 Esc / q / F10   close";
 pub const HELP_CONFLICT: &str = "\
 == Target exists ==
@@ -578,6 +589,7 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         | Mode::Popular(_)
         | Mode::Connections(_)
         | Mode::Drives(..)
+        | Mode::DirHistory(..)
         | Mode::Compare(_) => ("Help: lists", HELP_LISTS),
         Mode::Xfer(_) => ("Help: file exists", HELP_CONFLICT),
         _ => ("Help", HELP_MAIN),

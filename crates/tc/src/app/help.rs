@@ -16,6 +16,7 @@ impl App {
                     | Mode::Popular(_)
                     | Mode::Connections(_)
                     | Mode::Drives(..)
+                    | Mode::DirHistory(..)
                     | Mode::Compare(_) => true,
                     Mode::Xfer(x) => x.ask.is_some() && x.rename.is_none(),
                     _ => false,
@@ -62,18 +63,18 @@ impl App {
         self.help_sel = self
             .help_entries()
             .iter()
-            .position(|e| e.1.is_some())
+            .position(|e| is_item(e.0))
             .unwrap_or(0);
     }
 
-    /// Moves the selection to the next key line in `dir`, or scrolls when there are none.
+    /// Moves the selection to the next key line in `dir` (runnable or not), or scrolls when there are none.
     pub(super) fn help_move(&mut self, dir: isize) {
         let sel = self.help_sel as isize;
         let next = self
             .help_entries()
             .iter()
             .enumerate()
-            .filter(|(i, e)| e.1.is_some() && (*i as isize - sel).signum() == dir)
+            .filter(|(i, e)| is_item(e.0) && (*i as isize - sel).signum() == dir)
             .map(|(i, _)| i)
             .min_by_key(|&i| (i as isize - sel).abs());
         match next {
@@ -127,6 +128,11 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Key line of a help text: the cursor stops there.
+fn is_item(line: &str) -> bool {
+    matches!(fmt::help_line(line), fmt::HelpLine::Entry(..))
 }
 
 #[cfg(test)]
@@ -194,6 +200,18 @@ mod tests {
         assert!(app.help && app.help_filter.is_empty());
         key(&mut app, KeyCode::Esc);
         assert!(!app.help && matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn help_cursor_stops_on_key_lines_without_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = || Panel::open(tmp.path()).unwrap();
+        let mut app = App::new(p(), p());
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        key(&mut app, KeyCode::F(1));
+        let first = app.help_sel;
+        key(&mut app, KeyCode::Down);
+        assert!(app.help_sel > first && app.help_action_at(app.help_sel).is_none());
     }
 
     #[test]

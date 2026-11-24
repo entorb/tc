@@ -111,6 +111,10 @@ impl App {
                 let last = p.rows.len().saturating_sub(1);
                 p.sel = p.sel.saturating_add_signed(lines).min(last);
             }
+            Mode::Stats(st) if st.confirm.is_none() => {
+                let last = st.view.len().saturating_sub(1);
+                st.sel = st.sel.saturating_add_signed(lines).min(last);
+            }
             _ => {}
         }
     }
@@ -133,6 +137,13 @@ impl App {
     pub fn sort_by(&mut self, i: usize, key: SortKey) {
         self.active = i;
         self.panels[i].set_sort(key);
+    }
+
+    /// Click into panel `i` outside its entries: make it active.
+    pub fn focus_panel(&mut self, i: usize) {
+        if self.input.is_none() && matches!(self.mode, Mode::Normal) {
+            self.active = i;
+        }
     }
 
     /// Click on entry `idx` of panel `i`: cursor there, Shift selects the range from the old cursor, double click opens.

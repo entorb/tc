@@ -229,6 +229,9 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             &Filter::default(),
             "(no drives found)",
         ),
+        Mode::DirHistory(rows, sel) => {
+            list_dialog(("Directory history", rows, *sel), &Filter::default(), "")
+        }
         Mode::Connections(sel) => list_dialog(
             ("Connections", &app.connections, *sel),
             &app.list_filter,
