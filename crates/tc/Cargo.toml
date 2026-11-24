@@ -22,3 +22,6 @@ zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2
 
 [lints]
 workspace = true
+
+[build-dependencies]
+winresource = "0.1.34"

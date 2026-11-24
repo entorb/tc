@@ -438,7 +438,7 @@ pub fn panel_info(app: &App, i: usize) -> String {
     let (count, bytes) = panel.selection_info();
     let free = match app.free[i].1.load(std::sync::atomic::Ordering::Relaxed) {
         0 => String::new(),
-        f => format!("  free {} ", human(f - 1)),
+        f => format!(" {} free ", human(f - 1)),
     };
     let info = match panel.current().filter(|e| !e.is_parent()) {
         _ if count > 0 => {
@@ -465,11 +465,7 @@ pub fn panel_info(app: &App, i: usize) -> String {
         }
         None => String::new(),
     };
-    if free.is_empty() {
-        info
-    } else {
-        format!("{info}{free}")
-    }
+    format!("{free}{info}")
 }
 
 /// Title of the find results list.
