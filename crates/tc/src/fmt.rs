@@ -289,7 +289,6 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             };
             text("Save", format!("{t}\n\n[y] Yes   [n] No   [Esc] Cancel"))
         }
-        Mode::AskQuit => text("Quit", "Quit tc?\n\n[y] Quit   [Esc] Cancel".to_owned()),
         Mode::AskExit(_) => text(
             "Edit",
             "Save changes?\n\n[y] Yes   [n] No   [Esc] Cancel".to_owned(),
@@ -416,7 +415,12 @@ pub fn panel_info(app: &App, i: usize) -> String {
         f => format!("  free {} ", human(f - 1)),
     };
     let info = match panel.current().filter(|e| !e.is_parent()) {
-        _ if count > 0 => format!(" {count} selected, {}", human(bytes)),
+        _ if count > 0 => {
+            // ".." is only ever the first entry: O(1) per frame
+            let list = panel.entries();
+            let all = list.len() - usize::from(list.first().is_some_and(Entry::is_parent));
+            format!(" {count} of {all} selected, {}", human(bytes))
+        }
         Some(e) => {
             let size = match dir_size(app, i, e) {
                 Some(s) => s,

@@ -3,13 +3,16 @@ use eframe::egui::{
     self, Align, Button, Color32, Label, Layout, RichText, Sense, Stroke, TextStyle, Ui,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{App, Mode};
+use tc::app::{App, ENTRY_MENU, Mode};
 use tc::fmt::{entry_cols, panel_info, panel_title};
 use tc::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::panel::SortKey;
 enum Action {
     Sort(SortKey),
-    Click(usize, bool, bool),
+    /// Entry, Shift / Ctrl held, double click.
+    Click(usize, KeyModifiers, bool),
+    /// Middle click: the entry's directory in a new tab.
+    NewTab(usize),
     Tab(usize),
     CloseTab(usize),
     /// Title button: activate the panel, then run the key.
@@ -25,7 +28,7 @@ pub(super) fn draw_panel(
 ) {
     let active = i == app.active;
     let row_h = ui.text_style_height(&TextStyle::Body) + 6.0;
-    let shift = ui.input(|inp| inp.modifiers.shift);
+    let mods = ui.input(|inp| click_mods(inp.modifiers));
     let mut action = None;
     let stroke = if active {
         Stroke::new(1.0, ACCENT)
@@ -75,7 +78,7 @@ pub(super) fn draw_panel(
                         let e = &panel.entries()[idx];
                         let color = entry_color(panel.is_selected(e), e);
                         let cols = entry_cols(app, i, e, today);
-                        entry_row(row, (e.is_dir, color, cols), hl, shift, &mut action);
+                        entry_row(row, (e.is_dir, color, cols), hl, mods, &mut action);
                     });
                 });
             ui.add(Label::new(RichText::new(panel_info(app, i)).color(MUTED)).truncate());
@@ -90,7 +93,8 @@ pub(super) fn draw_panel(
     }
     match action {
         Some(Action::Sort(key)) => app.sort_by(i, key),
-        Some(Action::Click(idx, shift, double)) => app.click_entry(i, idx, shift, double),
+        Some(Action::Click(idx, mods, double)) => app.click_entry(i, idx, mods, double),
+        Some(Action::NewTab(idx)) => app.open_tab(i, idx),
         Some(Action::Tab(k)) => app.select_tab(i, k),
         Some(Action::CloseTab(k)) => app.close_tab(i, k),
         Some(Action::Key(code, mods)) => {
@@ -196,7 +200,7 @@ fn entry_row(
     mut row: egui_extras::TableRow,
     (is_dir, color, [name, size, date]): (bool, Color32, [String; 3]),
     hl: Option<bool>,
-    shift: bool,
+    mods: KeyModifiers,
     action: &mut Option<Action>,
 ) {
     let idx = row.index();
@@ -219,8 +223,36 @@ fn entry_row(
     });
     let r = row.response();
     if r.double_clicked() {
-        *action = Some(Action::Click(idx, false, true));
+        *action = Some(Action::Click(idx, KeyModifiers::NONE, true));
     } else if r.clicked() {
-        *action = Some(Action::Click(idx, shift, false));
+        *action = Some(Action::Click(idx, mods, false));
+    } else if r.middle_clicked() {
+        *action = Some(Action::NewTab(idx));
+    } else if r.secondary_clicked() {
+        // the menu acts on the clicked entry (or the selection)
+        *action = Some(Action::Click(idx, KeyModifiers::NONE, false));
     }
+    r.context_menu(|ui| entry_menu(ui, action));
+}
+
+/// Right-click menu: each item runs its key.
+fn entry_menu(ui: &mut Ui, action: &mut Option<Action>) {
+    for (label, code, mods) in ENTRY_MENU {
+        if ui.button(RichText::new(label).monospace()).clicked() {
+            *action = Some(Action::Key(code, mods));
+            ui.close();
+        }
+    }
+}
+
+/// Shift / Ctrl (Cmd on macOS) held during a click.
+fn click_mods(m: egui::Modifiers) -> KeyModifiers {
+    let mut out = KeyModifiers::NONE;
+    if m.shift {
+        out |= KeyModifiers::SHIFT;
+    }
+    if m.command {
+        out |= KeyModifiers::CONTROL;
+    }
+    out
 }

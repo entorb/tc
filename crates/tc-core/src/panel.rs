@@ -138,6 +138,8 @@ pub struct Panel {
     entries: Vec<Entry>,
     cursor: usize,
     selected: HashSet<OsString>,
+    /// Last dropped selection and its directory, for [`Panel::restore_selection`].
+    prev_sel: Option<(PathBuf, HashSet<OsString>)>,
     /// Lowercased name filter; `all` keeps the unfiltered list while it is set.
     filter: String,
     all: Option<Vec<Entry>>,
@@ -178,6 +180,7 @@ impl Panel {
             entries,
             cursor: 0,
             selected: HashSet::new(),
+            prev_sel: None,
             filter: String::new(),
             all: None,
             virt: false,
@@ -321,6 +324,8 @@ impl Panel {
         let Some(entries) = self.archive_entries() else {
             return;
         };
+        // remembered under the directory the names belong to
+        self.unselect_all();
         let Some((a, sub)) = &self.archive else {
             return;
         };
@@ -334,8 +339,6 @@ impl Panel {
         self.filter.clear();
         self.virt = false;
         self.cursor = 0;
-        self.selected.clear();
-        self.sel_sum.set(None);
     }
 
     pub fn is_virtual(&self) -> bool {
@@ -355,8 +358,7 @@ impl Panel {
         self.hits = hits;
         self.all = None;
         self.filter.clear();
-        self.selected.clear();
-        self.sel_sum.set(None);
+        self.unselect_all();
         self.cursor = 0;
         self.virt = true;
     }

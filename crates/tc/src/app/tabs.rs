@@ -5,7 +5,7 @@ use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::mem;
 use std::path::Path;
 use tc_core::archive::Format;
-use tc_core::panel::SortKey;
+use tc_core::panel::{Panel, SortKey};
 
 impl App {
     /// Tabs per side: `panels[side]` is the visible tab, rotated through the ring in `tabs[side]`.
@@ -14,21 +14,18 @@ impl App {
         let bg = &mut self.tabs[side];
         let n = bg.len() + 1;
         let next = match code {
-            KeyCode::Char('t') => match self.panels[side].duplicate() {
-                Ok(p) => {
-                    bg.push_back(mem::replace(&mut self.panels[side], p));
-                    self.tab[side] += 1;
-                    return;
+            KeyCode::Char('t') => {
+                match self.panels[side].duplicate() {
+                    Ok(p) => self.push_tab(side, p),
+                    Err(e) => self.mode = Mode::Message(e.to_string()),
                 }
-                Err(e) => {
-                    self.mode = Mode::Message(e.to_string());
-                    return;
-                }
-            },
+                return;
+            }
             KeyCode::Char('w') => {
                 let Some(p) = bg.pop_front() else { return };
-                self.panels[side] = p;
+                let old = mem::replace(&mut self.panels[side], p);
                 self.tab[side] %= n - 1;
+                self.remember_closed(side, &old);
                 None
             }
             KeyCode::PageDown | KeyCode::Tab => bg.pop_front().map(|p| {
@@ -53,6 +50,73 @@ impl App {
         // the directory may have changed while the tab was hidden
         if let Err(e) = self.panels[side].reload() {
             self.mode = Mode::Message(e.to_string());
+        }
+    }
+
+    /// Show `p` as a new tab of `side`, after the visible one.
+    fn push_tab(&mut self, side: usize, p: Panel) {
+        self.tabs[side].push_back(mem::replace(&mut self.panels[side], p));
+        self.tab[side] += 1;
+    }
+
+    /// Keep a closed local tab's directory for Ctrl+Shift+T (last 10); remote, archive and found tabs are not kept.
+    fn remember_closed(&mut self, side: usize, p: &Panel) {
+        if p.remote().is_none() && p.archive().is_none() && !p.is_virtual() {
+            self.closed_tabs.push((side, p.path().to_owned()));
+            let over = self.closed_tabs.len().saturating_sub(10);
+            self.closed_tabs.drain(..over);
+        }
+    }
+
+    /// Ctrl+Shift+T: open the last closed tab again on its side.
+    pub(super) fn reopen_tab(&mut self) {
+        let Some((side, dir)) = self.closed_tabs.pop() else {
+            return;
+        };
+        match Panel::open(&dir) {
+            Ok(p) => {
+                self.active = side;
+                self.push_tab(side, p);
+            }
+            Err(e) => self.mode = Mode::Message(e.to_string()),
+        }
+    }
+
+    /// Ctrl+Shift+O: move the visible tab to the other side; the last tab of a side stays.
+    pub(super) fn tab_to_other_side(&mut self) {
+        let side = self.active;
+        let Some(next) = self.tabs[side].pop_front() else {
+            return;
+        };
+        let moved = mem::replace(&mut self.panels[side], next);
+        self.tab[side] %= self.tabs[side].len() + 1;
+        self.active = 1 - side;
+        self.push_tab(1 - side, moved);
+        if let Err(e) = self.panels[side].reload() {
+            self.mode = Mode::Message(e.to_string());
+        }
+    }
+
+    /// Middle click on entry `idx` of panel `i`: its directory in a new tab.
+    pub fn open_tab(&mut self, i: usize, idx: usize) {
+        if self.input.is_some() || !matches!(self.mode, Mode::Normal) {
+            return;
+        }
+        self.active = i;
+        let panel = &mut self.panels[i];
+        panel.set_cursor(idx);
+        let dir = (panel.current())
+            .filter(|e| e.is_dir && !e.is_parent() && panel.archive().is_none())
+            .map(|e| panel.path().join(&e.name));
+        let Some(dir) = dir else { return };
+        let tab = match panel.remote().cloned() {
+            // the duplicate is still connecting: open the directory on that remote, not by side
+            Some(r) => (panel.duplicate()).and_then(|mut p| p.open_remote(r, dir).map(|()| p)),
+            None => Panel::open(&dir),
+        };
+        match tab {
+            Ok(p) => self.push_tab(i, p),
+            Err(e) => self.mode = Mode::Message(e.to_string()),
         }
     }
 
@@ -146,18 +210,24 @@ impl App {
         }
     }
 
-    /// Click on entry `idx` of panel `i`: cursor there, Shift selects the range from the old cursor, double click opens.
-    pub fn click_entry(&mut self, i: usize, idx: usize, shift: bool, double: bool) {
+    /// Click on entry `idx` of panel `i`: cursor there, Shift selects the range from the old cursor,
+    /// Ctrl toggles the entry's selection, double click opens.
+    pub fn click_entry(&mut self, i: usize, idx: usize, mods: KeyModifiers, double: bool) {
         if self.input.is_some() || !matches!(self.mode, Mode::Normal) {
             return;
         }
         self.active = i;
         let panel = &mut self.panels[i];
-        if shift {
+        if mods.contains(KeyModifiers::SHIFT) {
             panel.select_range(panel.cursor(), idx);
             return;
         }
         panel.set_cursor(idx);
+        if mods.contains(KeyModifiers::CONTROL) {
+            panel.toggle_select();
+            panel.set_cursor(idx);
+            return;
+        }
         if double {
             let is_dir = self.panels[i]
                 .current()
@@ -250,12 +320,62 @@ mod tests {
         app.on_key(shift(KeyCode::Down)); // ".." is not selectable
         app.on_key(shift(KeyCode::Down));
         assert_eq!(app.panels[0].targets().len(), 1);
-        app.click_entry(1, 2, false, false); // entry 2 ("b") in right panel
+        let (none, ctrl) = (KeyModifiers::NONE, KeyModifiers::CONTROL);
+        app.click_entry(1, 2, none, false); // entry 2 ("b") in right panel
         assert_eq!((app.active, app.panels[1].cursor()), (1, 2));
-        app.click_entry(1, 4, true, false); // entries 2..=4
+        app.click_entry(1, 4, KeyModifiers::SHIFT, false); // entries 2..=4
         assert_eq!(app.panels[1].targets().len(), 3);
+        app.click_entry(1, 3, ctrl, false); // toggles "c" off, cursor stays
+        assert_eq!(
+            (app.panels[1].targets().len(), app.panels[1].cursor()),
+            (2, 3)
+        );
+        app.click_entry(1, 3, ctrl, false);
+        assert_eq!(app.panels[1].targets().len(), 3);
+        with(
+            &mut app,
+            KeyCode::Char('A'),
+            ctrl.union(KeyModifiers::SHIFT),
+        ); // unselect all
+        assert_eq!(app.panels[1].selection_info().0, 0);
+        // Shift+End / Shift+Home select to the last / first entry
+        app.on_key(shift(KeyCode::End)); // "c", "d"
+        assert_eq!(app.panels[1].targets().len(), 2);
+        app.on_key(shift(KeyCode::Home)); // cursor was on "d": all
+        assert_eq!(app.panels[1].targets().len(), 4);
+        with(
+            &mut app,
+            KeyCode::Char('A'),
+            ctrl.union(KeyModifiers::SHIFT),
+        );
+        with(&mut app, KeyCode::Char('a'), ctrl);
+        assert_eq!(app.panels[1].targets().len(), 4);
         let before = app.panels[1].path().to_path_buf();
-        app.click_entry(1, 0, false, true); // double click on "..": enters the parent
+        app.click_entry(1, 0, none, true); // double click on "..": enters the parent
         assert_ne!(app.panels[1].path(), before);
+    }
+
+    #[test]
+    fn middle_click_undo_close_and_move_tabs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sub");
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+        let mut app = App::new(Panel::open(&dir).unwrap(), Panel::open(&dir).unwrap());
+        app.open_tab(0, 1); // middle click on "inner"
+        assert_eq!(app.panels[0].path(), dir.join("inner"));
+        assert_eq!((app.tabs[0].len(), app.tab[0]), (1, 1));
+        let cs = KeyModifiers::CONTROL.union(KeyModifiers::SHIFT);
+        with(&mut app, KeyCode::Char('O'), cs); // to the right side
+        assert_eq!(
+            (app.active, app.panels[1].path()),
+            (1, dir.join("inner").as_path())
+        );
+        assert_eq!((app.tabs[0].len(), app.tabs[1].len()), (0, 1));
+        with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(app.panels[1].path(), dir);
+        with(&mut app, KeyCode::Char('T'), cs); // undo close
+        assert_eq!(app.panels[1].path(), dir.join("inner"));
+        with(&mut app, KeyCode::Char('T'), cs); // nothing more to reopen
+        assert_eq!(app.tabs[1].len(), 1);
     }
 }

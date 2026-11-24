@@ -139,6 +139,8 @@ impl Panel {
     }
 
     pub(super) fn show(&mut self, path: PathBuf, entries: Vec<Entry>) {
+        // before `path` changes: remembered under the directory the names belong to
+        self.unselect_all();
         self.entries = entries;
         self.dir_sizes.clear();
         self.sel_sum.set(None);
@@ -149,7 +151,6 @@ impl Panel {
         self.archive = None;
         self.path = path;
         self.cursor = 0;
-        self.selected.clear();
     }
 }
 #[cfg(test)]

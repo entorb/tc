@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use super::{CompareKind, Entry, Panel, compare};
 
@@ -106,6 +107,49 @@ impl Panel {
         other.sel_sum.set(None);
     }
 
+    /// Select every visible entry but "..", directories too.
+    pub fn select_all(&mut self) {
+        let names = self.entries.iter().filter(|e| !e.is_parent());
+        self.selected.extend(names.map(|e| e.name.clone()));
+        self.sel_sum.set(None);
+    }
+
+    /// Drop the selection; [`Panel::restore_selection`] brings it back.
+    pub fn unselect_all(&mut self) {
+        if !self.selected.is_empty() {
+            self.prev_sel = Some((self.path.clone(), std::mem::take(&mut self.selected)));
+        }
+        self.sel_sum.set(None);
+    }
+
+    /// Select again the last dropped selection (unselect all, directory change); false if it was elsewhere.
+    pub fn restore_selection(&mut self) -> bool {
+        match &self.prev_sel {
+            Some((dir, names)) if *dir == self.path => {
+                self.selected.extend(names.iter().cloned());
+                self.sel_sum.set(None);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Select the visible files with the extension of the cursor file (case-insensitive; none = no extension).
+    pub fn select_same_ext(&mut self) {
+        let ext = |e: &Entry| {
+            Path::new(&e.name)
+                .extension()
+                .map(OsStr::to_ascii_lowercase)
+        };
+        let Some(want) = self.current().filter(|e| !e.is_dir).map(ext) else {
+            return;
+        };
+        let names = self.entries.iter().filter(|e| !e.is_dir && ext(e) == want);
+        let names: Vec<_> = names.map(|e| e.name.clone()).collect();
+        self.selected.extend(names);
+        self.sel_sum.set(None);
+    }
+
     /// Invert the selection of visible files; directories are left alone.
     pub fn invert_selection(&mut self) {
         self.sel_sum.set(None);
@@ -174,5 +218,46 @@ mod tests {
         p.select_mask("", true);
         p.select_mask("c.*", false);
         assert_eq!(p.targets().len(), 2);
+    }
+
+    #[test]
+    fn select_all_same_ext_and_restore() {
+        let tmp = tempfile::tempdir().unwrap();
+        for n in ["a.rs", "b.RS", "c.txt", "noext"] {
+            fs::write(tmp.path().join(n), "").unwrap();
+        }
+        fs::create_dir(tmp.path().join("d.rs")).unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        p.select_all();
+        assert_eq!(p.targets().len(), 5); // dirs too, never ".."
+        p.unselect_all();
+        assert!(p.selection_info().0 == 0);
+        assert!(p.restore_selection());
+        assert_eq!(p.targets().len(), 5);
+        p.unselect_all();
+        assert!(p.focus(OsStr::new("a.rs")));
+        p.select_same_ext();
+        assert_eq!(p.targets(), [p.path().join("a.rs"), p.path().join("b.RS")]);
+        p.unselect_all();
+        assert!(p.focus(OsStr::new("d.rs")));
+        p.select_same_ext(); // cursor on a directory: nothing
+        assert_eq!(p.selection_info().0, 0);
+        // a selection left behind by a directory change restores only in its directory
+        p.restore_selection();
+        p.go(tmp.path().join("d.rs")).unwrap();
+        while p.loading().is_some() {
+            if let Some(r) = p.wait(std::time::Duration::from_secs(5)) {
+                r.unwrap();
+            }
+        }
+        assert!(!p.restore_selection());
+        p.parent().unwrap();
+        while p.loading().is_some() {
+            if let Some(r) = p.wait(std::time::Duration::from_secs(5)) {
+                r.unwrap();
+            }
+        }
+        assert!(p.restore_selection());
+        assert_eq!(p.targets(), [p.path().join("a.rs"), p.path().join("b.RS")]);
     }
 }

@@ -150,6 +150,18 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Select by mask      +", KeyCode::Char('+'), N),
             ("Deselect by mask    -", KeyCode::Char('-'), N),
             ("Invert selection    *", KeyCode::Char('*'), N),
+            ("Select all          Ctrl+A", KeyCode::Char('a'), C),
+            (
+                "Unselect all        Ctrl+Shift+A",
+                KeyCode::Char('A'),
+                C.union(S),
+            ),
+            ("Same extension      Alt+.", KeyCode::Char('.'), A),
+            (
+                "Restore selection   Ctrl+Shift+R",
+                KeyCode::Char('R'),
+                C.union(S),
+            ),
             ("Compare, select     Ctrl+Y", KeyCode::Char('y'), C),
         ],
     ),
@@ -178,8 +190,35 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Other panel here    Alt+=", KeyCode::Char('='), A),
             ("New tab             Ctrl+T", KeyCode::Char('t'), C),
             ("Close tab           Ctrl+W", KeyCode::Char('w'), C),
+            (
+                "Reopen closed tab   Ctrl+Shift+T",
+                KeyCode::Char('T'),
+                C.union(S),
+            ),
+            (
+                "Tab to other side   Ctrl+Shift+O",
+                KeyCode::Char('O'),
+                C.union(S),
+            ),
         ],
     ),
+];
+
+/// Right-click menu of a panel entry: label with its key, key sent when chosen.
+pub const ENTRY_MENU: [MenuItem; 13] = [
+    ("View            F3", KeyCode::F(3), N),
+    ("Edit            F4", KeyCode::F(4), N),
+    ("Copy            F5", KeyCode::F(5), N),
+    ("Move            F6", KeyCode::F(6), N),
+    ("Rename          F2", KeyCode::F(2), N),
+    ("Delete          F8", KeyCode::F(8), N),
+    ("Copy files      Ctrl+C", KeyCode::Char('c'), C),
+    ("Cut files       Ctrl+X", KeyCode::Char('x'), C),
+    ("Paste files     Ctrl+V", KeyCode::Char('v'), C),
+    ("Copy paths      Ctrl+Insert", KeyCode::Insert, C),
+    ("Same extension  Alt+.", KeyCode::Char('.'), A),
+    ("Properties      Alt+Enter", KeyCode::Enter, A),
+    ("Terminal here   Ctrl+O", KeyCode::Char('o'), C),
 ];
 
 /// Font scale one 10 % step up or down, kept within 50 %..300 %.

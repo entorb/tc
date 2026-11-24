@@ -107,19 +107,20 @@ fn space_on_dir_calculates_size() {
 }
 
 #[test]
-fn f10_quits_at_once_q_asks_first() {
+fn f10_quits_letters_start_quick_search() {
     let tmp = tempfile::tempdir().unwrap();
+    for n in ["alpha", "quux"] {
+        std::fs::write(tmp.path().join(n), "").unwrap();
+    }
     let p = || Panel::open(tmp.path()).unwrap();
     let mut app = App::new(p(), p());
-    key(&mut app, KeyCode::F(10));
-    assert!(app.quit);
-    app.quit = false;
     key(&mut app, KeyCode::Char('q'));
-    assert!(matches!(app.mode, Mode::AskQuit) && !app.quit);
+    assert!(matches!(&app.mode, Mode::Search(t) if t == "q") && !app.quit);
+    assert_eq!(app.panels[0].current().unwrap().name, "quux");
     key(&mut app, KeyCode::Esc);
-    assert!(matches!(app.mode, Mode::Normal) && !app.quit);
-    key(&mut app, KeyCode::Char('q'));
-    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Char('*')); // keys with a meaning keep it
+    assert!(matches!(app.mode, Mode::Normal));
+    key(&mut app, KeyCode::F(10));
     assert!(app.quit);
 }
 

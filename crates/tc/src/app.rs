@@ -45,7 +45,8 @@ pub use editor::{Ask, Input, SearchForm, Step};
 pub use file_stats::Stats;
 pub use find_files::{FindForm, Found, FoundSort};
 pub use menu::{
-    FOOTER, MENUS, MenuItem, PROCS_FOOTER, STATS_FOOTER, TOOLBAR, ToolItem, help_action, zoom_step,
+    ENTRY_MENU, FOOTER, MENUS, MenuItem, PROCS_FOOTER, STATS_FOOTER, TOOLBAR, ToolItem,
+    help_action, zoom_step,
 };
 pub use multi_rename::RenameForm;
 use multi_rename::{RenameBatch, rename_rows};
@@ -159,8 +160,6 @@ pub enum Mode {
     Connecting(Connecting),
     /// Asks before deleting tc's files in this config directory.
     ResetConfig(PathBuf),
-    /// Asks before leaving tc (F10 / q in the main panel).
-    AskQuit,
     /// A newer release exists: its tag and the "check daily" checkbox.
     Update {
         tag: String,
@@ -197,6 +196,8 @@ pub struct App {
     pub tabs: [VecDeque<Panel>; 2],
     /// Position of the visible tab per side, for the title.
     pub tab: [usize; 2],
+    /// Closed local tabs (side, directory), newest last, for Ctrl+Shift+T.
+    closed_tabs: Vec<(usize, PathBuf)>,
     pub active: usize,
     pub mode: Mode,
     pub quit: bool,
@@ -315,6 +316,7 @@ impl App {
             free: Default::default(),
             tabs: Default::default(),
             tab: [0; 2],
+            closed_tabs: Vec::new(),
             active: 0,
             mode: Mode::Normal,
             quit: false,
@@ -436,7 +438,6 @@ impl App {
             Mode::Connecting(c) => self.connecting_key(c, key),
             Mode::Confirm(op, targets, text) => self.confirm_key(op, targets, text, key.code),
             Mode::ResetConfig(dir) => self.reset_config_key(key.code, dir),
-            Mode::AskQuit => self.ask_quit_key(key.code),
             Mode::Update { tag, check } => self.update_key(key.code, tag, check),
             Mode::Settings(form) => self.settings_key(key, form),
             Mode::Props(form) => self.props_key(key, form),
@@ -635,6 +636,16 @@ impl App {
                 panel.select_range(c, c);
                 panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
             }
+            KeyCode::Home | KeyCode::End if shift => {
+                let panel = &mut self.panels[self.active];
+                let end = if key.code == KeyCode::Home {
+                    0
+                } else {
+                    usize::MAX
+                };
+                panel.select_range(panel.cursor(), end);
+            }
+            KeyCode::Char('.') if alt => self.panels[self.active].select_same_ext(),
             code if key.modifiers.contains(KeyModifiers::CONTROL) => self.ctrl_key(code),
             KeyCode::Left | KeyCode::Right if alt => {
                 let delta = if key.code == KeyCode::Left { -1 } else { 1 };
@@ -651,6 +662,11 @@ impl App {
                 if let Err(e) = panel.leave_virtual() {
                     self.mode = Mode::Message(e.to_string());
                 }
+            }
+            // type-to-search: a name character starts quick search (keys with a meaning excluded)
+            KeyCode::Char(c) if !alt && !c.is_whitespace() && !"~+-*/:".contains(c) => {
+                self.panels[self.active].search(&c.to_string(), 0);
+                self.mode = Mode::Search(c.to_string());
             }
             code => self.normal_key(code),
         }
@@ -697,10 +713,22 @@ impl App {
                 self.mode = Mode::Procs(Box::new(Procs::new(r)));
             }
             KeyCode::Char('y') => self.compare_open(),
+            KeyCode::Char('a') => self.panels[self.active].select_all(),
+            KeyCode::Char('A') => self.panels[self.active].unselect_all(),
+            KeyCode::Char('R') => {
+                if !self.panels[self.active].restore_selection() {
+                    self.mode = Mode::Message("No earlier selection in this directory.".into());
+                }
+            }
+            KeyCode::Char('T') => self.reopen_tab(),
+            KeyCode::Char('O') => self.tab_to_other_side(),
             KeyCode::Char('u') => {
                 self.panels.swap(0, 1);
                 self.tabs.swap(0, 1);
                 self.tab.swap(0, 1);
+                for t in &mut self.closed_tabs {
+                    t.0 = 1 - t.0;
+                }
                 if let Some(job) = &mut self.dir_job {
                     job.0 = 1 - job.0;
                 }
@@ -831,16 +859,6 @@ impl App {
         }
     }
 
-    /// Keys in the results: Esc stops a running search, then closes; Enter panelizes;
-    /// F3/F4 open the selected file at its match, Ctrl+G jumps to it in the panel.
-    fn ask_quit_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.quit = true,
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
-            _ => self.mode = Mode::AskQuit,
-        }
-    }
-
     /// Back to the sync screen after a viewer or editor opened from it closed.
     fn restore_sync_back(&mut self) {
         if matches!(self.mode, Mode::Normal)
@@ -867,7 +885,6 @@ impl App {
             c => c,
         };
         match code {
-            KeyCode::Char('q') => self.mode = Mode::AskQuit,
             KeyCode::F(10) => self.quit = true,
             KeyCode::Null => self.ask_reset_config(),
             KeyCode::F(9) => self.mode = Mode::Menu(0, 0),

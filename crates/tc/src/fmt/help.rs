@@ -42,6 +42,8 @@ Ctrl+D          add this directory to the bookmarks
 Ctrl+U          swap panels
 Ctrl+T          new tab
 Ctrl+W          close tab
+Ctrl+Shift+T    reopen the last closed tab (local, last 10)
+Ctrl+Shift+O    move the tab to the other panel (not the last one)
 Ctrl+=/Ctrl+-   font size (saved)
 Ctrl+PgDn       next tab
 Ctrl+Tab        next tab
@@ -58,6 +60,10 @@ Ctrl+G          found list: go to the file's directory
 Wheel           scroll the panel under the pointer, 3 entries
 Click           cursor to the entry, activates the panel
 Shift+click     select range from the cursor
+Ctrl+click      select / deselect the entry (Cmd+click on macOS)
+Middle click    open the directory in a new tab
+Right click     menu: view, edit, copy, move, rename, delete,
+                clipboard, same extension, properties, terminal
 Double click    open directory / archive, view file
 Click title     sort by name / size / date (again: reverse)
 Click F-bar     run the key shown on the label
@@ -74,6 +80,12 @@ Dim entries     git-ignored (.gitignore, info/exclude, global
 Insert          select entry, cursor moves down
 Space           same; on a local directory also sizes it
 Shift+Up/Down   select range
+Shift+Home/End  select up to the first / last entry
+Ctrl+A          select all, directories too
+Ctrl+Shift+A    unselect all
+Alt+.           select files with the cursor file's extension
+Ctrl+Shift+R    restore the selection dropped by unselect all or
+                by leaving the directory (same directory only)
 +               select by mask
 -               deselect by mask
 *               invert selection
@@ -83,6 +95,7 @@ Ctrl+Y          compare with the other panel and select, per
                 different (size or date); Enter repeats the last
 
 == Search ==
+a..z, 0..9      type a name to start quick search (not ~ + - * / :)
 Ctrl+S          quick search: type to jump to a match, Ctrl+S
                 next match, Enter / Esc stop searching
 /               quick filter: type to hide other entries,
@@ -128,7 +141,7 @@ Delete config files
                 popular dirs, connections, histories, searches, session
 
 == Quit ==
-F10             quit at once; q quits after asking";
+F10             quit";
 pub const HELP_STATS: &str = "\
 == About ==
 Scan runs in up to 8 threads; a popup shows files and
