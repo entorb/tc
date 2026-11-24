@@ -35,7 +35,10 @@ Ctrl+K          sync browsing on / off: entering a directory or
                 only; off when it cannot follow)
 ~               home directory
 Ctrl+\\          root directory
-Ctrl+R          refresh (also the free space shown in the status line)
+Ctrl+R          refresh (also the free space shown in the status line);
+                local panels refresh by themselves when files are
+                added, removed or renamed (checked each second;
+                a file growing in place needs Ctrl+R)
 Alt+F1          drives for left panel
 Alt+F2          drives for right panel
 Ctrl+D          add this directory to the bookmarks

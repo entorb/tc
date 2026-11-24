@@ -167,6 +167,8 @@ pub struct Panel {
     /// Directory sizes calculated on request (by entry name); dropped when the list is re-read.
     dir_sizes: HashMap<OsString, u64>,
     pending: Option<Pending>,
+    /// Directory and modification time last seen by [`Panel::changed_on_disk`].
+    watched: Option<(PathBuf, SystemTime)>,
 }
 
 impl Panel {
@@ -193,7 +195,23 @@ impl Panel {
             sel_sum: Cell::new(None),
             dir_sizes: HashMap::new(),
             pending: None,
+            watched: None,
         })
+    }
+
+    /// The local directory shown got entries added, removed or renamed since the last call
+    /// (one stat). The first call on a directory only records it. Remote, archive and found
+    /// lists and running listings never count as changed.
+    // shortcut: a file growing in place keeps the directory time, its size shows after a reload
+    pub fn changed_on_disk(&mut self) -> bool {
+        if self.remote.is_some() || self.archive.is_some() || self.virt || self.pending.is_some() {
+            return false;
+        }
+        let Ok(t) = std::fs::metadata(&self.path).and_then(|m| m.modified()) else {
+            return false;
+        };
+        let seen = self.watched.replace((self.path.clone(), t));
+        seen.is_some_and(|(p, old)| p == self.path && old != t)
     }
 
     /// The local directory a user navigation just showed (once); none for history steps,
@@ -766,6 +784,18 @@ mod tests {
         assert!(p.path().ends_with("b"));
         assert!(p.enter().unwrap()); // ".."
         assert_eq!(p.current().unwrap().name, "b");
+    }
+
+    #[test]
+    fn changed_on_disk_after_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = Panel::open(tmp.path()).unwrap();
+        assert!(!p.changed_on_disk()); // first look only records
+        assert!(!p.changed_on_disk());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(tmp.path().join("new"), "").unwrap();
+        assert!(p.changed_on_disk());
+        assert!(!p.changed_on_disk());
     }
 
     #[test]

@@ -697,14 +697,23 @@ impl App {
         });
     }
 
-    /// Once a second: a viewed file that changed on disk is read again, an edited one too unless
-    /// it has unsaved edits; then the editor asks (once per change).
+    /// Once a second: a panel directory or a viewed file that changed on disk is read again, an
+    /// edited file too unless it has unsaved edits; then the editor asks (once per change).
     pub(super) fn watch_tick(&mut self) {
         if self.watch_at.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.watch_at = Instant::now();
         match &mut self.mode {
+            Mode::Normal => {
+                for p in &mut self.panels {
+                    if p.changed_on_disk()
+                        && let Err(e) = p.reload()
+                    {
+                        self.note = e.to_string();
+                    }
+                }
+            }
             Mode::View { view, .. } if view.changed_on_disk() => {
                 self.note = match view.reload() {
                     Ok(()) => "reloaded: the file changed on disk".into(),
@@ -910,6 +919,22 @@ mod tests {
     fn watch(app: &mut App) {
         app.watch_at = std::time::Instant::now() - std::time::Duration::from_secs(2);
         app.tick();
+    }
+
+    #[test]
+    fn panels_follow_changes_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("b"), "").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // cursor on "b"
+        watch(&mut app); // records the directory time
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.path().join("a"), "").unwrap();
+        watch(&mut app);
+        while app.panels[0].entries().len() < 3 {
+            app.tick();
+        }
+        assert_eq!(app.panels[0].current().unwrap().name, "b"); // cursor stays on its entry
     }
 
     #[test]
