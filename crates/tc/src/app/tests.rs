@@ -354,4 +354,18 @@ fn shift_up_down_marks_and_unmarks() {
     shift(&mut app, KeyCode::Up); // a off
     assert_eq!(app.panels[0].selection_info().0, 1); // only c
     assert_eq!(app.panels[0].current().unwrap().name, "..");
+    // Shift+Home/End mark the range; again on a fully marked range unmark it
+    key(&mut app, KeyCode::End); // on c (marked)
+    shift(&mut app, KeyCode::Home); // a, b get marked too
+    assert_eq!(app.panels[0].selection_info().0, 3);
+    shift(&mut app, KeyCode::End); // from "..": all marked already
+    assert_eq!(app.panels[0].selection_info().0, 0);
+    shift(&mut app, KeyCode::Home); // from c: a, b, c again
+    assert_eq!(app.panels[0].selection_info().0, 3);
+    key(&mut app, KeyCode::End);
+    // Shift+PgUp toggles each entry passed and stops at the top
+    app.page = 10;
+    shift(&mut app, KeyCode::PageUp); // c, b, a off, ".." stays unmarked
+    assert_eq!(app.panels[0].selection_info().0, 0);
+    assert_eq!(app.panels[0].cursor(), 0);
 }

@@ -82,7 +82,9 @@ Dim entries     git-ignored (.gitignore, info/exclude, global
 Insert          select entry, cursor moves down
 Space           same; on a local directory also sizes it
 Shift+Up/Down   mark / unmark the entry and move on
-Shift+Home/End  select up to the first / last entry
+Shift+PgUp/PgDn same for a page of entries
+Shift+Home/End  mark up to the first / last entry; again on a
+                fully marked range: unmark it
 Ctrl+A          select all, directories too
 Ctrl+Shift+A    unselect all
 Alt+.           select files with the cursor file's extension

@@ -650,6 +650,18 @@ impl App {
                 let delta = if key.code == KeyCode::Up { -1 } else { 1 };
                 self.panels[self.active].toggle_and_move(delta);
             }
+            KeyCode::PageUp | KeyCode::PageDown if shift => {
+                // as many Shift+Up/Down as a page has rows
+                let delta = if key.code == KeyCode::PageUp { -1 } else { 1 };
+                let panel = &mut self.panels[self.active];
+                for _ in 0..self.page.max(1) {
+                    let c = panel.cursor();
+                    panel.toggle_and_move(delta);
+                    if panel.cursor() == c {
+                        break; // at the list end: toggled once, not back and forth
+                    }
+                }
+            }
             KeyCode::Home | KeyCode::End if shift => {
                 let panel = &mut self.panels[self.active];
                 let end = if key.code == KeyCode::Home {
@@ -657,7 +669,10 @@ impl App {
                 } else {
                     usize::MAX
                 };
-                panel.select_range(panel.cursor(), end);
+                // marks the range; again on a fully marked range unmarks it
+                let c = panel.cursor();
+                let on = !panel.range_marked(c, end);
+                panel.mark_range(c, end, on);
             }
             KeyCode::Char('.') if alt => self.panels[self.active].select_same_ext(),
             code if key.modifiers.contains(KeyModifiers::CONTROL) => self.ctrl_key(code),

@@ -6,15 +6,31 @@ use super::{CompareKind, Entry, EntryFilter, Panel, compare};
 impl Panel {
     /// Select entries `a..=b` (any order), not "..", and put the cursor on `b`.
     pub fn select_range(&mut self, a: usize, b: usize) {
+        self.mark_range(a, b, true);
+    }
+
+    /// Every entry of `a..=b` (any order, ".." aside) is marked; false for ".." alone.
+    pub fn range_marked(&self, a: usize, b: usize) -> bool {
+        let last = self.entries.len().saturating_sub(1);
+        let (lo, hi) = (a.min(b).min(last), a.max(b).min(last));
+        let mut names = self.entries.get(lo..=hi).unwrap_or_default().iter();
+        let mut names = names.by_ref().filter(|e| !e.is_parent()).peekable();
+        names.peek().is_some() && names.all(|e| self.selected.contains(&e.name))
+    }
+
+    /// Mark (`on`) or unmark entries `a..=b` (any order), not "..", and put the cursor on `b`.
+    pub fn mark_range(&mut self, a: usize, b: usize, on: bool) {
         let last = self.entries.len().saturating_sub(1);
         let (lo, hi) = (a.min(b).min(last), a.max(b).min(last));
         let names = self.entries.get(lo..=hi).unwrap_or_default();
-        let names: Vec<_> = names
-            .iter()
-            .filter(|e| !e.is_parent())
-            .map(|e| e.name.clone())
-            .collect();
-        self.selected.extend(names);
+        let names = names.iter().filter(|e| !e.is_parent()).map(|e| &e.name);
+        if on {
+            self.selected.extend(names.cloned());
+        } else {
+            for n in names {
+                self.selected.remove(n);
+            }
+        }
         self.sel_sum.set(None);
         self.cursor = b.min(last);
     }
