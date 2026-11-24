@@ -69,6 +69,18 @@ impl Mode {
     }
 }
 
+/// Alt+Up/Down move the cursor line or the selected lines; with Shift copy the line (VS Code).
+fn line_key(editor: &mut Editor, down: bool, shift: bool) {
+    if !shift {
+        return editor.move_lines(down);
+    }
+    editor.select(false);
+    editor.duplicate_line();
+    if !down {
+        editor.move_v(-1);
+    }
+}
+
 impl App {
     pub(super) fn ask_viewer_key(
         &mut self,
@@ -124,17 +136,21 @@ impl App {
             key.code == KeyCode::F(2) || (ctrl && matches!(key.code, KeyCode::Char('s' | 'S')));
         let prompt = matches!(key.code, KeyCode::F(3 | 7))
             || (ctrl && matches!(key.code, KeyCode::Char('g' | 'f' | 'r')));
-        if matches!(
-            key.code,
-            KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Home
-                | KeyCode::End
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-        ) {
+        // Alt+Up/Down move lines (VS Code), they keep the selection
+        let line_move = alt && matches!(key.code, KeyCode::Up | KeyCode::Down);
+        if !line_move
+            && matches!(
+                key.code,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+            )
+        {
             editor.select(shift);
         }
         match key.code {
@@ -148,6 +164,8 @@ impl App {
             }
             _ if save => {
                 editor.format_markdown();
+                // shown right away, not only after a reopen
+                editor.tidy();
                 self.next_save_prompt(editor, false, false, Step::Encoding);
                 return;
             }
@@ -166,6 +184,10 @@ impl App {
                 }
                 return;
             }
+            KeyCode::Up | KeyCode::Down if line_move => {
+                line_key(&mut editor, key.code == KeyCode::Down, shift)
+            }
+            KeyCode::Enter if ctrl => editor.open_line(!shift),
             KeyCode::Up => editor.move_v(-1),
             KeyCode::Down => editor.move_v(1),
             KeyCode::PageUp => editor.move_v(-page),
@@ -199,26 +221,7 @@ impl App {
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
             KeyCode::F(8) => editor.delete_line(),
-            KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
-                'z' => editor.undo(),
-                'y' => editor.redo(),
-                'c' | 'x' => {
-                    let text = if c.eq_ignore_ascii_case(&'c') {
-                        editor.copy()
-                    } else {
-                        editor.cut()
-                    };
-                    if let Some(text) = text {
-                        self.clipboard.clone_from(&text);
-                        self.copied = Some(text);
-                    }
-                }
-                'v' => editor.insert(&self.clipboard, false),
-                'k' => editor.delete_line(),
-                'a' => editor.select_all(),
-                'd' => editor.duplicate_line(),
-                _ => {}
-            },
+            KeyCode::Char(c) if ctrl => self.editor_ctrl(&mut editor, c),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => editor.insert_char(c),
             _ => {}
         }
@@ -226,6 +229,44 @@ impl App {
             editor,
             error: None,
         };
+    }
+
+    /// Ctrl+letter in the editor.
+    fn editor_ctrl(&mut self, editor: &mut Editor, c: char) {
+        match c.to_ascii_lowercase() {
+            'z' => editor.undo(),
+            'y' => editor.redo(),
+            'c' | 'x' => self.editor_copy(editor, c.eq_ignore_ascii_case(&'x')),
+            'v' if self.line_clip => editor.paste_lines(&self.clipboard),
+            'v' => editor.insert(&self.clipboard, false),
+            'l' => editor.select_line(),
+            'k' => editor.delete_line(),
+            'a' => editor.select_all(),
+            'd' => editor.duplicate_line(),
+            _ => {}
+        }
+    }
+
+    /// Ctrl+C / Ctrl+X: the selection, else the whole cursor line (VS Code).
+    fn editor_copy(&mut self, editor: &mut Editor, cut: bool) {
+        let selected = editor.copy();
+        self.line_clip = selected.is_none();
+        let text = match selected {
+            Some(t) if cut => {
+                editor.cut();
+                t
+            }
+            Some(t) => t,
+            None => {
+                let line = editor.line_copy();
+                if cut {
+                    editor.delete_line();
+                }
+                line
+            }
+        };
+        self.clipboard.clone_from(&text);
+        self.copied = Some(text);
     }
 
     /// F5 in the editor: blank lines around Markdown blocks (one undo step).
@@ -1054,6 +1095,41 @@ mod tests {
         key(&mut app, KeyCode::Char('y'));
         wait(&mut app);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "X ab\nX\n");
+    }
+
+    /// VS Code keys: Ctrl+X without a selection cuts the line, Ctrl+V puts it above the cursor
+    /// line, Alt+Up/Down move lines, Alt+Shift+Down copies the line, Ctrl+Enter opens a line.
+    #[test]
+    fn editor_vscode_line_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        with(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(rows(&mut app), ["two", "three", ""]);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Right);
+        with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(rows(&mut app), ["two", "one", "three", ""]);
+        app.on_paste("one\r\n".into()); // the host paste event of the same line
+        assert_eq!(rows(&mut app), ["two", "one", "one", "three", ""]);
+        with(&mut app, KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(rows(&mut app), ["two", "one", "three", "one", ""]);
+        with(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        );
+        let all = |app: &mut App| app.mode.editor_mut().unwrap().visible(20, 80);
+        assert_eq!(all(&mut app), ["two", "one", "three", "three", "one", ""]);
+        with(&mut app, KeyCode::Enter, KeyModifiers::CONTROL);
+        type_keys(&mut app, "x");
+        assert_eq!(
+            all(&mut app),
+            ["two", "one", "three", "three", "x", "one", ""]
+        );
     }
 
     #[test]

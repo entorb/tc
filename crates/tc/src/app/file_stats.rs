@@ -468,7 +468,7 @@ impl App {
         let side = st.remote.clone().map_or(Side::Local, Side::Remote);
         self.stats = Some(st);
         let paths: Vec<PathBuf> = names.iter().map(|n| dir.join(n)).collect();
-        self.spawn_xfer((side.clone(), side.clone()), move |p, _| {
+        self.spawn_xfer("Delete", (side.clone(), side.clone()), move |p, _| {
             vfs::delete_all(&side, &paths, to_trash, p, || {
                 count.fetch_add(1, Ordering::Relaxed);
             })
@@ -729,7 +729,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stats_batch_stops_at_first_error() {
+    fn stats_batch_error_asks_and_cancel_stops() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a"), "x".repeat(30)).unwrap();
@@ -747,9 +747,9 @@ mod tests {
         key(&mut app, KeyCode::F(8));
         key(&mut app, KeyCode::Char('p'));
         wait(&mut app);
-        assert!(matches!(app.mode, Mode::Message(_)));
-        app.tick();
-        key(&mut app, KeyCode::Esc);
+        assert!(matches!(&app.mode, Mode::Xfer(x) if x.error.is_some()));
+        key(&mut app, KeyCode::Esc); // cancel
+        wait(&mut app);
         app.tick();
         let Mode::Stats(st) = &app.mode else { panic!() };
         assert!(!tmp.path().join("a").exists() && ro.join("f").exists());

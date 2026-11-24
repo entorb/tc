@@ -130,7 +130,8 @@ fn apply(app: &mut App, act: Option<FormAct>) {
 /// A click outside closes it (Esc) unless `busy`.
 fn show_dialog(ctx: &Context, (id, busy): (&str, bool), d: &Dialog) -> Option<FormAct> {
     let r = modal(id).show(ctx, |ui| {
-        ui.set_min_width(420.0);
+        // progress popups keep one width while paths change
+        ui.set_min_width(if busy { 640.0 } else { 420.0 });
         ui.set_max_width(720.0);
         match d {
             Dialog::Text { title, text } => {
@@ -250,6 +251,8 @@ fn hint_key(k: &str) -> Option<KeyCode> {
         "Enter" => Some(KeyCode::Enter),
         "Esc" => Some(KeyCode::Esc),
         "Space" => Some(KeyCode::Char(' ')),
+        // `o/Enter`: alternatives of one action, the first is clicked
+        _ if k.contains('/') => k.split('/').next().and_then(hint_key),
         _ => {
             let mut c = k.chars();
             c.next().filter(|_| c.next().is_none()).map(KeyCode::Char)
@@ -292,17 +295,22 @@ fn text_with_keys(ui: &mut Ui, text: &str) -> Option<KeyCode> {
             ui.label(*line);
         }
     }
-    for line in &lines[body..] {
-        let hints = hint_line(line).unwrap_or_else(|| vec![("Esc", "OK", KeyCode::Esc)]);
-        ui.horizontal(|ui| {
+    // a grid: several hint lines line up in columns (conflict dialog)
+    egui::Grid::new(ui.scope_id().with("hints")).show(ui, |ui| {
+        for line in &lines[body..] {
+            let hints = hint_line(line).unwrap_or_else(|| vec![("Esc", "OK", KeyCode::Esc)]);
             for (k, label, code) in hints {
-                let b = Button::new(label).shortcut_text(k).sense(Sense::CLICK);
+                let b = Button::new(label)
+                    .shortcut_text(k)
+                    .min_size(vec2(110.0, 0.0))
+                    .sense(Sense::CLICK);
                 if ui.add(b).clicked() {
                     pressed = Some(code);
                 }
             }
-        });
-    }
+            ui.end_row();
+        }
+    });
     pressed
 }
 

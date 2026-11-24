@@ -6,9 +6,9 @@ use std::borrow::Cow;
 use std::ffi::OsString;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tc_core::cmdline::LineEdit;
@@ -28,6 +28,8 @@ pub struct FileClip {
 pub(super) enum XMsg {
     /// Conflict: (source, existing target); the worker waits for an `Answer`.
     Ask(PathBuf, PathBuf),
+    /// A file failed (error text with its path); the worker waits for retry, skip or cancel.
+    Error(String),
     /// Finished with an error text, if any.
     Done(Option<String>),
 }
@@ -44,11 +46,53 @@ pub(super) enum Answer {
     /// Same policy for all further conflicts.
     All(Policy),
     Rename(String),
+    Retry,
     Cancel,
 }
 
+/// Worker end of the popup, shared by the conflict question and the error handler (copy
+/// threads): one question at a time.
+struct Line {
+    tx: mpsc::Sender<XMsg>,
+    answers: Receiver<Answer>,
+    /// Answer to every further error: Skip all, or Cancel once cancelled.
+    sticky: Option<ops::Recover>,
+}
+
+impl Line {
+    fn ask(&self, msg: XMsg) -> Option<Answer> {
+        self.tx.send(msg).ok()?;
+        self.answers.recv().ok()
+    }
+}
+
+/// `Progress::on_error` putting each failed file to the user: retry, skip (all) or cancel.
+fn error_handler(line: Arc<Mutex<Line>>) -> ops::OnError {
+    use ops::Recover;
+    Box::new(move |_, e| {
+        let Ok(mut l) = line.lock() else {
+            return Recover::Cancel;
+        };
+        if let Some(r) = l.sticky {
+            return r;
+        }
+        let r = match l.ask(XMsg::Error(e.to_string())) {
+            Some(Answer::Retry) => return Recover::Retry,
+            Some(Answer::One(Policy::Skip)) => return Recover::Skip,
+            Some(Answer::All(Policy::Skip)) => Recover::Skip,
+            _ => Recover::Cancel,
+        };
+        l.sticky = Some(r);
+        r
+    })
+}
+
 pub struct Xfer {
+    /// Popup title: Copy, Move, Delete, ...
+    pub label: &'static str,
     pub ask: Option<(PathBuf, PathBuf)>,
+    /// A file failed (error text), waiting for retry / skip / cancel.
+    pub error: Option<String>,
     /// Name being typed after `r`.
     pub rename: Option<LineEdit>,
     pub(super) rx: Receiver<XMsg>,
@@ -71,7 +115,9 @@ pub struct Shown {
 impl Xfer {
     /// Quick copies finish before a popup would only flicker.
     pub fn visible(&self) -> bool {
-        self.ask.is_some() || self.started.elapsed() > Duration::from_secs(2)
+        self.ask.is_some()
+            || self.error.is_some()
+            || self.started.elapsed() > Duration::from_secs(1)
     }
 
     /// Feed the regressions; the shown rates and ETA change at most once a second.
@@ -101,6 +147,7 @@ impl Xfer {
 
     pub(super) fn answer(&mut self, a: Answer) {
         self.ask = None;
+        self.error = None;
         self.rename = None;
         let _ = self.reply.send(a);
     }
@@ -117,6 +164,14 @@ impl Xfer {
                 _ => {
                     edit_key(text, key);
                 }
+            }
+        } else if self.error.is_some() {
+            match code {
+                KeyCode::Char('r') | KeyCode::Enter => self.answer(Answer::Retry),
+                KeyCode::Char('s') => self.answer(Answer::One(Policy::Skip)),
+                KeyCode::Char('S') => self.answer(Answer::All(Policy::Skip)),
+                KeyCode::Esc | KeyCode::Char('c') => self.answer(Answer::Cancel),
+                _ => {}
             }
         } else if let Some((_, target)) = &self.ask {
             use Policy::*;
@@ -191,7 +246,7 @@ pub(super) fn delete_text(mut question: String, recursive: bool, remote: bool) -
     question + "\n\n[y] Trash   [p] Delete permanently   [Esc] Cancel"
 }
 
-/// Copy or move `jobs` (source, target) between the sides; stops at the first error.
+/// Copy or move `jobs` (source, target) between the sides; errors go to `c.on_error`.
 pub(super) fn copy_jobs(
     op: Op,
     jobs: &[(PathBuf, PathBuf)],
@@ -205,14 +260,45 @@ pub(super) fn copy_jobs(
     let local = matches!((src_side, dst_side), (Side::Local, Side::Local));
     let mv = op == Op::Move;
     jobs.iter().try_for_each(|(src, target)| {
-        if !local {
-            vfs::transfer(src_side, src, dst_side, target, mv, ask, c)
-        } else if mv {
-            ops::move_(src, target, ask, c)
-        } else {
-            ops::copy(src, target, ask, c)
-        }
+        // local copies also ask per file inside a tree; this catches the rest (remote, mkdir)
+        c.retry(src, || {
+            if !local {
+                vfs::transfer(src_side, src, dst_side, target, mv, &mut *ask, c)
+            } else if mv {
+                ops::move_(src, target, &mut *ask, c)
+            } else {
+                ops::copy(src, target, &mut *ask, c)
+            }
+        })
+        .map(drop)
     })
+}
+
+/// Conflict on `target`: the sticky policy (Overwrite all, ...), else the user's answer.
+fn conflict(
+    line: &Mutex<Line>,
+    sticky: &mut Option<Policy>,
+    (from, to): &(Side, Side),
+    src: &Path,
+    target: &Path,
+) -> ops::Decision {
+    let policy = match *sticky {
+        Some(p) => p,
+        None => {
+            let msg = XMsg::Ask(src.to_owned(), target.to_owned());
+            match line.lock().ok().and_then(|l| l.ask(msg)) {
+                Some(Answer::One(p)) => p,
+                Some(Answer::All(p)) => *sticky.insert(p),
+                Some(Answer::Rename(n)) => return ops::Decision::Rename(n.into()),
+                _ => return ops::Decision::Cancel,
+            }
+        }
+    };
+    match policy {
+        Policy::Overwrite => ops::Decision::Overwrite,
+        Policy::Newer if vfs::is_newer(from, src, to, target) => ops::Decision::Overwrite,
+        Policy::Newer | Policy::Skip => ops::Decision::Skip,
+    }
 }
 
 impl App {
@@ -266,7 +352,7 @@ impl App {
         let side = self.panels[self.active].side();
         let targets = targets.to_vec();
         let sides = (side.clone(), side.clone());
-        self.spawn_xfer(sides, move |p, _| {
+        self.spawn_xfer("Delete", sides, move |p, _| {
             vfs::delete_all(&side, &targets, to_trash, p, || {})
         });
     }
@@ -299,7 +385,7 @@ impl App {
             active.side()
         };
         let sides = (src_side, dst_side);
-        self.spawn_xfer(sides.clone(), move |c, ask| {
+        self.spawn_xfer(op.verb(), sides.clone(), move |c, ask| {
             // shortcut: needs temp space for the whole selection, upgrade to copy straight from the stream
             let (jobs, _tmp) = match arch {
                 None => (jobs, None),
@@ -387,54 +473,44 @@ impl App {
         }
         let op = clip.op;
         self.cut_pending = op == Op::Move;
-        self.spawn_xfer(sides.clone(), move |c, ask| {
+        self.spawn_xfer(op.verb(), sides.clone(), move |c, ask| {
             copy_jobs(op, &jobs, &sides, c, ask)
         });
     }
 
-    /// Run `work` in a worker with progress and the conflict dialog (`sides` decide "newer").
+    /// Run `work` in a worker with progress, the conflict dialog (`sides` decide "newer") and
+    /// retry / skip / cancel for failed files.
     pub(super) fn spawn_xfer(
         &mut self,
+        label: &'static str,
         sides: (Side, Side),
         work: impl FnOnce(&ops::Progress, ops::Ask) -> tc_core::Result<()> + Send + 'static,
     ) {
         let (tx, rx) = mpsc::channel();
         let (reply, answers) = mpsc::channel();
-        let progress = Arc::new(ops::Progress::default());
+        let done = tx.clone();
+        let line = Arc::new(Mutex::new(Line {
+            tx,
+            answers,
+            sticky: None,
+        }));
+        let progress = Arc::new(ops::Progress {
+            on_error: Some(error_handler(line.clone())),
+            ..Default::default()
+        });
         let c = progress.clone();
         thread::spawn(move || {
             let mut sticky: Option<Policy> = None;
-            let (from, to) = sides;
-            let mut ask = |src: &Path, target: &Path| {
-                let policy = match sticky {
-                    Some(p) => p,
-                    None => {
-                        let msg = XMsg::Ask(src.to_owned(), target.to_owned());
-                        if tx.send(msg).is_err() {
-                            return ops::Decision::Cancel;
-                        }
-                        match answers.recv() {
-                            Ok(Answer::One(p)) => p,
-                            Ok(Answer::All(p)) => *sticky.insert(p),
-                            Ok(Answer::Rename(n)) => return ops::Decision::Rename(n.into()),
-                            Ok(Answer::Cancel) | Err(_) => return ops::Decision::Cancel,
-                        }
-                    }
-                };
-                match policy {
-                    Policy::Overwrite => ops::Decision::Overwrite,
-                    Policy::Newer if vfs::is_newer(&from, src, &to, target) => {
-                        ops::Decision::Overwrite
-                    }
-                    Policy::Newer | Policy::Skip => ops::Decision::Skip,
-                }
-            };
+            let mut ask =
+                |src: &Path, target: &Path| conflict(&line, &mut sticky, &sides, src, target);
             let result = work(&c, &mut ask);
             let error = result.err().filter(|e| !matches!(e, Error::Cancelled));
-            let _ = tx.send(XMsg::Done(error.map(|e| e.to_string())));
+            let _ = done.send(XMsg::Done(error.map(|e| e.to_string())));
         });
         self.mode = Mode::Xfer(Xfer {
+            label,
             ask: None,
+            error: None,
             rename: None,
             rx,
             reply,
@@ -451,7 +527,9 @@ impl App {
         if side.remote().is_some() {
             let (dir, name) = (panel.path().to_owned(), OsString::from(name));
             let sides = (side.clone(), side.clone());
-            return self.spawn_xfer(sides, move |_, _| side.mkdir_in(&dir, &name).map(drop));
+            return self.spawn_xfer("Make directory", sides, move |_, _| {
+                side.mkdir_in(&dir, &name).map(drop)
+            });
         }
         let result = ops::mkdir(panel.path(), &OsString::from(name));
         self.finish(result.err().map(|e| e.to_string()));
@@ -477,8 +555,13 @@ impl App {
         x.sample(Instant::now());
         match x.rx.try_recv() {
             Ok(XMsg::Ask(src, target)) => x.ask = Some((src, target)),
+            Ok(XMsg::Error(text)) => x.error = Some(text),
             Ok(XMsg::Done(error)) => {
                 let progress = x.progress.clone();
+                let skipped = progress.skipped.load(Ordering::Relaxed);
+                let error = error.or_else(|| {
+                    (skipped > 0).then(|| format!("{skipped} item(s) skipped after errors."))
+                });
                 self.mode = Mode::Normal;
                 self.rename_done(error.as_ref(), &progress);
                 // a failed cut keeps its clipboard, so Ctrl+V can retry
@@ -590,6 +673,42 @@ mod tests {
         assert_eq!(rows(&mut app)[..2], ["a", "bne"]);
     }
 
+    /// A file that fails asks retry / skip / cancel; a skip copies the rest and says so.
+    #[cfg(unix)] // file modes are Unix-only
+    #[test]
+    fn failed_file_asks_retry_skip_cancel() {
+        use std::os::unix::fs::PermissionsExt;
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        let dir = left.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+        for f in ["a", "b"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let locked = dir.join("a");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&locked).is_ok() {
+            return; // root reads anything
+        }
+        let mut app = App::new(
+            Panel::open(left.path()).unwrap(),
+            Panel::open(right.path()).unwrap(),
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(5));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(matches!(&app.mode, Mode::Xfer(x) if x.error.is_some()));
+        key(&mut app, KeyCode::Char('r')); // still unreadable: asked again
+        wait(&mut app);
+        assert!(matches!(&app.mode, Mode::Xfer(x) if x.error.is_some()));
+        key(&mut app, KeyCode::Char('s'));
+        wait(&mut app);
+        assert!(matches!(&app.mode, Mode::Message(m) if m.contains("1 item(s) skipped")));
+        assert!(right.path().join("d/b").exists() && !right.path().join("d/a").exists());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     #[test]
     fn conflict_dialog_overwrite_all_and_rename() {
         let left = tempfile::tempdir().unwrap();
@@ -667,7 +786,9 @@ mod tests {
         let (reply, _answers) = mpsc::channel();
         let t0 = Instant::now();
         let mut x = Xfer {
+            label: "Copy",
             ask: None,
+            error: None,
             rename: None,
             rx,
             reply,

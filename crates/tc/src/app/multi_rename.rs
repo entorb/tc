@@ -332,7 +332,9 @@ impl App {
             dir: dir.clone(),
             pairs: pairs.clone(),
         });
-        self.spawn_xfer(sides, move |p, _| rename::apply(&side, &dir, &pairs, p));
+        self.spawn_xfer("Rename", sides, move |p, _| {
+            rename::apply(&side, &dir, &pairs, p)
+        });
     }
 
     /// Ctrl+Z in the form: rename the last finished batch back in a worker.
@@ -343,7 +345,9 @@ impl App {
             return;
         };
         let sides = (side.clone(), side.clone());
-        self.spawn_xfer(sides, move |p, _| rename::undo(&side, &dir, &pairs, p));
+        self.spawn_xfer("Undo rename", sides, move |p, _| {
+            rename::undo(&side, &dir, &pairs, p)
+        });
     }
 
     /// A multi-rename that renamed every pair becomes the one Ctrl+Z undoes (a cancel or an

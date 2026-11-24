@@ -283,7 +283,6 @@ pub const TOOLBAR: [&[ToolItem]; 2] = [
         ("⏶", "Parent directory (Backspace)", KeyCode::Backspace, N),
         ("🏠", "Home directory (~)", KeyCode::Char('~'), N),
         ("⟳", "Refresh (Ctrl+R)", KeyCode::Char('r'), C),
-        ("✚", "New tab (Ctrl+T)", KeyCode::Char('t'), C),
         ("🖧", "Connect to server (Ctrl+N)", KeyCode::Char('n'), C),
     ],
     &[

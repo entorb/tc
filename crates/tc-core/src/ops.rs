@@ -30,9 +30,49 @@ pub struct Progress {
     pub dirs_done: AtomicU64,
     /// File being copied.
     pub current: Mutex<PathBuf>,
+    /// Asked when a file fails; `None` stops at the first error.
+    pub on_error: Option<OnError>,
+    /// Files left out after an error ([`Recover::Skip`]).
+    pub skipped: AtomicU64,
 }
 
+/// What to do with a file that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recover {
+    Retry,
+    Skip,
+    Cancel,
+}
+
+/// Error handler with the failed path; called from worker threads, one at a time is up to it.
+pub type OnError = Box<dyn Fn(&Path, &Error) -> Recover + Send + Sync>;
+
 impl Progress {
+    /// Run `f` until it works; on an error ask [`Progress::on_error`]: `Ok(false)` when the
+    /// file was skipped, `Err` on cancel (the error was shown) or without a handler.
+    pub fn retry(&self, path: &Path, mut f: impl FnMut() -> Result<()>) -> Result<bool> {
+        loop {
+            let e = match f() {
+                Ok(()) => return Ok(true),
+                Err(e @ Error::Cancelled) => return Err(e),
+                Err(e) => e,
+            };
+            match self.on_error.as_ref().map(|h| h(path, &e)) {
+                Some(Recover::Retry) => {}
+                Some(Recover::Skip) => {
+                    self.skipped.fetch_add(1, Ordering::Relaxed);
+                    return Ok(false);
+                }
+                Some(Recover::Cancel) => return Err(Error::Cancelled),
+                None => return Err(e),
+            }
+        }
+    }
+
+    fn skips(&self) -> u64 {
+        self.skipped.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn file_done(&self, bytes: u64) {
         self.done.fetch_add(bytes, Ordering::Relaxed);
         self.files.fetch_add(1, Ordering::Relaxed);
@@ -198,7 +238,10 @@ fn place(src: &Path, target: &Path, mv: bool, ctx: &mut Ctx) -> Result<()> {
                     let parent = target.parent().unwrap_or(Path::new(""));
                     place(src, &parent.join(single_name(&name)?), mv, ctx)
                 }
-                Decision::Overwrite => replace(src, target, mv, ctx.p),
+                Decision::Overwrite => ctx
+                    .p
+                    .retry(src, || replace(src, target, mv, ctx.p))
+                    .map(drop),
             }
         }
         _ => Err(Error::TypeMismatch(target.to_owned())),
@@ -220,8 +263,14 @@ fn create(src: &Path, target: &Path, mv: bool, p: &Progress) -> Result<()> {
         return match fs::rename(src, target) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+                let skips = p.skips();
                 copy_tree(src, target, p, false).inspect_err(|_| remove_partial(target))?;
-                delete(src)
+                // a skipped file exists only in the source: keep it all
+                if p.skips() == skips {
+                    delete(src)
+                } else {
+                    Ok(())
+                }
             }
             Err(e) => Err(io_err(src)(e)),
         };
@@ -345,8 +394,9 @@ mod unix_remove {
         if FileType::from_raw_mode(st.st_mode) != FileType::Directory {
             p.current_is(path);
             // a directory swapped in meanwhile makes this fail (EISDIR), never recurse
-            unlinkat(&dir, name, AtFlags::empty()).map_err(err)?;
-            p.file_done(u64::try_from(st.st_size).unwrap_or(0));
+            if p.retry(path, || unlinkat(&dir, name, AtFlags::empty()).map_err(err))? {
+                p.file_done(u64::try_from(st.st_size).unwrap_or(0));
+            }
             return Ok(());
         }
         let sub = open_dir(&dir, name).map_err(err)?;
@@ -357,8 +407,12 @@ mod unix_remove {
             .filter(|n| n.as_ref().map_or(true, |n| n != "." && n != ".."))
             .collect::<rustix::io::Result<_>>()
             .map_err(err)?;
+        let skips = p.skipped.load(Ordering::Relaxed);
         for n in names {
             at(&sub, &n, &path.join(&n), p)?;
+        }
+        if p.skipped.load(Ordering::Relaxed) != skips {
+            return Ok(()); // still holds what the user skipped
         }
         unlinkat(&dir, name, AtFlags::REMOVEDIR).map_err(err)?;
         p.dir_done();
@@ -632,6 +686,74 @@ mod tests {
         fs::write(src.join("a.txt"), "a").unwrap();
         fs::write(src.join("sub/b.txt"), "b").unwrap();
         src
+    }
+
+    /// Progress with an error handler giving `answers` in turn (then Cancel).
+    fn asking(answers: &[Recover]) -> Progress {
+        let left = Mutex::new(answers.to_vec());
+        Progress {
+            on_error: Some(Box::new(move |_, _| {
+                let mut l = left.lock().unwrap();
+                if l.is_empty() {
+                    Recover::Cancel
+                } else {
+                    l.remove(0)
+                }
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn retry_skip_cancel() {
+        let fail = || Err(Error::InvalidName("x".into()));
+        let mut tries = 0;
+        let p = asking(&[Recover::Retry, Recover::Retry]);
+        let ok = p.retry(Path::new("f"), || {
+            tries += 1;
+            if tries < 3 { fail() } else { Ok(()) }
+        });
+        assert_eq!((ok.unwrap(), tries), (true, 3));
+        let p = asking(&[Recover::Skip]);
+        assert!(!p.retry(Path::new("f"), fail).unwrap());
+        assert_eq!(p.skipped.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            asking(&[]).retry(Path::new("f"), fail),
+            Err(Error::Cancelled)
+        ));
+        // no handler: the error itself, as before
+        let none = Progress::default().retry(Path::new("f"), fail);
+        assert!(matches!(none, Err(Error::InvalidName(_))));
+    }
+
+    /// An unreadable file is skipped and the rest copied; a delete keeps the directory that
+    /// holds a skipped file.
+    #[cfg(unix)] // file modes are Unix-only
+    #[test]
+    fn skipped_file_keeps_its_source() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tree(tmp.path());
+        let locked = src.join("sub/b.txt");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&locked).is_ok() {
+            return; // root reads anything
+        }
+        let p = asking(&[Recover::Skip]);
+        let dst = tmp.path().join("dst");
+        super::copy(&src, &dst, &mut |_, _| Decision::Cancel, &p).unwrap();
+        assert_eq!(read(dst.join("a.txt")), "a");
+        assert!(!dst.join("sub/b.txt").exists()); // no partial file
+        assert_eq!(p.skipped.load(Ordering::Relaxed), 1);
+        // delete: a locked dir keeps its file, the user skips, the dir stays, the rest goes
+        let sub = dst.join("sub");
+        fs::write(sub.join("c.txt"), "c").unwrap();
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o500)).unwrap();
+        let p = asking(&[Recover::Skip]);
+        remove(&dst, &p).unwrap();
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(sub.join("c.txt").exists() && !dst.join("a.txt").exists());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     #[cfg(unix)] // sockets and FIFOs are Unix-only

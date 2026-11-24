@@ -440,7 +440,9 @@ impl App {
         let (sides, roots) = (s.sides.clone(), s.roots.clone());
         self.sync_again = Some((s.form, s.sides, s.roots));
         let pair = (sides[0].clone(), sides[1].clone());
-        self.spawn_xfer(pair, move |p, _| sync::run(&sides, &roots, &plan, p));
+        self.spawn_xfer("Synchronize", pair, move |p, _| {
+            sync::run(&sides, &roots, &plan, p)
+        });
     }
 
     /// Collect a finished tree compare or file compare.

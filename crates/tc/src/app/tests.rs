@@ -241,7 +241,8 @@ fn tc_core_zip(f: std::fs::File) -> (zip::ZipWriter<std::fs::File>, zip::write::
 }
 
 pub(super) fn wait(app: &mut App) {
-    while matches!(app.mode, Mode::Work(_)) || matches!(&app.mode, Mode::Xfer(x) if x.ask.is_none())
+    while matches!(app.mode, Mode::Work(_))
+        || matches!(&app.mode, Mode::Xfer(x) if x.ask.is_none() && x.error.is_none())
     {
         app.tick();
         std::thread::sleep(std::time::Duration::from_millis(1));

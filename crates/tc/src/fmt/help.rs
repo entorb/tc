@@ -43,7 +43,7 @@ Alt+F1          drives for left panel
 Alt+F2          drives for right panel
 Ctrl+D          add this directory to the bookmarks
 Ctrl+U          swap panels
-Ctrl+T          new tab
+Ctrl+T          new tab (also the ✚ button left of ★)
 Ctrl+W          close tab
 Ctrl+Shift+T    reopen the last closed tab (local, last 10)
 Ctrl+Shift+O    move the tab to the other panel (not the last one)
@@ -130,7 +130,7 @@ Ctrl+M          multi-rename: masks, counter, find / replace
 F7              make directory
 F8              delete: y / Enter trash, p permanent,
                 n / Esc cancel (remote panels: only p); also Delete
-                copy / move / delete over 2 s: progress of
+                copy / move / delete over 1 s: progress of
                 bytes, files, dirs with rates per second, ETA;
                 Esc cancels
 Ctrl+Insert     copy paths to clipboard (Alt+Shift+C)
@@ -461,6 +461,13 @@ r               rename: type a new name for the target
 O               overwrite all further conflicts
 S               skip all further conflicts
 N               newer-only for all further conflicts
+Esc / c         cancel the whole operation
+
+== A file failed (copy, move, delete) ==
+r / Enter       retry it
+s               skip it: the rest goes on; a move keeps
+                its source, a delete its directory
+S               skip all further failed files
 Esc / c         cancel the whole operation";
 pub const HELP_PROCS: &str = "\
 == About ==
@@ -571,11 +578,18 @@ Ctrl+Z          undo
 Ctrl+Y          redo
 Shift+arrows    select
 Ctrl+A          select all
-Ctrl+C          copy (also system clipboard)
-Ctrl+X          cut
-Ctrl+V          paste
+Ctrl+C          copy (also system clipboard); no selection:
+                the whole line
+Ctrl+X          cut; no selection: the whole line
+Ctrl+V          paste; a whole line goes above the cursor
+                line
 Ctrl+K / F8     delete selection or line
 Ctrl+D          duplicate line
+Ctrl+L          select line, again: one more
+Alt+Up/Down     move line / selected lines up / down
+                (Mac Option+Up/Down)
+Alt+Shift+Up    copy line above (Alt+Shift+Down: below)
+Ctrl+Enter      new line below (Ctrl+Shift+Enter: above)
 Alt+W           wrap on / off
 Alt+L           line numbers on / off";
 
@@ -640,7 +654,7 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         | Mode::Drives(..)
         | Mode::DirHistory(..)
         | Mode::Compare(_) => ("Help: lists", HELP_LISTS),
-        Mode::Xfer(_) => ("Help: file exists", HELP_CONFLICT),
+        Mode::Xfer(_) => ("Help: file exists, file failed", HELP_CONFLICT),
         _ => ("Help", HELP_MAIN),
     }
 }

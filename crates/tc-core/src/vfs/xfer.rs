@@ -63,15 +63,17 @@ pub fn delete_all(
                 return Err(Error::Cancelled);
             }
             p.current_is(t);
-            ops::trash(t)?;
-            p.add(c);
+            if p.retry(t, || ops::trash(t))? {
+                p.add(c);
+            }
+            // shortcut: a skipped item still counts, File Stats drops it until a rescan
             each();
         }
         return Ok(());
     }
     scan(side, paths, p);
     for t in paths {
-        side.delete_with(t, p)?;
+        p.retry(t, || side.delete_with(t, p))?;
         each();
     }
     Ok(())

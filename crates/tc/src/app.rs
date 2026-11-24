@@ -228,6 +228,8 @@ pub struct App {
     pub note: String,
     /// Editor clipboard, kept across files (Ctrl+V); the system clipboard is fed through `copied`.
     clipboard: String,
+    /// `clipboard` holds whole lines (copied without a selection): Ctrl+V puts them above the cursor line.
+    line_clip: bool,
     /// Replacement of a running one-by-one replace.
     replacing: Option<String>,
     /// Search with exact case instead of smart case (Alt+C).
@@ -341,6 +343,7 @@ impl App {
             search: None,
             note: String::new(),
             clipboard: String::new(),
+            line_clip: false,
             replacing: None,
             exact: false,
             search_regex: true,
@@ -1136,7 +1139,15 @@ impl App {
             Mode::Edit {
                 editor,
                 error: None,
-            } => editor.insert(&text.replace("\r\n", "\n"), false),
+            } => {
+                let text = text.replace("\r\n", "\n");
+                // still the line tc copied without a selection: above the cursor line, like VS Code
+                if self.line_clip && text == self.clipboard {
+                    editor.paste_lines(&text);
+                } else {
+                    editor.insert(&text, false);
+                }
+            }
             Mode::Cmd(l)
             | Mode::Transfer(_, _, l)
             | Mode::Mkdir(l)

@@ -69,6 +69,19 @@ pub fn fit(s: &str, w: usize) -> String {
     out
 }
 
+/// `s` with its middle replaced by `…` when longer than `max` chars: both path ends stay.
+pub fn elide(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_owned();
+    }
+    let head = max.saturating_sub(1) / 2;
+    let tail = max.saturating_sub(1) - head;
+    let start: String = s.chars().take(head).collect();
+    let end: String = s.chars().skip(n - tail).collect();
+    format!("{start}…{end}")
+}
+
 /// Time only for today's files, else short date and time.
 pub fn fmt_date(z: &jiff::ZonedDateTime, today: jiff::civil::Date) -> String {
     let fmt = if z.date() == today {
@@ -85,7 +98,8 @@ pub fn progress_text(x: &Xfer) -> String {
     let current = p
         .current
         .lock()
-        .map(|c| c.display().to_string())
+        // a long path would widen or wrap the popup: it jumps from file to file
+        .map(|c| elide(&c.display().to_string(), 80))
         .unwrap_or_default();
     let scanned = p.scanned.load(Ordering::Acquire);
     let total = |t: String| if scanned { t } else { "scanning...".to_owned() };
@@ -313,7 +327,7 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
                 Step::Changed => {
                     return text(
                         "File changed on disk",
-                        "Another program changed the file.\n\n[y] Overwrite it with mine   [r] Reload from disk (drops my edits)\n[n] / [Esc] Keep editing".to_owned(),
+                        "Another program changed the file.\n\n[y] Overwrite it with mine   [r] Reload from disk (drops my edits)\n[n/Esc] Keep editing".to_owned(),
                     );
                 }
                 Step::Encoding => format!("File is {}. Convert to UTF-8?", editor.encoding_name()),
@@ -335,16 +349,21 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
 fn xfer_dialog(x: &Xfer) -> Option<Dialog<'_>> {
     if let Some(l) = &x.rename {
         edit("Rename", "", l, OK_CANCEL)
+    } else if let Some(msg) = &x.error {
+        text(
+            "Error",
+            format!("{msg}\n\n[r/Enter] Retry   [s] Skip   [S] Skip all\n[Esc] Cancel"),
+        )
     } else if let Some((_, target)) = &x.ask {
         text(
             "File exists",
             format!(
-                "{}\n\n[o/Enter] Overwrite   [s] Skip   [r] Rename   [n] Newer\n[O] Overwrite all   [S] Skip all   [N] Newer all\n[Esc] Cancel",
+                "{}\n\n[o/Enter] Overwrite   [s] Skip   [n] Newer   [r] Rename\n[O] Overwrite all   [S] Skip all   [N] Newer all\n[Esc] Cancel",
                 target.display()
             ),
         )
     } else if x.visible() {
-        text("Working", progress_text(x))
+        text(x.label, progress_text(x))
     } else {
         None
     }
@@ -1021,7 +1040,14 @@ pub fn highlight(
 
 #[cfg(test)]
 mod tests {
-    use super::{PROC_COLS, UnicodeWidthStr, fit, fmt_date, proc_col_key, thousands};
+    use super::{PROC_COLS, UnicodeWidthStr, elide, fit, fmt_date, proc_col_key, thousands};
+
+    #[test]
+    fn elide_keeps_both_ends() {
+        assert_eq!(elide("abc", 3), "abc");
+        assert_eq!(elide("abcdefgh", 5), "ab…gh");
+        assert_eq!(elide("äöüßxyz", 4), "ä…yz");
+    }
 
     /// Every column title maps to its sort key, the user column to none.
     #[test]

@@ -334,15 +334,95 @@ impl Editor {
         self.cursor = (line + 1, col);
     }
 
-    /// Removes one tab or up to 4 spaces in front of the cursor line or every selected line.
-    pub fn unindent(&mut self) {
-        let (first, last) = match self.selection() {
+    /// The cursor line with its line break: VS Code's copy and cut without a selection.
+    pub fn line_copy(&self) -> String {
+        let s = self.rope.line(self.cursor.0).to_string();
+        if s.ends_with('\n') { s } else { s + "\n" }
+    }
+
+    /// Inserts whole lines `s` (ending in a line break) above the cursor line; the cursor stays.
+    pub fn paste_lines(&mut self, s: &str) {
+        self.delete_selection();
+        let (line, col) = self.cursor;
+        let c = self.splice(self.rope.line_to_char(line), 0, s);
+        self.record(c, false);
+        self.cursor = (line + s.matches('\n').count(), col);
+    }
+
+    /// First and last line of the selection, else the cursor line twice.
+    fn line_span(&self) -> (usize, usize) {
+        match self.selection() {
             Some(r) => (
                 self.rope.char_to_line(r.start),
                 self.rope.char_to_line(r.end.saturating_sub(1).max(r.start)),
             ),
             None => (self.cursor.0, self.cursor.0),
+        }
+    }
+
+    /// Swaps the cursor line (or the selected lines) with the line above or below.
+    pub fn move_lines(&mut self, down: bool) {
+        let (first, last) = self.line_span();
+        let (lo, hi, other) = match down {
+            true if last + 1 < self.line_count() => (first, last + 1, last + 1),
+            false if first > 0 => (first - 1, last, first - 1),
+            _ => return,
         };
+        let mut lines: Vec<String> = (lo..=hi).map(|i| self.line_text(i)).collect();
+        if down {
+            lines.rotate_right(1);
+        } else {
+            lines.rotate_left(1);
+        }
+        let start = self.rope.line_to_char(lo);
+        let end = match hi + 1 < self.line_count() {
+            true => self.rope.line_to_char(hi + 1),
+            false => self.rope.len_chars(),
+        };
+        let mut text = lines.join("\n");
+        if hi + 1 < self.line_count() {
+            text.push('\n');
+        }
+        // the moved block shifts by the other line and its break
+        let shift = self.line_len(other) + 1;
+        let idx = self.idx();
+        let c = self.splice(start, end - start, &text);
+        self.record(c, false);
+        let by = |i: usize| if down { i + shift } else { i - shift };
+        self.sel = self.sel.map(by);
+        self.goto_idx(by(idx));
+    }
+
+    /// Empty line below (or above) the cursor line with its indentation, cursor on it.
+    pub fn open_line(&mut self, below: bool) {
+        self.sel = None;
+        let line = self.cursor.0;
+        let indent: String = (self.rope.line(line).chars())
+            .take_while(|&c| c == ' ' || c == '\t')
+            .collect();
+        if below {
+            self.cursor.1 = self.line_len(line);
+            self.insert(&format!("\n{indent}"), false);
+        } else {
+            let at = self.rope.line_to_char(line);
+            let c = self.splice(at, 0, &format!("{indent}\n"));
+            self.record(c, false);
+            self.cursor = (line, indent.chars().count());
+        }
+    }
+
+    /// Selects the cursor line through the next line start; again: one more line.
+    pub fn select_line(&mut self) {
+        let line = self.cursor.0;
+        if self.selection().is_none() {
+            self.sel = Some(self.rope.line_to_char(line));
+        }
+        self.goto_idx(self.rope.line_to_char((line + 1).min(self.line_count())));
+    }
+
+    /// Removes one tab or up to 4 spaces in front of the cursor line or every selected line.
+    pub fn unindent(&mut self) {
+        let (first, last) = self.line_span();
         let (mut step, mut cursor_cut) = (Vec::new(), 0);
         for l in (first..=last).rev() {
             let head = self.rope.line(l);
@@ -552,6 +632,33 @@ impl Editor {
         changed
     }
 
+    /// What save writes, in the text too: trailing blanks trimmed, a final line break added.
+    /// One undo step; false when nothing changed.
+    pub fn tidy(&mut self) -> bool {
+        // top down on the live rope, so undo (bottom up) finds each change where it was made
+        let mut step = Vec::new();
+        for l in 0..self.line_count() {
+            let text = self.line_text(l);
+            let keep = text.trim_end_matches([' ', '\t']).chars().count();
+            let extra = text.chars().count() - keep;
+            if extra > 0 {
+                let at = self.rope.line_to_char(l) + keep;
+                step.push(self.splice(at, extra, ""));
+            }
+        }
+        let n = self.rope.len_chars();
+        if n > 0 && self.rope.char(n - 1) != '\n' {
+            step.push(self.splice(n, 0, "\n"));
+        }
+        let changed = !step.is_empty();
+        self.record_step(step);
+        if changed {
+            self.sel = None;
+            self.cursor.1 = self.cursor.1.min(self.line_len(self.cursor.0));
+        }
+        changed
+    }
+
     /// Left/right across line ends.
     pub fn move_h(&mut self, delta: isize) {
         let idx = self.idx() as isize + delta;
@@ -727,6 +834,58 @@ mod tests {
 
     fn text(e: &Editor) -> String {
         e.visible(100, 100).join("|")
+    }
+
+    #[test]
+    fn tidy_trims_and_ends_with_line_break_as_one_undo_step() {
+        let (_d, mut e) = editor("a  \nb \t\nc  ");
+        e.goto_idx(usize::MAX);
+        assert!(e.tidy());
+        assert_eq!((text(&e), e.cursor), ("a|b|c|".into(), (2, 1)));
+        assert!(!e.tidy()); // already tidy
+        e.undo();
+        e.select_all();
+        assert_eq!(e.copy().as_deref(), Some("a  \nb \t\nc  "));
+        let (_d, mut e) = editor("");
+        assert!(!e.tidy());
+    }
+
+    #[test]
+    fn vscode_line_ops() {
+        let (_d, mut e) = editor("a\nbb\nc");
+        e.move_lines(true);
+        assert_eq!((text(&e), e.cursor), ("bb|a|c".into(), (1, 0)));
+        e.move_lines(true);
+        assert_eq!(text(&e), "bb|c|a");
+        e.move_lines(true); // last line stays
+        assert_eq!(text(&e), "bb|c|a");
+        e.undo();
+        assert_eq!(text(&e), "bb|a|c");
+        // two selected lines move up as a block, still selected
+        e.goto_idx(3);
+        e.select(true);
+        e.goto_idx(6);
+        e.move_lines(false);
+        assert_eq!(text(&e), "a|c|bb");
+        assert_eq!(e.copy().as_deref(), Some("a\nc"));
+        e.select(false);
+        e.goto_line(3);
+        assert_eq!(e.line_copy(), "bb\n");
+        e.paste_lines("x\n");
+        assert_eq!((text(&e), e.cursor.0), ("a|c|x|bb".into(), 3));
+        e.goto_line(1);
+        e.select_line();
+        e.select_line();
+        assert_eq!(e.copy().as_deref(), Some("a\nc\n"));
+        e.select(false);
+        e.insert_char(' ');
+        e.goto_line(3);
+        e.open_line(false);
+        e.insert_char('y');
+        assert_eq!(text(&e), "a|c| y| x|bb");
+        e.open_line(true);
+        e.insert_char('z');
+        assert_eq!(text(&e), "a|c| y| z| x|bb");
     }
 
     #[test]

@@ -106,7 +106,7 @@ pub(super) fn draw_panel(
 }
 
 /// Panel title buttons, right to left.
-pub(super) const BUTTONS: [(&str, &str, KeyCode, KeyModifiers); 2] = [
+pub(super) const BUTTONS: [(&str, &str, KeyCode, KeyModifiers); 3] = [
     (
         "🕓",
         "Directory history (Alt+Down)",
@@ -119,9 +119,15 @@ pub(super) const BUTTONS: [(&str, &str, KeyCode, KeyModifiers); 2] = [
         KeyCode::Char('b'),
         KeyModifiers::CONTROL,
     ),
+    (
+        "✚",
+        "New tab (Ctrl+T)",
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL,
+    ),
 ];
 
-/// Path title, with the bookmarks and directory history buttons at its right end.
+/// Path title, with the new tab, bookmarks and directory history buttons at its right end.
 fn title_row(ui: &mut Ui, app: &App, i: usize, action: &mut Option<Action>) {
     let title = RichText::new(panel_title(app, i, false)).strong();
     let title = if i == app.active {

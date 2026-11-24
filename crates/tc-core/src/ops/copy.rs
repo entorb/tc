@@ -25,7 +25,7 @@ type Job = (PathBuf, PathBuf, fs::Metadata);
 pub(super) fn copy_tree(src: &Path, dst: &Path, p: &Progress, skip_special: bool) -> Result<()> {
     let meta = fs::symlink_metadata(src).map_err(io_err(src))?;
     if !meta.is_dir() {
-        return copy_leaf(src, dst, &meta, p, skip_special);
+        return copy_leaf(src, dst, &meta, p, skip_special).map(drop);
     }
     let (tx, rx) = mpsc::sync_channel::<Job>(256);
     let rx = Mutex::new(rx);
@@ -83,7 +83,7 @@ fn worker(
         if stop.load(Ordering::Relaxed) {
             continue;
         }
-        if let Err(e) = copy_file(&s, &d, &m, p, false) {
+        if let Err(e) = p.retry(&s, || copy_file(&s, &d, &m, p, false)) {
             fail(failed, stop, e);
         }
     }
@@ -127,26 +127,28 @@ impl Walk<'_> {
     }
 }
 
-/// File or symlink.
+/// File or symlink; failures go to [`Progress::retry`]. False when the user skipped it.
 fn copy_leaf(
     src: &Path,
     dst: &Path,
     meta: &fs::Metadata,
     p: &Progress,
     skip_special: bool,
-) -> Result<()> {
+) -> Result<bool> {
     if is_special(meta) {
         if !skip_special {
             return Err(Error::Special(src.to_owned()));
         }
         // shortcut: skipped silently, report a skip count if users miss them
         p.files.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        Ok(true)
     } else if meta.is_symlink() {
-        let link = fs::read_link(src).map_err(io_err(src))?;
-        platform::symlink(&link, dst, src).map_err(io_err(dst))
+        p.retry(src, || {
+            let link = fs::read_link(src).map_err(io_err(src))?;
+            platform::symlink(&link, dst, src).map_err(io_err(dst))
+        })
     } else {
-        copy_file(src, dst, meta, p, false)
+        p.retry(src, || copy_file(src, dst, meta, p, false))
     }
 }
 
@@ -167,7 +169,7 @@ pub(crate) fn is_special(meta: &fs::Metadata) -> bool {
 
 /// Copy keeping the modification time and permissions; progress and cancel work inside a huge
 /// file. Never replaces an existing `dst`. `sync`: flush to disk before it replaces a file.
-/// Leaves a partial `dst` on error; callers remove it.
+/// Removes its partial `dst` on error (a retry or skip leaves no half file).
 pub(super) fn copy_file(
     src: &Path,
     dst: &Path,
@@ -179,10 +181,17 @@ pub(super) fn copy_file(
     if p.cancel.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
-    match os_copy(src, dst, meta, p, sync) {
-        Some(r) => r?,
-        None => stream(src, dst, meta, p, sync)?,
+    // only a file this copy created is removed, never one that was there
+    let existed = fs::symlink_metadata(dst).is_ok();
+    let r = match os_copy(src, dst, meta, p, sync) {
+        Some(r) => r,
+        None => stream(src, dst, meta, p, sync),
+    };
+    // shortcut: bytes of a failed try stay counted, a retry overshoots `done`; fine for a progress bar
+    if r.is_err() && !existed {
+        let _ = fs::remove_file(dst);
     }
+    r?;
     p.files.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
