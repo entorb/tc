@@ -14,7 +14,9 @@ mod dialogs;
 mod help;
 use self::dialogs::{draw_multi_rename, overlays};
 mod chrome;
-use self::chrome::{apply_caret, cmdline, footer, menu_bar, toolbar};
+mod widgets;
+use self::chrome::{cmdline, footer, menu_bar, toolbar};
+use self::widgets::apply_caret;
 
 const ACCENT: Color32 = Color32::from_rgb(90, 160, 255);
 const MARK: Color32 = Color32::from_rgb(255, 200, 60);

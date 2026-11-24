@@ -1,5 +1,5 @@
-use super::chrome::{line_edit, list_button, text_box};
 use super::help::show_help;
+use super::widgets::{line_edit, list_button, text_box};
 use super::{ACCENT, MUTED, TEXT, icons, modal};
 use eframe::egui::{
     self, Button, Color32, ComboBox, Context, Label, ModalResponse, Response, RichText, ScrollArea,

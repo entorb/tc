@@ -1,4 +1,4 @@
-use super::chrome::{caret_id, text_box};
+use super::widgets::{caret_id, text_box};
 use super::{ACCENT, MUTED, TEXT};
 use crate::keys;
 use eframe::egui::{

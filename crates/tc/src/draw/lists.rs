@@ -1,8 +1,8 @@
-use super::chrome::{cell, line_edit};
+use super::widgets::{cell, click_table, left, line_edit, page_rows, right};
 use super::{ACCENT, MARK, MUTED, TEXT};
 use eframe::egui::{
     self, Align2, Color32, FontId, Label, Pos2, ProgressBar, Rect, RichText, Sense, Shape, Stroke,
-    StrokeKind, TextStyle, Ui, epaint::Mesh, vec2,
+    StrokeKind, Ui, epaint::Mesh, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 use std::sync::Arc;
@@ -17,68 +17,6 @@ use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
 use tc_core::procs::ProcSort;
 use tc_core::stats::treemap::Tile;
-/// Row height and rows per page of a table below a title (page-wise: only the page holding the cursor is built).
-fn page_rows(ui: &Ui) -> (f32, usize) {
-    let row_h = ui.text_style_height(&TextStyle::Body) + 6.0;
-    // egui_extras adds the item spacing under every row
-    let step = row_h + ui.spacing().item_spacing.y;
-    let h = ((ui.available_height() / step) as usize)
-        .saturating_sub(1)
-        .max(1);
-    (row_h, h)
-}
-
-fn right(ui: &mut Ui, text: impl Into<String>) {
-    cell(ui, true, |ui| ui.label(text.into()));
-}
-
-fn left(ui: &mut Ui, text: impl Into<String>) {
-    ui.add(Label::new(text.into()).truncate());
-}
-
-/// Header cells; the columns in `right_cols` are right-aligned.
-fn head_row(mut head: TableRow, titles: &[&str], right_cols: &[usize]) {
-    for (k, title) in titles.iter().enumerate() {
-        head.col(|ui| {
-            let t = RichText::new(*title).strong().color(MUTED);
-            cell(ui, right_cols.contains(&k), |ui| ui.label(t));
-        });
-    }
-}
-
-/// Click table of `shown` rows from `start`; `fill` draws one row's cells. `Some((index, double))` on click.
-fn click_table(
-    ui: &mut Ui,
-    cols: &[Column],
-    titles: &[&str],
-    right_cols: &[usize],
-    (row_h, start, shown, sel): (f32, usize, usize, usize),
-    mut fill: impl FnMut(&mut TableRow, usize),
-) -> Option<(usize, bool)> {
-    let mut clicked = None;
-    let mut table = TableBuilder::new(ui)
-        .striped(false)
-        .vscroll(false)
-        .sense(Sense::CLICK);
-    for c in cols {
-        table = table.column(*c);
-    }
-    table
-        .header(row_h, |head| head_row(head, titles, right_cols))
-        .body(|body| {
-            body.rows(row_h, shown, |mut row| {
-                let i = start + row.index();
-                row.set_selected(i == sel);
-                fill(&mut row, i);
-                let r = row.response();
-                if r.clicked() || r.double_clicked() {
-                    clicked = Some((i, r.double_clicked()));
-                }
-            });
-        });
-    clicked
-}
-
 pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     let Mode::Found(f) = &mut app.mode else {
         return;

@@ -1,4 +1,4 @@
-use super::chrome::cell;
+use super::widgets::cell;
 use super::{ACCENT, LINK, Look, MARK, MUTED, TEXT, icons};
 use eframe::egui::{
     self, Align, Button, Color32, Label, Layout, RichText, Sense, Stroke, TextStyle, Ui,
