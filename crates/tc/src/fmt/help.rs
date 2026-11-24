@@ -441,14 +441,14 @@ Enter / Click   go there (a history step: back / forward stay)
 Esc / q / F10   close";
 pub const HELP_CONFLICT: &str = "\
 == Target exists ==
-o               overwrite this file
+o / Enter       overwrite this file
 s               skip this file
 n               overwrite only if the source is newer
 r               rename: type a new name for the target
 O               overwrite all further conflicts
 S               skip all further conflicts
 N               newer-only for all further conflicts
-Esc / Enter     cancel the whole operation (c too)";
+Esc / c         cancel the whole operation";
 pub const HELP_PROCS: &str = "\
 == About ==
 CPU% is the average over the interval, per core (can

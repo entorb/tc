@@ -121,7 +121,7 @@ impl Xfer {
         } else if let Some((_, target)) = &self.ask {
             use Policy::*;
             match code {
-                KeyCode::Char('o') => self.answer(Answer::One(Overwrite)),
+                KeyCode::Char('o') | KeyCode::Enter => self.answer(Answer::One(Overwrite)),
                 KeyCode::Char('s') => self.answer(Answer::One(Skip)),
                 KeyCode::Char('n') => self.answer(Answer::One(Newer)),
                 KeyCode::Char('O') => self.answer(Answer::All(Overwrite)),
@@ -131,7 +131,7 @@ impl Xfer {
                     let name = target.file_name().unwrap_or_default();
                     self.rename = Some(LineEdit::from(name.to_string_lossy().into_owned()));
                 }
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('c') => self.answer(Answer::Cancel),
+                KeyCode::Esc | KeyCode::Char('c') => self.answer(Answer::Cancel),
                 _ => {}
             }
         } else if code == KeyCode::Esc {
@@ -612,7 +612,7 @@ mod tests {
         key(&mut app, KeyCode::Char('2'));
         key(&mut app, KeyCode::Enter); // "a2"
         wait(&mut app);
-        key(&mut app, KeyCode::Char('O')); // overwrite all
+        key(&mut app, KeyCode::Enter); // overwrite "b"
         wait(&mut app);
         assert!(matches!(app.mode, Mode::Normal));
         let read = |f| std::fs::read_to_string(right.path().join(f)).unwrap();

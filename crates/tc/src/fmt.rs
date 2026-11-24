@@ -331,7 +331,7 @@ fn xfer_dialog(x: &Xfer) -> Option<Dialog<'_>> {
         text(
             "File exists",
             format!(
-                "{}\n\n[o] Overwrite   [s] Skip   [r] Rename   [n] Newer\n[O] Overwrite all   [S] Skip all   [N] Newer all\n[Esc] Cancel",
+                "{}\n\n[o/Enter] Overwrite   [s] Skip   [r] Rename   [n] Newer\n[O] Overwrite all   [S] Skip all   [N] Newer all\n[Esc] Cancel",
                 target.display()
             ),
         )
