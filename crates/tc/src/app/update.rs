@@ -13,7 +13,7 @@ pub const VERSION: Option<&str> = match option_env!("TC_VERSION") {
     _ => None,
 };
 
-const RELEASES: &str = "https://github.com/entorb/tc/releases/latest";
+pub const RELEASES: &str = "https://github.com/entorb/tc/releases/latest";
 const CHECK_DAILY: &str = "Check for updates daily";
 const FONT_SIZE: &str = "Font size";
 /// Font scales 50 %..300 % in 10 % steps, index = `zoom * 10 - 5` (see `zoom_step`).

@@ -57,7 +57,7 @@ pub use panel_filter::FilterForm;
 pub use proc_mon::Procs;
 pub use props::PropsForm;
 pub use sync::{Sync, SyncForm};
-pub use update::{SettingsForm, VERSION};
+pub use update::{RELEASES, SettingsForm, VERSION};
 pub use widgets::{Filter, FormRow, ListRow, list_rows};
 use widgets::{
     PresetKind, edit_key, form_checked, form_text, list_nav, paste_line, preset_key,

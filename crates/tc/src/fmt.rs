@@ -294,8 +294,9 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
         Mode::Update { tag, check } => text(
             "Update available",
             format!(
-                "tc {tag} is available (running {}).\n\n{} Check for updates daily\n\n[Enter] Open release page   [Space] Toggle   [Esc] Close",
+                "tc {tag} is available (running {}).\n{}\n\n{} Check for updates daily\n\n[Enter] Open release page   [Space] Toggle   [Esc] Close",
                 crate::app::VERSION.unwrap_or("?"),
+                crate::app::RELEASES,
                 if *check { "[x]" } else { "[ ]" }
             ),
         ),
