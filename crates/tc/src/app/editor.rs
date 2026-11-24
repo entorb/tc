@@ -177,8 +177,9 @@ impl App {
                 self.open_search(true, true);
                 return;
             }
-            KeyCode::Left if ctrl => editor.move_word(false),
-            KeyCode::Right if ctrl => editor.move_word(true),
+            // Alt: macOS Option+arrow, Ctrl+arrow switches Spaces there
+            KeyCode::Left if ctrl || alt => editor.move_word(false),
+            KeyCode::Right if ctrl || alt => editor.move_word(true),
             KeyCode::Home if ctrl => editor.goto_idx(0),
             KeyCode::End if ctrl => editor.goto_idx(usize::MAX),
             KeyCode::Left => editor.move_h(-1),
@@ -189,8 +190,8 @@ impl App {
             KeyCode::BackTab => editor.unindent(),
             KeyCode::Tab if shift => editor.unindent(),
             KeyCode::Tab => editor.insert_char('\t'),
-            KeyCode::Backspace if ctrl => editor.delete_word(false),
-            KeyCode::Delete if ctrl => editor.delete_word(true),
+            KeyCode::Backspace if ctrl || alt => editor.delete_word(false),
+            KeyCode::Delete if ctrl || alt => editor.delete_word(true),
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
             KeyCode::F(8) => editor.delete_line(),
@@ -853,6 +854,13 @@ mod tests {
         );
         key(&mut app, KeyCode::Down);
         assert_eq!(app.mode.editor_mut().unwrap().copy(), None);
+        // Option+arrow (Alt) moves and deletes by word like Ctrl (macOS keeps Ctrl+arrow)
+        with(&mut app, KeyCode::Right, KeyModifiers::ALT);
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (3, 0));
+        with(&mut app, KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(app.mode.editor_mut().unwrap().cursor, (2, 0));
+        with(&mut app, KeyCode::Delete, KeyModifiers::ALT);
+        assert_eq!(rows(&mut app), ["one", "two", ""]);
     }
 
     #[test]

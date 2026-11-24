@@ -33,6 +33,16 @@ pub fn translate(ev: &Event, alt: bool) -> Option<Input> {
             modifiers,
             ..
         } => {
+            if cfg!(target_os = "macos")
+                && let Some(code) = mac_cmd_arrow(*k, *modifiers)
+            {
+                let m = Modifiers {
+                    mac_cmd: false,
+                    command: false,
+                    ..*modifiers
+                };
+                return key(code, mods(m));
+            }
             let mods = mods(*modifiers);
             let code = named(*k, mods).or_else(|| char_key(*k, mods))?;
             key(code, mods)
@@ -55,6 +65,15 @@ pub fn option_typed(events: &[Event]) -> bool {
 pub fn is_alt_char(ev: &Event) -> bool {
     matches!(ev, Event::Key { key, pressed: true, modifiers, .. }
         if modifiers.alt && named(*key, mods(*modifiers)).is_none())
+}
+
+/// macOS Cmd+Left/Right: line start / end, like every Mac text field (else Cmd counts as Ctrl).
+fn mac_cmd_arrow(k: Key, m: Modifiers) -> Option<KeyCode> {
+    match k {
+        Key::ArrowLeft if m.mac_cmd => Some(KeyCode::Home),
+        Key::ArrowRight if m.mac_cmd => Some(KeyCode::End),
+        _ => None,
+    }
 }
 
 fn mods(m: Modifiers) -> KeyModifiers {
@@ -143,9 +162,21 @@ fn char_key(k: Key, mods: KeyModifiers) -> Option<KeyCode> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Event, ImeEvent, Input, Key, KeyCode, KeyModifiers, Modifiers, is_alt_char, option_typed,
-        translate,
+        Event, ImeEvent, Input, Key, KeyCode, KeyModifiers, Modifiers, is_alt_char, mac_cmd_arrow,
+        option_typed, translate,
     };
+
+    #[test]
+    fn mac_cmd_arrows_go_to_line_start_and_end() {
+        let cmd = Modifiers::MAC_CMD;
+        assert_eq!(mac_cmd_arrow(Key::ArrowLeft, cmd), Some(KeyCode::Home));
+        assert_eq!(
+            mac_cmd_arrow(Key::ArrowRight, cmd | Modifiers::SHIFT),
+            Some(KeyCode::End)
+        );
+        assert_eq!(mac_cmd_arrow(Key::ArrowLeft, Modifiers::CTRL), None);
+        assert_eq!(mac_cmd_arrow(Key::ArrowUp, cmd), None);
+    }
 
     fn press(key: Key, modifiers: Modifiers) -> Event {
         Event::Key {

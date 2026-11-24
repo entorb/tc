@@ -521,9 +521,9 @@ Esc / F10       exit (asks if unsaved)
 Up/Down         line up / down
 PgUp/PgDn       page up / down
 Left/Right      character left / right
-Home/End        start / end of line
-Ctrl+Left       word left
-Ctrl+Right      word right
+Home/End        start / end of line (Mac also Cmd+Left/Right)
+Ctrl+Left       word left (also Alt+Left: Mac Option+Left)
+Ctrl+Right      word right (also Alt+Right)
 Ctrl+Home/End   start / end of file
 Ctrl+G          go to line
 Mouse wheel     scroll
@@ -547,8 +547,8 @@ Tab             insert a tab
 Shift+Tab       unindent line / selection
 Backspace       delete left
 Delete          delete right
-Ctrl+Backspace  delete word left
-Ctrl+Delete     delete word right
+Ctrl+Backspace  delete word left (also Alt+Backspace)
+Ctrl+Delete     delete word right (also Alt+Delete)
 Ctrl+Z          undo
 Ctrl+Y          redo
 Shift+arrows    select
