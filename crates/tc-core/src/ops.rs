@@ -506,15 +506,63 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
     use std::{fs, io, path::Path};
 
     pub(super) use super::copy_chunk_buffered as copy_chunk;
 
+    /// ERROR_PRIVILEGE_NOT_HELD: symlinks need admin rights or developer mode.
+    const NO_PRIVILEGE: i32 = 1314;
+
+    /// Copy of the link `src` (pointing to `link`) at `dst`. Without the symlink privilege a
+    /// directory link becomes a junction (pnpm's `node_modules`), a file link a copy of its target.
     pub fn symlink(link: &Path, dst: &Path, src: &Path) -> io::Result<()> {
-        if fs::metadata(src).is_ok_and(|m| m.is_dir()) {
+        let is_dir = fs::metadata(src).is_ok_and(|m| m.is_dir());
+        let made = if is_dir {
             std::os::windows::fs::symlink_dir(link, dst)
         } else {
             std::os::windows::fs::symlink_file(link, dst)
+        };
+        match made {
+            Err(e) if e.raw_os_error() == Some(NO_PRIVILEGE) && is_dir => {
+                let base = src.parent().unwrap_or(Path::new("."));
+                junction(&base.join(link), dst).map_err(|_| e)
+            }
+            Err(e) if e.raw_os_error() == Some(NO_PRIVILEGE) => {
+                let mut from = fs::File::open(src)?;
+                let mut to = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(dst)?;
+                io::copy(&mut from, &mut to).map(drop)
+            }
+            r => r,
+        }
+    }
+
+    /// `mklink /J dst target`: junctions need no privilege; the target must be absolute.
+    /// Never replaces `dst` (mklink fails on an existing path).
+    fn junction(target: &Path, dst: &Path) -> io::Result<()> {
+        let target = std::path::absolute(target)?;
+        let target = target.to_string_lossy();
+        let target = target.strip_prefix(r"\\?\").unwrap_or(&target);
+        let dst = std::path::absolute(dst)?;
+        let dst = dst.to_string_lossy();
+        // cmd expands %VAR% even inside quotes
+        if target.contains('%') || dst.contains('%') {
+            return Err(io::Error::other("% in path"));
+        }
+        let status = Command::new("cmd")
+            .raw_arg(format!("/C mklink /J \"{dst}\" \"{target}\""))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("mklink /J: {status}")))
         }
     }
 }
