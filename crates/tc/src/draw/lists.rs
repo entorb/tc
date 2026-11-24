@@ -1,8 +1,8 @@
-use super::chrome::line_edit;
+use super::chrome::{cell, line_edit};
 use super::{ACCENT, MARK, MUTED, TEXT};
 use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Label, Layout, Pos2, ProgressBar, Rect, RichText, Sense,
-    Shape, Stroke, StrokeKind, TextStyle, Ui, epaint::Mesh, vec2,
+    self, Align2, Color32, FontId, Label, Pos2, ProgressBar, Rect, RichText, Sense, Shape, Stroke,
+    StrokeKind, TextStyle, Ui, epaint::Mesh, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 use std::sync::Arc;
@@ -29,9 +29,7 @@ fn page_rows(ui: &Ui) -> (f32, usize) {
 }
 
 fn right(ui: &mut Ui, text: impl Into<String>) {
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.label(text.into())
-    });
+    cell(ui, true, |ui| ui.label(text.into()));
 }
 
 fn left(ui: &mut Ui, text: impl Into<String>) {
@@ -43,11 +41,7 @@ fn head_row(mut head: TableRow, titles: &[&str], right_cols: &[usize]) {
     for (k, title) in titles.iter().enumerate() {
         head.col(|ui| {
             let t = RichText::new(*title).strong().color(MUTED);
-            if right_cols.contains(&k) {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(t));
-            } else {
-                ui.label(t);
-            }
+            cell(ui, right_cols.contains(&k), |ui| ui.label(t));
         });
     }
 }
@@ -366,7 +360,6 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
     let start = p.sel / h * h;
     let shown = p.rows.len().saturating_sub(start).min(h);
     let (mut sort, mut clicked) = (None, None);
-    let right = || Layout::right_to_left(Align::Center);
     TableBuilder::new(ui)
         .striped(false)
         .vscroll(false)
@@ -396,11 +389,7 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
                         .strong()
                         .color(MUTED);
                     let add = |ui: &mut Ui| ui.add(Label::new(t).sense(Sense::CLICK)).clicked();
-                    let hit = if matches!(k, 0 | 2 | 3 | 4) {
-                        ui.with_layout(right(), add).inner
-                    } else {
-                        add(ui)
-                    };
+                    let hit = cell(ui, matches!(k, 0 | 2 | 3 | 4), add);
                     if hit {
                         sort = key.map(|(c, _)| c);
                     }
@@ -412,21 +401,13 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
                 let i = start + row.index();
                 let q = &p.snap.procs[p.rows[i]];
                 row.set_selected(i == p.sel);
-                row.col(|ui| {
-                    ui.with_layout(right(), |ui| ui.label(q.pid.to_string()));
-                });
+                row.col(|ui| right(ui, q.pid.to_string()));
                 row.col(|ui| {
                     ui.add(Label::new(q.user.as_str()).truncate());
                 });
-                row.col(|ui| {
-                    ui.with_layout(right(), |ui| ui.label(format!("{:.1}", q.cpu)));
-                });
-                row.col(|ui| {
-                    ui.with_layout(right(), |ui| ui.label(human(q.mem)));
-                });
-                row.col(|ui| {
-                    ui.with_layout(right(), |ui| ui.label((q.run / 60).to_string()));
-                });
+                row.col(|ui| right(ui, format!("{:.1}", q.cpu)));
+                row.col(|ui| right(ui, human(q.mem)));
+                row.col(|ui| right(ui, (q.run / 60).to_string()));
                 row.col(|ui| {
                     let cmd = if q.cmd.is_empty() || q.cmd == q.name {
                         q.name.clone()

@@ -8,9 +8,8 @@ impl App {
     /// F1 opens the help here: the footer screens plus lists and the conflict question.
     pub(super) fn takes_f1(&self) -> bool {
         self.footer_active()
-            || (self.search_form.is_some() && !self.help)
+            || self.search_form.is_some()
             || (self.input.is_none()
-                && !self.help
                 && match &self.mode {
                     Mode::Bookmarks(_)
                     | Mode::BookmarkEdit(_)
@@ -49,12 +48,16 @@ impl App {
         self.help_entries().get(line).and_then(|e| e.1)
     }
 
-    /// Click on help text line `line`: close the help and run the action the line describes.
+    /// Click on help text line `line`: run the action the line describes; the help stays open.
     pub fn help_click(&mut self, line: usize) {
         if let Some((c, m)) = self.help_action_at(line) {
-            self.help = false;
             self.on_key(KeyEvent::new(c, m));
         }
+    }
+
+    /// Close button or a click beside the help.
+    pub fn help_close(&mut self) {
+        self.help = false;
     }
 
     /// New filter text: selects the first key line and scrolls to the top.
@@ -98,7 +101,8 @@ impl App {
         }
     }
 
-    pub(super) fn help_key(&mut self, key: KeyEvent) {
+    /// A key typed in the help window.
+    pub fn help_key(&mut self, key: KeyEvent) {
         let page = self.page;
         let typing = !key
             .modifiers
@@ -145,7 +149,12 @@ mod tests {
 
     use tc_core::panel::Panel;
 
-    use super::super::tests::{key, type_keys};
+    use super::super::tests::key;
+
+    /// A key typed in the help window.
+    fn hk(app: &mut App, code: KeyCode) {
+        app.help_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
 
     #[test]
     fn f1_help_opens_on_forms_and_lists() {
@@ -162,7 +171,7 @@ mod tests {
             let title = app.help_text().0;
             key(&mut app, KeyCode::F(1));
             assert!(app.help && title != "Help", "{title} {code:?}");
-            key(&mut app, KeyCode::Esc);
+            hk(&mut app, KeyCode::Esc);
             assert!(!app.help && !matches!(app.mode, Mode::Normal));
             key(&mut app, KeyCode::Esc);
             assert!(matches!(app.mode, Mode::Normal));
@@ -180,7 +189,7 @@ mod tests {
             .position(|l| l.starts_with("Ctrl+B "))
             .unwrap();
         app.help_click(line);
-        assert!(!app.help && matches!(app.mode, Mode::Bookmarks(_)));
+        assert!(app.help && matches!(app.mode, Mode::Bookmarks(_)));
     }
 
     #[test]
@@ -191,15 +200,15 @@ mod tests {
         key(&mut app, KeyCode::F(1));
         assert!(app.help);
         for c in "ncdu".chars() {
-            key(&mut app, KeyCode::Char(c));
+            hk(&mut app, KeyCode::Char(c));
         }
         let e = app.help_entries();
         // section title, the entry and its continuation line
         assert_eq!(e[0].0, "== Highlights ==");
         assert!(e[1].0.contains("FILE STATS") && e[2].0.starts_with(' '));
-        key(&mut app, KeyCode::Esc);
+        hk(&mut app, KeyCode::Esc);
         assert!(app.help && app.help_filter.is_empty());
-        key(&mut app, KeyCode::Esc);
+        hk(&mut app, KeyCode::Esc);
         assert!(!app.help && matches!(app.mode, Mode::Normal));
     }
 
@@ -211,7 +220,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         key(&mut app, KeyCode::F(1));
         let first = app.help_sel;
-        key(&mut app, KeyCode::Down);
+        hk(&mut app, KeyCode::Down);
         assert!(app.help_sel > first && app.help_action_at(app.help_sel).is_none());
     }
 
@@ -221,9 +230,11 @@ mod tests {
         let p = || Panel::open(tmp.path()).unwrap();
         let mut app = App::new(p(), p());
         key(&mut app, KeyCode::F(1));
-        type_keys(&mut app, "type to filter");
+        for c in "type to filter".chars() {
+            hk(&mut app, KeyCode::Char(c));
+        }
         assert!(app.help_entries().iter().all(|e| e.1.is_none()));
-        key(&mut app, KeyCode::Down);
+        hk(&mut app, KeyCode::Down);
         assert_eq!(app.help_scroll, 1);
     }
 
@@ -235,16 +246,21 @@ mod tests {
         key(&mut app, KeyCode::F(1));
         // first key line is selected; Down moves to the next key line
         let first = app.help_sel;
-        key(&mut app, KeyCode::Down);
+        hk(&mut app, KeyCode::Down);
         assert!(app.help_sel > first && app.help_action_at(app.help_sel).is_some());
-        key(&mut app, KeyCode::Up);
+        hk(&mut app, KeyCode::Up);
         assert_eq!(app.help_sel, first);
         // filter to Ctrl+B bookmarks, Enter runs it
         for c in "bookmarks".chars() {
-            key(&mut app, KeyCode::Char(c));
+            hk(&mut app, KeyCode::Char(c));
         }
         assert!(app.help_action_at(app.help_sel).is_some());
-        key(&mut app, KeyCode::Enter);
-        assert!(!app.help && matches!(app.mode, Mode::Bookmarks(_)));
+        hk(&mut app, KeyCode::Enter);
+        assert!(app.help && matches!(app.mode, Mode::Bookmarks(_)));
+        // the main window works with the help open; F1 there closes it
+        key(&mut app, KeyCode::Esc);
+        assert!(app.help && matches!(app.mode, Mode::Normal));
+        key(&mut app, KeyCode::F(1));
+        assert!(!app.help);
     }
 }

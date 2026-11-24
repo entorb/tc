@@ -70,6 +70,8 @@ Click F-bar     run the key shown on the label
 Click menu bar  open the F9 menu
 R-click tab     close the tab (not the last one)
 Click cmd line  type a command, like :
+✖ / Click out   close a popup (Esc); a running copy,
+                scan or connect only by ✖
 Shift held      F-bar shows the Shift actions
 
 == Colors ==

@@ -12,7 +12,7 @@ mod lists;
 use self::lists::{draw_found, draw_procs, draw_stats, draw_sync, status_line};
 mod dialogs;
 mod help;
-use self::dialogs::overlays;
+use self::dialogs::{draw_multi_rename, overlays};
 mod chrome;
 use self::chrome::{apply_caret, cmdline, footer, menu_bar, toolbar};
 
@@ -44,6 +44,9 @@ pub fn setup_fonts(ctx: &Context) {
         // a file manager, not a document: arrow pointer, no text selection on labels
         s.interaction.selectable_labels = false;
         s.interaction.tooltip_delay = 0.1;
+        // every scroll area: no coasting, no rubber-band past the first / last row
+        s.spacing.scroll.kinetic.decay_time = 0.0;
+        s.spacing.scroll.kinetic.rubber_band = false;
     });
 }
 
@@ -67,31 +70,30 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         egui::CentralPanel::default().show(ui, |ui| draw_view(ui, app));
     } else if app.mode.editor_mut().is_some() {
         egui::CentralPanel::default().show(ui, |ui| draw_editor(ui, app));
-    } else {
-        egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, app));
-        // File Stats and processes have their own status / prompt line
-        let own = app.stats.is_some()
-            || matches!(app.mode, Mode::Stats(_) | Mode::Procs(_) | Mode::Sync(_));
-        // the toolbar acts on the panels: only shown with them
-        if !own && !matches!(app.mode, Mode::Found(_)) {
-            egui::Panel::top("toolbar").show(ui, |ui| toolbar(ui, app));
-        }
-        if own {
+    } else if app.sub_screen() {
+        // sub-screens own the window: F-key bar, their status line, no menu or toolbar
+        if !matches!(app.mode, Mode::Found(_) | Mode::MultiRename(_)) {
             egui::Panel::bottom("status").show(ui, |ui| status_line(ui, app));
-        } else if matches!(app.mode, Mode::Cmd(_)) {
-            egui::Panel::bottom("cmd").show(ui, |ui| cmdline(ui, app));
         }
         egui::CentralPanel::default().show(ui, |ui| match &app.mode {
             Mode::Found(_) => draw_found(ui, app),
             Mode::Sync(_) => draw_sync(ui, app),
-            Mode::Stats(_) => draw_stats(ui, app),
             Mode::Procs(_) => draw_procs(ui, app),
-            Mode::Cmd(_) if app.stats.is_some() => draw_stats(ui, app),
-            _ => ui.columns(2, |cols| {
+            Mode::MultiRename(_) => draw_multi_rename(ui, app),
+            _ => draw_stats(ui, app),
+        });
+    } else {
+        egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, app));
+        egui::Panel::top("toolbar").show(ui, |ui| toolbar(ui, app));
+        if matches!(app.mode, Mode::Cmd(_)) {
+            egui::Panel::bottom("cmd").show(ui, |ui| cmdline(ui, app));
+        }
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.columns(2, |cols| {
                 for (i, c) in cols.iter_mut().enumerate() {
                     draw_panel(c, app, look, i, today);
                 }
-            }),
+            });
         });
     }
     overlays(ui.ctx(), app);

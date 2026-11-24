@@ -158,7 +158,7 @@ impl App {
 
     /// Wheel / touchpad scroll by `lines` in viewer, editor and process list (editor: moves the cursor, the window follows).
     pub fn on_wheel(&mut self, lines: isize) {
-        if self.help || self.input.is_some() {
+        if self.input.is_some() {
             return;
         }
         match &mut self.mode {

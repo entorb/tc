@@ -2,19 +2,19 @@ use super::chrome::{line_edit, list_button, text_box};
 use super::help::show_help;
 use super::{ACCENT, MUTED, TEXT, icons, modal};
 use eframe::egui::{
-    self, Button, Color32, ComboBox, Context, Label, Response, RichText, ScrollArea, Sense,
-    TextStyle, Ui, vec2,
+    self, Button, Color32, ComboBox, Context, Label, ModalResponse, Response, RichText, ScrollArea,
+    Sense, Sides, TextStyle, Ui, vec2,
 };
 use tc::app::{
     App, BmClick, BookmarkForm, BookmarkRow, FilterForm, FindForm, FormRow, Mode, PropsForm,
-    RenameForm, SettingsForm, SyncForm,
+    SettingsForm, SyncForm,
 };
 use tc::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
 use tc::fmt::{ProcInfo, procs_confirm, procs_info};
 use tc::{KeyCode, KeyEvent, KeyModifiers};
 
 /// What a mouse did in a form; applied through the app like the matching keys.
-enum FormAct {
+pub(super) enum FormAct {
     /// Row clicked: focus it, toggle a checkbox.
     Row(usize),
     /// Choice row, option picked in its dropdown.
@@ -29,7 +29,12 @@ enum FormAct {
 pub(super) fn overlays(ctx: &Context, app: &mut App) {
     let mut pressed = None;
     if let Some(d) = dialog(app) {
-        pressed = show_dialog(ctx, "dialog", &d);
+        // a stray click must not cancel a running copy or connect: only the close button does
+        let busy = matches!(
+            app.mode,
+            Mode::Work(_) | Mode::Xfer(_) | Mode::Connecting(_)
+        );
+        pressed = show_dialog(ctx, ("dialog", busy), &d);
     }
     let act = match (&app.search_form, &app.mode) {
         (Some(form), _) => show_form(
@@ -39,7 +44,6 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
             Some("OK"),
         ),
         (None, Mode::FindForm(form)) => show_find_form(ctx, form),
-        (None, Mode::MultiRename(form)) => show_multi_rename(ctx, form),
         (None, Mode::SyncForm(form)) => show_sync_form(ctx, form),
         (None, Mode::Settings(form)) => show_settings(ctx, form),
         (None, Mode::Props(form)) => show_props(ctx, form),
@@ -64,7 +68,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
             title: "Synchronize",
             text: text.clone(),
         };
-        pressed = pressed.or(show_dialog(ctx, "sync-confirm", &d));
+        pressed = pressed.or(show_dialog(ctx, ("sync-confirm", false), &d));
     }
     if let Mode::Stats(st) = &app.mode
         && let Some(text) = &st.confirm
@@ -73,7 +77,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
             title: "Delete",
             text: text.clone(),
         };
-        pressed = pressed.or(show_dialog(ctx, "stats-confirm", &d));
+        pressed = pressed.or(show_dialog(ctx, ("stats-confirm", false), &d));
     }
     if let Mode::Stats(st) = &app.mode
         && let Some(text) = stats_progress(st)
@@ -82,7 +86,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
             title: "Scanning",
             text,
         };
-        pressed = pressed.or(show_dialog(ctx, "stats-progress", &d));
+        pressed = pressed.or(show_dialog(ctx, ("stats-progress", true), &d));
     }
     if let Mode::Procs(p) = &app.mode
         && let Some((pid, name)) = &p.confirm
@@ -91,15 +95,20 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
             title: "Kill",
             text: procs_confirm(*pid, name),
         };
-        pressed = pressed.or(show_dialog(ctx, "procs-confirm", &d));
+        pressed = pressed.or(show_dialog(ctx, ("procs-confirm", false), &d));
     }
     if let Some(input) = &app.input {
-        pressed = pressed.or(show_dialog(ctx, "input", &input_dialog(input)));
+        pressed = pressed.or(show_dialog(ctx, ("input", false), &input_dialog(input)));
     }
     if app.help {
         show_help(ctx, app);
     }
-    match act.or(pressed) {
+    apply(app, act.or(pressed));
+}
+
+/// Runs what the mouse did through the app, like the matching keys.
+fn apply(app: &mut App, act: Option<FormAct>) {
+    match act {
         Some(FormAct::Row(i)) => app.form_click(i),
         Some(FormAct::Choose(i, k)) => app.form_choose(i, k),
         Some(FormAct::Key(c)) => app.on_key(KeyEvent::new(c, KeyModifiers::NONE)),
@@ -118,15 +127,15 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
 }
 
 /// Dialog as egui widgets; returns the key of a clicked button or checkbox (the app owns the keys).
-fn show_dialog(ctx: &Context, id: &str, d: &Dialog) -> Option<FormAct> {
+/// A click outside closes it (Esc) unless `busy`.
+fn show_dialog(ctx: &Context, (id, busy): (&str, bool), d: &Dialog) -> Option<FormAct> {
     let r = modal(id).show(ctx, |ui| {
         ui.set_min_width(420.0);
         ui.set_max_width(720.0);
         match d {
             Dialog::Text { title, text } => {
-                ui.heading(*title);
-                ui.separator();
-                text_with_keys(ui, text).map(FormAct::Key)
+                let x = title_bar(ui, title);
+                x.or(text_with_keys(ui, text).map(FormAct::Key))
             }
             Dialog::Edit {
                 title,
@@ -134,13 +143,12 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) -> Option<FormAct> {
                 line,
                 tail,
             } => {
-                ui.heading(*title);
-                ui.separator();
+                let x = title_bar(ui, title);
                 if !head.is_empty() {
                     ui.label(head.as_str());
                 }
                 line_edit(ui, line);
-                text_with_keys(ui, tail.trim_start()).map(FormAct::Key)
+                x.or(text_with_keys(ui, tail.trim_start()).map(FormAct::Key))
             }
             Dialog::List {
                 title,
@@ -149,9 +157,8 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) -> Option<FormAct> {
                 empty,
                 buttons,
             } => {
-                ui.heading(title);
-                ui.separator();
-                let act = list_rows(ui, rows, *sel);
+                let x = title_bar(ui, title);
+                let act = x.or(list_rows(ui, rows, *sel));
                 if rows.is_empty() {
                     ui.label(*empty);
                 }
@@ -159,9 +166,33 @@ fn show_dialog(ctx: &Context, id: &str, d: &Dialog) -> Option<FormAct> {
             }
         }
     });
-    // a click beside a list closes it (Esc); prompts and questions stay until answered
-    let outside = matches!(d, Dialog::List { .. }) && r.backdrop_response.clicked();
-    r.inner.or(outside.then_some(FormAct::Key(KeyCode::Esc)))
+    if busy {
+        return r.inner;
+    }
+    or_outside(r)
+}
+
+/// Close icon of every popup title bar; must exist in the icon font (test).
+pub(super) const CLOSE_ICON: &str = "✖";
+
+/// Heading with a close button at the right, then a separator; the button is Esc.
+pub(super) fn title_bar(ui: &mut Ui, title: &str) -> Option<FormAct> {
+    let (_, x) = Sides::new().show(
+        ui,
+        |ui| ui.heading(title),
+        |ui| icon_button(ui, CLOSE_ICON, "Close (Esc)"),
+    );
+    ui.separator();
+    x.then_some(FormAct::Key(KeyCode::Esc))
+}
+
+/// The popup's action, or Esc when the click went beside it.
+fn or_outside(r: ModalResponse<Option<FormAct>>) -> Option<FormAct> {
+    let outside = r
+        .backdrop_response
+        .clicked()
+        .then_some(FormAct::Key(KeyCode::Esc));
+    r.inner.or(outside)
 }
 
 /// Buttons under a list; the key of the clicked one.
@@ -313,23 +344,19 @@ fn show_form(
     (rows, focus, error): (&[FormRow], usize, Option<&str>),
     ok: Option<&str>,
 ) -> Option<FormAct> {
-    modal(id)
-        .show(ctx, |ui| {
-            ui.set_width(560.0);
-            ui.heading(title);
-            ui.separator();
-            let act = form_rows(ui, rows, focus, error);
-            act.or(ok.and_then(|ok| ok_cancel(ui, ok)))
-        })
-        .inner
+    or_outside(modal(id).show(ctx, |ui| {
+        ui.set_width(560.0);
+        let x = title_bar(ui, title);
+        let act = x.or(form_rows(ui, rows, focus, error));
+        act.or(ok.and_then(|ok| ok_cancel(ui, ok)))
+    }))
 }
 
 /// Process info: label / value grid; a click outside closes it (as Esc).
 fn show_info(ctx: &Context, info: &ProcInfo) -> Option<FormAct> {
     let r = modal("proc-info").show(ctx, |ui| {
         ui.set_min_width(480.0);
-        ui.heading(info.title.trim());
-        ui.separator();
+        let x = title_bar(ui, info.title.trim());
         egui::Grid::new("proc-info-grid")
             .num_columns(2)
             .spacing(vec2(16.0, 6.0))
@@ -340,10 +367,9 @@ fn show_info(ctx: &Context, info: &ProcInfo) -> Option<FormAct> {
                     ui.end_row();
                 }
             });
+        x
     });
-    r.backdrop_response
-        .clicked()
-        .then_some(FormAct::Key(KeyCode::Esc))
+    or_outside(r)
 }
 
 /// Icon buttons of the bookmark list and edit page; must exist in the icon font (test).
@@ -359,9 +385,7 @@ fn icon_button(ui: &mut Ui, icon: &str, tip: &str) -> bool {
 fn show_bookmark_edit(ctx: &Context, form: &BookmarkForm) -> Option<FormAct> {
     let r = modal("bookmark-edit").show(ctx, |ui| {
         ui.set_width(860.0);
-        ui.heading("Edit bookmarks");
-        ui.separator();
-        let mut act = None;
+        let mut act = title_bar(ui, "Edit bookmarks").map(|_| BmClick::Cancel);
         ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
             egui::Grid::new("bookmark-edit-grid")
                 .num_columns(5)
@@ -398,9 +422,9 @@ fn show_bookmark_edit(ctx: &Context, form: &BookmarkForm) -> Option<FormAct> {
                 act = Some(BmClick::Cancel);
             }
         });
-        act
+        act.map(FormAct::Bookmark)
     });
-    r.inner.map(FormAct::Bookmark)
+    or_outside(r)
 }
 
 /// One edit row: up / down, alias and path fields, delete.
@@ -461,21 +485,18 @@ fn ok_cancel_buttons(ui: &mut Ui, ok: &str) -> Option<FormAct> {
 /// Multi-rename over the whole window: form, then as many old -> new rows as fit; keys go through the app.
 /// Panel filter: text fields, then the file types of the directory as checkboxes, OK / Cancel.
 fn show_filter(ctx: &Context, form: &FilterForm) -> Option<FormAct> {
-    modal("panel-filter")
-        .show(ctx, |ui| {
-            ui.set_width(560.0);
-            ui.heading("Filter");
-            ui.separator();
-            let act = form_rows(ui, &form.rows, form.focus, form.error.as_deref());
-            ui.separator();
-            ui.label(RichText::new("File types (none checked: all)").strong());
-            let types = ScrollArea::vertical()
-                .max_height(220.0)
-                .show(ui, |ui| filter_types(ui, form))
-                .inner;
-            act.or(types).or(ok_cancel(ui, "OK"))
-        })
-        .inner
+    or_outside(modal("panel-filter").show(ctx, |ui| {
+        ui.set_width(560.0);
+        let x = title_bar(ui, "Filter");
+        let act = x.or(form_rows(ui, &form.rows, form.focus, form.error.as_deref()));
+        ui.separator();
+        ui.label(RichText::new("File types (none checked: all)").strong());
+        let types = ScrollArea::vertical()
+            .max_height(220.0)
+            .show(ui, |ui| filter_types(ui, form))
+            .inner;
+        act.or(types).or(ok_cancel(ui, "OK"))
+    }))
 }
 
 /// File type checkboxes, wrapped; a click reports its form row (after the text rows).
@@ -509,55 +530,39 @@ fn filter_types(ui: &mut Ui, form: &FilterForm) -> Option<FormAct> {
 /// Properties: the fields, then the mode preview and file info, OK / Cancel.
 fn show_props(ctx: &Context, form: &PropsForm) -> Option<FormAct> {
     let lines = form.lines().join("\n");
-    modal("props")
-        .show(ctx, |ui| {
-            ui.set_width(560.0);
-            ui.heading("Properties");
-            ui.separator();
-            let act = form_rows(ui, &form.rows, form.focus, form.error.as_deref());
-            ui.separator();
-            ui.label(RichText::new(lines).monospace());
-            act.or(ok_cancel(ui, "Apply"))
-        })
-        .inner
+    or_outside(modal("props").show(ctx, |ui| {
+        ui.set_width(560.0);
+        let x = title_bar(ui, "Properties");
+        let act = x.or(form_rows(ui, &form.rows, form.focus, form.error.as_deref()));
+        ui.separator();
+        ui.label(RichText::new(lines).monospace());
+        act.or(ok_cancel(ui, "Apply"))
+    }))
 }
 
-fn show_multi_rename(ctx: &Context, form: &RenameForm) -> Option<FormAct> {
-    let size = ctx.content_rect().shrink(24.0).size();
-    modal("multi-rename")
-        .show(ctx, |ui| {
-            ui.set_min_size(size);
-            ui.set_max_size(size);
-            ui.heading("Multi-rename");
-            ui.separator();
-            let act = form_rows(ui, &form.rows, form.focus, form.error.as_deref());
-            ui.separator();
-            ui.label(format!("{} files:", form.preview.len()));
-            let row_h = ui.text_style_height(&TextStyle::Body) + ui.spacing().item_spacing.y;
-            let keys_h = 7.0 * row_h; // key help lines and the buttons
-            let fit = ((ui.available_height() - keys_h) / row_h).max(1.0) as usize;
-            for (old, new) in form.preview.iter().skip(form.scroll).take(fit) {
-                let (text, bad) = fmt::rename_row(old, new);
-                let t = RichText::new(text);
-                ui.label(if bad { t.color(Color32::LIGHT_RED) } else { t });
-            }
-            let buttons = ui
-                .with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    let b = ok_cancel_bottom_up(ui);
-                    ui.label(RichText::new(fmt::RENAME_FORM_KEYS).color(MUTED));
-                    b
-                })
-                .inner;
-            act.or(buttons)
-        })
-        .inner
-}
-
-/// [`ok_cancel`] in a bottom-up layout: buttons first, the separator above them.
-fn ok_cancel_bottom_up(ui: &mut Ui) -> Option<FormAct> {
-    let act = ok_cancel_buttons(ui, "Rename");
+/// Multi-rename screen: form, then as many old -> new rows as fit, the placeholder legend.
+pub(super) fn draw_multi_rename(ui: &mut Ui, app: &mut App) {
+    let Mode::MultiRename(form) = &app.mode else {
+        return;
+    };
+    ui.heading("Multi-rename");
     ui.separator();
-    act
+    let act = form_rows(ui, &form.rows, form.focus, form.error.as_deref());
+    ui.separator();
+    ui.label(format!("{} files:", form.preview.len()));
+    let row_h = ui.text_style_height(&TextStyle::Body) + ui.spacing().item_spacing.y;
+    let legend_h = 3.0 * row_h; // separator and the two legend lines
+    let fit = ((ui.available_height() - legend_h) / row_h).max(1.0) as usize;
+    for (old, new) in form.preview.iter().skip(form.scroll).take(fit) {
+        let (text, bad) = fmt::rename_row(old, new);
+        let t = RichText::new(text);
+        ui.label(if bad { t.color(Color32::LIGHT_RED) } else { t });
+    }
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        ui.label(RichText::new(fmt::RENAME_FORM_KEYS).color(MUTED));
+        ui.separator();
+    });
+    apply(app, act);
 }
 
 /// Form as a label | widget grid, the focused row's label highlighted, and the error under it.

@@ -390,26 +390,24 @@ impl App {
         self.panels[1 - self.active].path()
     }
 
-    /// The screen takes F1 and footer clicks: no prompt, dialog, help or running scan.
+    /// The screen takes F1 and footer clicks: no prompt, dialog or running scan.
     pub fn idle(&self) -> bool {
         let screen = matches!(self.mode, Mode::Normal | Mode::View { .. })
             || matches!(&self.mode, Mode::Stats(st) if !st.scanning() && st.confirm.is_none())
             || matches!(&self.mode, Mode::Procs(p) if p.idle())
             || matches!(&self.mode, Mode::Sync(s) if s.idle())
             || matches!(self.mode, Mode::Edit { error: None, .. });
-        screen && self.input.is_none() && !self.help
+        screen && self.input.is_none()
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
         self.note.clear();
-        if self.help {
-            return self.help_key(key);
-        }
+        // F1 toggles the help window; its own keys arrive through `help_key`
         if key.code == KeyCode::F(1)
             && !key.modifiers.contains(KeyModifiers::ALT)
-            && self.takes_f1()
+            && (self.help || self.takes_f1())
         {
-            self.help = true;
+            self.help = !self.help;
             self.help_scroll = 0;
             self.help_set_filter(String::new());
             return;

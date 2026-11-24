@@ -199,7 +199,7 @@ fn is_key_input(e: &Event) -> bool {
     )
 }
 
-fn caret_id() -> Id {
+pub(super) fn caret_id() -> Id {
     Id::unique("tc-text-box-caret")
 }
 
@@ -208,10 +208,7 @@ pub(super) fn apply_caret(ctx: &Context, app: &mut App) {
     let Some(n) = ctx.data_mut(|d| d.remove_temp::<usize>(caret_id())) else {
         return;
     };
-    // the help filter has no caret of its own
-    if !app.help {
-        app.set_caret(n);
-    }
+    app.set_caret(n);
 }
 
 /// Full-width selectable list row (egui look); not focusable, so keys stay with the app.
@@ -233,4 +230,15 @@ pub(super) fn list_button(
         )
     })
     .inner
+}
+
+/// Table cell content, vertically centered so every cell of a row shares one baseline;
+/// `right` for number columns. Use for every header and body cell next to a right-aligned one.
+pub(super) fn cell<R>(ui: &mut Ui, right: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let layout = if right {
+        Layout::right_to_left(Align::Center)
+    } else {
+        Layout::left_to_right(Align::Center)
+    };
+    ui.with_layout(layout, add).inner
 }

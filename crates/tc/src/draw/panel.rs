@@ -1,3 +1,4 @@
+use super::chrome::cell;
 use super::{ACCENT, LINK, Look, MARK, MUTED, TEXT, icons};
 use eframe::egui::{
     self, Align, Button, Color32, Label, Layout, RichText, Sense, Stroke, TextStyle, Ui,
@@ -45,9 +46,6 @@ pub(super) fn draw_panel(
             rows = ((height / row_h) as usize).saturating_sub(1).max(1);
             let panel = &app.panels[i];
             let cursor = panel.cursor();
-            // no coasting, no rubber-band past first/last row: an export tool, not a phone
-            ui.spacing_mut().scroll.kinetic.decay_time = 0.0;
-            ui.spacing_mut().scroll.kinetic.rubber_band = false;
             let mut table = TableBuilder::new(ui)
                 .id_salt(i)
                 .striped(true)
@@ -168,7 +166,7 @@ fn tab_bar(ui: &mut Ui, app: &App, i: usize, action: &mut Option<Action>) {
 /// Column titles; the name column has two: Name and Ext (the extension stays part of the name).
 fn header_cols(mut h: egui_extras::TableRow, sort: (SortKey, bool), action: &mut Option<Action>) {
     h.col(|ui| {
-        ui.horizontal(|ui| {
+        cell(ui, false, |ui| {
             sort_title(ui, "Name", SortKey::Name, sort, action);
             // Ext in the middle of the space left between Name and the Size column
             let mid = Layout::left_to_right(Align::Center).with_main_align(Align::Center);
@@ -176,7 +174,7 @@ fn header_cols(mut h: egui_extras::TableRow, sort: (SortKey, bool), action: &mut
         });
     });
     for (label, key) in [("Size", SortKey::Size), ("Date", SortKey::Date)] {
-        h.col(|ui| sort_title(ui, label, key, sort, action));
+        h.col(|ui| cell(ui, false, |ui| sort_title(ui, label, key, sort, action)));
     }
 }
 
@@ -231,9 +229,7 @@ fn entry_row(
         ui.add(Label::new(if is_dir { name.strong() } else { name }).truncate());
     });
     row.col(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(size).color(color));
-        });
+        cell(ui, true, |ui| ui.label(RichText::new(size).color(color)));
     });
     row.col(|ui| {
         ui.label(RichText::new(date).color(MUTED));

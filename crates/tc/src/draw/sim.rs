@@ -126,20 +126,53 @@ fn procs_keys_in_gui() {
     assert_eq!(app.footer_keys()[3].0, "s Interval");
 }
 
-/// Screen position of the painted text `want`.
-fn text_pos(ctx: &egui::Context, app: &mut App, look: &mut Look, want: &str) -> egui::Pos2 {
+/// Screen rect of the first painted text starting with `want`.
+fn text_rect(ctx: &egui::Context, app: &mut App, look: &mut Look, want: &str) -> egui::Rect {
     let input = RawInput {
         screen_rect: Some(SCREEN),
         ..Default::default()
     };
-    let out = ctx.run_ui(input, |ui| draw(ui, app, look));
+    let mut out = ctx.run_ui(input, |ui| draw(ui, app, look));
+    out.textures_delta.clear();
     out.shapes
         .into_iter()
         .find_map(|c| match c.shape {
-            egui::Shape::Text(t) if t.galley.text() == want => Some(t.pos),
+            egui::Shape::Text(t) if t.galley.text().starts_with(want) => {
+                Some(t.galley.rect.translate(t.pos.to_vec2()))
+            }
             _ => None,
         })
-        .unwrap()
+        .unwrap_or_else(|| panic!("{want} not painted"))
+}
+
+/// The titles share one vertical center (left- and right-aligned cells mixed).
+fn assert_one_line(ctx: &egui::Context, app: &mut App, look: &mut Look, titles: &[&str]) {
+    let y = |app: &mut App, look: &mut Look, t| text_rect(ctx, app, look, t).center().y;
+    let first = y(app, look, titles[0]);
+    for t in &titles[1..] {
+        let d = y(app, look, t) - first;
+        assert!(d.abs() < 1.0, "{t} is {d} px off {}", titles[0]);
+    }
+}
+
+#[test]
+/// Table header titles of the panels and the process monitor sit on one line.
+fn table_headers_share_one_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    frame(&ctx, &mut app, &mut look, vec![]);
+    assert_one_line(&ctx, &mut app, &mut look, &["Name", "Ext", "Size", "Date"]);
+    frame(
+        &ctx,
+        &mut app,
+        &mut look,
+        vec![press(Key::P, Modifiers::CTRL)],
+    );
+    let procs = ["PID", "User", "CPU %", "Memory", "Min", "Command"];
+    assert_one_line(&ctx, &mut app, &mut look, &procs);
 }
 
 #[test]
@@ -163,7 +196,7 @@ fn text_box_keys_once_and_click_moves_caret() {
         "{shown}"
     );
     assert!(matches!(&app.mode, Mode::Cmd(l) if l.text == "abc" && l.cur == 2));
-    let p = text_pos(&ctx, &mut app, &mut look, "abc") + egui::vec2(1.0, 4.0);
+    let p = text_rect(&ctx, &mut app, &mut look, "abc").min + egui::vec2(1.0, 4.0);
     let button = |pressed| Event::PointerButton {
         pos: p,
         button: egui::PointerButton::Primary,
@@ -201,7 +234,7 @@ fn dialog_buttons_take_no_egui_focus() {
         ctx.memory(eframe::egui::Memory::focused).is_none(),
         "Tab: {shown}"
     );
-    let p = text_pos(&ctx, &mut app, &mut look, "Delete") + egui::vec2(2.0, 4.0);
+    let p = text_rect(&ctx, &mut app, &mut look, "Delete").min + egui::vec2(2.0, 4.0);
     let button = |pressed| Event::PointerButton {
         pos: p,
         button: egui::PointerButton::Primary,
@@ -247,7 +280,11 @@ fn icons_exist_in_icon_font() {
     let id = FontId::new(16.0, only);
     let icons = tc::app::TOOLBAR.iter().flat_map(|g| g.iter().map(|t| t.0));
     let panel = super::panel::BUTTONS.iter().map(|b| b.0);
-    for icon in icons.chain(panel).chain(super::dialogs::BM_ICONS) {
+    for icon in icons
+        .chain(panel)
+        .chain(super::dialogs::BM_ICONS)
+        .chain([super::dialogs::CLOSE_ICON])
+    {
         assert!(ctx.fonts_mut(|f| f.has_glyphs(&id, icon)), "{icon}");
     }
 }
@@ -278,5 +315,133 @@ fn bookmark_edit_page_draws_rows() {
     let shown = frame(&ctx, &mut app, &mut look, vec![]);
     for t in ["Edit bookmarks", "Work", "/srv/work", "Save", "Cancel"] {
         assert!(shown.contains(t), "{t}: {shown}");
+    }
+}
+
+#[test]
+/// Help window (embedded here, no native windows in tests): key column and many rows shown.
+fn help_window_shows_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    frame(
+        &ctx,
+        &mut app,
+        &mut look,
+        vec![press(Key::F1, Modifiers::NONE)],
+    );
+    frame(&ctx, &mut app, &mut look, vec![]);
+    let shown = frame(&ctx, &mut app, &mut look, vec![]);
+    assert!(
+        shown.contains("Ctrl+B") && shown.contains("Highlights"),
+        "{shown}"
+    );
+    assert!(app.help_rows >= 13, "{}", app.help_rows);
+}
+
+#[test]
+/// Tool screens own the window: no menu bar, their F-key bar at the bottom.
+fn tool_screens_hide_the_menu_bar() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    assert!(frame(&ctx, &mut app, &mut look, vec![]).contains("Select"));
+    // cursor from `..` onto a.txt, the file to rename
+    frame(
+        &ctx,
+        &mut app,
+        &mut look,
+        vec![press(Key::ArrowDown, Modifiers::NONE)],
+    );
+    frame(
+        &ctx,
+        &mut app,
+        &mut look,
+        vec![press(Key::M, Modifiers::CTRL)],
+    );
+    let shown = frame(&ctx, &mut app, &mut look, vec![]);
+    assert!(
+        shown.contains("Enter Rename") && shown.contains("a.txt"),
+        "{shown}"
+    );
+    assert!(!shown.contains("Select"), "{shown}");
+    frame(
+        &ctx,
+        &mut app,
+        &mut look,
+        vec![press(Key::Escape, Modifiers::NONE)],
+    );
+    frame(
+        &ctx,
+        &mut app,
+        &mut look,
+        vec![press(Key::P, Modifiers::CTRL)],
+    );
+    let shown = frame(&ctx, &mut app, &mut look, vec![]);
+    assert!(
+        shown.contains("PID") && !shown.contains("Select"),
+        "{shown}"
+    );
+}
+
+#[test]
+/// All scroll areas (panels, help window, lists) stop at the first / last row: no bounce.
+fn scrolling_has_no_rubber_band() {
+    let ctx = egui::Context::default();
+    super::setup_fonts(&ctx);
+    let k = ctx.global_style().spacing.scroll.kinetic;
+    assert!(!k.rubber_band && k.decay_time == 0.0);
+}
+
+#[test]
+/// End and the wheel both reach the help's last line (the scrollbar at the bottom too).
+fn help_scrolls_to_the_last_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let last = tc::fmt::HELP_MAIN.lines().last().unwrap().trim().to_owned();
+    let wheel = Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Page,
+        delta: egui::vec2(0.0, -100.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    };
+    for by_wheel in [false, true] {
+        let mut app = App::new(open(), open());
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        frame(
+            &ctx,
+            &mut app,
+            &mut look,
+            vec![press(Key::F1, Modifiers::NONE)],
+        );
+        frame(&ctx, &mut app, &mut look, vec![]);
+        if by_wheel {
+            let at = Event::PointerMoved(egui::pos2(450.0, 300.0));
+            frame(&ctx, &mut app, &mut look, vec![at, wheel.clone()]);
+        } else {
+            app.help_key(tc::KeyEvent::new(tc::KeyCode::End, tc::KeyModifiers::NONE));
+        }
+        for _ in 0..3 {
+            frame(&ctx, &mut app, &mut look, vec![]);
+        }
+        // shown inside the table's clip rect; the embedded window may reach below SCREEN
+        let input = RawInput {
+            screen_rect: Some(SCREEN),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| draw(ui, &mut app, &mut look));
+        out.textures_delta.clear();
+        let visible = out.shapes.iter().any(|c| match &c.shape {
+            egui::Shape::Text(t) => {
+                t.galley.text() == last.trim_start_matches("F10").trim()
+                    && c.clip_rect.contains_rect(t.visual_bounding_rect())
+            }
+            _ => false,
+        });
+        assert!(visible, "wheel {by_wheel}: {last:?} not visible");
     }
 }
