@@ -1097,6 +1097,24 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "X ab\nX\n");
     }
 
+    /// F2 on any file (not only Markdown) trims trailing blanks and ends with a line break,
+    /// on disk and on screen.
+    #[test]
+    fn editor_save_trims_any_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "x  \ny \t\nz ").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        key(&mut app, KeyCode::F(2));
+        wait(&mut app);
+        app.tick();
+        assert_eq!(rows(&mut app), ["x", "y", "z", ""]);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "x\ny\nz\n");
+    }
+
     /// VS Code keys: Ctrl+X without a selection cuts the line, Ctrl+V puts it above the cursor
     /// line, Alt+Up/Down move lines, Alt+Shift+Down copies the line, Ctrl+Enter opens a line.
     #[test]
