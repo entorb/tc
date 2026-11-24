@@ -85,6 +85,20 @@ impl Panel {
         hit.inspect(|&i| self.cursor = i).is_some()
     }
 
+    /// Quick search backwards: the entry before the cursor (wrapping) whose name contains `text`.
+    pub fn search_prev(&mut self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        let n = self.entries.len();
+        let hit = (1..=n).map(|k| (self.cursor + n - k) % n).find(|&i| {
+            self.entries[i]
+                .name
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(&text)
+        });
+        hit.inspect(|&i| self.cursor = i).is_some()
+    }
+
     /// Put the cursor on entry `i`, clamped to the list.
     pub fn set_cursor(&mut self, i: usize) {
         self.cursor = i.min(self.entries.len().saturating_sub(1));

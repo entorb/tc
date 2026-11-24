@@ -689,8 +689,8 @@ impl App {
                     self.mode = Mode::Message(e.to_string());
                 }
             }
-            // type-to-search: a name character starts quick search (keys with a meaning excluded)
-            KeyCode::Char(c) if !alt && !c.is_whitespace() && !"~+-*/:".contains(c) => {
+            // type-to-search: a-z and 0-9 start quick search, other keys keep their meaning
+            KeyCode::Char(c) if !alt && c.is_ascii_alphanumeric() => {
                 self.panels[self.active].search(&c.to_string(), 0);
                 self.mode = Mode::Search(c.to_string());
             }
@@ -702,7 +702,6 @@ impl App {
         match code {
             KeyCode::Char('+' | '=') => self.zoom = zoom_step(self.zoom, 1),
             KeyCode::Char('-') => self.zoom = zoom_step(self.zoom, -1),
-            KeyCode::Char('s') => self.mode = Mode::Search(String::new()),
             KeyCode::Char('c') => self.clip_files(Op::Copy),
             KeyCode::Char('x') => self.clip_files(Op::Move),
             KeyCode::Char('v') => self.paste(),
@@ -800,22 +799,32 @@ impl App {
         }
     }
 
+    /// Quick search: a-z and 0-9 extend the text, Up/Down jump to the previous/next match.
+    /// Esc ends it; any other key ends it too and acts on the cursor file as in normal mode.
     fn search_key(&mut self, mut text: String, key: KeyEvent) {
         let panel = &mut self.panels[self.active];
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => return,
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Esc => return,
+            KeyCode::Up => {
+                panel.search_prev(&text);
+            }
+            KeyCode::Down => {
                 panel.search(&text, 1);
             }
             KeyCode::Backspace => {
                 text.pop();
                 panel.search(&text, 0);
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c)
+                if c.is_ascii_alphanumeric()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 text.push(c);
                 panel.search(&text, 0);
             }
-            _ => {}
+            _ => return self.normal_mode_key(key),
         }
         self.mode = Mode::Search(text);
     }

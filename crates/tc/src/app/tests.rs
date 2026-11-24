@@ -370,3 +370,20 @@ fn shift_up_down_marks_and_unmarks() {
     assert_eq!(app.panels[0].selection_info().0, 0);
     assert_eq!(app.panels[0].cursor(), 0);
 }
+
+#[test]
+fn quick_search_up_down_jump_between_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    for n in ["apple", "apricot", "banana"] {
+        std::fs::write(tmp.path().join(n), "").unwrap();
+    }
+    let p = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(p(), p());
+    key(&mut app, KeyCode::Char('a'));
+    assert_eq!(app.panels[0].current().unwrap().name, "apple");
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.panels[0].current().unwrap().name, "apricot");
+    assert!(matches!(&app.mode, Mode::Search(t) if t == "a"));
+    key(&mut app, KeyCode::Up);
+    assert_eq!(app.panels[0].current().unwrap().name, "apple");
+}

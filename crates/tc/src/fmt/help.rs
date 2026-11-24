@@ -91,9 +91,10 @@ Ctrl+Y          compare with the other panel and select, per
                 different (size or date); Enter repeats the last
 
 == Search ==
-a..z, 0..9      type a name to start quick search (not ~ + - * / :)
-Ctrl+S          quick search: type to jump to a match, Ctrl+S
-                next match, Enter / Esc stop searching
+a..z, 0..9      type a name to start quick search, more letters narrow it
+Up / Down       quick search: previous / next match
+                Esc stops searching; other keys stop it and act on the
+                cursor file (F-keys, Enter opens)
 /               filter popup: name part, min / max size (10k, 5M),
                 newer / older than (30m, 12h, 7d), file types of
                 this directory (checkboxes; none = all; types and

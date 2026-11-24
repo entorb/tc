@@ -820,6 +820,10 @@ mod tests {
         assert_eq!(p.current().unwrap().name, "Banana");
         assert!(!p.search("zzz", 0));
         assert!(p.search("ap", 1)); // wraps past the end
+        assert!(p.search_prev("ap")); // from grape back to apple
+        assert_eq!(p.current().unwrap().name, "apple");
+        assert!(p.search_prev("ap")); // from apple back past ".." wraps to grape
+        assert_eq!(p.current().unwrap().name, "grape");
         p.apply_filter(EntryFilter::by_name("AP"));
         assert_eq!(names(&p), ["..", "apple", "grape"]);
         assert_eq!(p.current().unwrap().name, "grape");
