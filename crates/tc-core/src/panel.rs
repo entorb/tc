@@ -900,19 +900,21 @@ mod tests {
         fs::write(tmp.path().join("b.txt"), "12345").unwrap();
         fs::write(tmp.path().join("a.rs"), "123456789").unwrap();
         fs::create_dir(tmp.path().join("z")).unwrap();
+        fs::create_dir(tmp.path().join("y.zip")).unwrap();
         let mut p = Panel::open(tmp.path()).unwrap();
-        p.set_cursor(3); // b.txt
+        p.set_cursor(4); // b.txt
         p.set_sort(SortKey::Size);
-        assert_eq!(names(&p), ["..", "z", "b.txt", "a.rs"]);
+        assert_eq!(names(&p), ["..", "y.zip", "z", "b.txt", "a.rs"]);
         assert_eq!(p.current().unwrap().name, "b.txt");
         p.set_sort(SortKey::Size);
-        assert_eq!(names(&p), ["..", "z", "a.rs", "b.txt"]);
+        assert_eq!(names(&p), ["..", "z", "y.zip", "a.rs", "b.txt"]);
+        // by extension: files only, directories by name ascending
         p.set_sort(SortKey::Ext);
-        assert_eq!(names(&p), ["..", "z", "a.rs", "b.txt"]);
-        p.set_sort(SortKey::Ext); // reversed, dirs stay first
-        assert_eq!(names(&p), ["..", "z", "b.txt", "a.rs"]);
+        assert_eq!(names(&p), ["..", "y.zip", "z", "a.rs", "b.txt"]);
+        p.set_sort(SortKey::Ext); // reversed, dirs stay first and ascending
+        assert_eq!(names(&p), ["..", "y.zip", "z", "b.txt", "a.rs"]);
         p.reload().unwrap(); // sort survives re-read
-        assert_eq!(names(&p), ["..", "z", "b.txt", "a.rs"]);
+        assert_eq!(names(&p), ["..", "y.zip", "z", "b.txt", "a.rs"]);
     }
 
     #[test]

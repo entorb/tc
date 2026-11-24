@@ -46,13 +46,15 @@ fn ext(lower: &str) -> &str {
 }
 
 /// Directories first (also when reversed), then by `sort`, ties by case-insensitive name.
+/// By extension only files are ordered: directories stay by name, ascending also when reversed.
 pub(super) fn sort_entries(entries: &mut [Entry], (key, reverse): (SortKey, bool)) {
     entries.sort_by_cached_key(|e| {
         let lower = e.name.to_string_lossy().to_lowercase();
         let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let (primary, lower) = match key {
             SortKey::Name => (0, lower),
-            SortKey::Ext => (0, format!("{}\0{lower}", ext(&lower))),
+            SortKey::Ext if !e.is_dir => (0, format!("{}\0{lower}", ext(&lower))),
+            SortKey::Ext => (0, lower),
             SortKey::Size if !e.is_dir => (e.size, lower),
             SortKey::Size => (0, lower),
             SortKey::Date => (e.modified.map_or(0, secs), lower),
@@ -61,7 +63,9 @@ pub(super) fn sort_entries(entries: &mut [Entry], (key, reverse): (SortKey, bool
     });
     if reverse {
         let dirs = entries.partition_point(|e| e.is_dir);
-        entries[..dirs].reverse();
+        if key != SortKey::Ext {
+            entries[..dirs].reverse();
+        }
         entries[dirs..].reverse();
     }
 }
