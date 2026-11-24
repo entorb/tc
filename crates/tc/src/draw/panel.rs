@@ -107,29 +107,33 @@ pub(super) fn draw_panel(
     }
 }
 
+/// Panel title buttons, right to left.
+pub(super) const BUTTONS: [(&str, &str, KeyCode, KeyModifiers); 2] = [
+    (
+        "🕓",
+        "Directory history (Alt+Down)",
+        KeyCode::Down,
+        KeyModifiers::ALT,
+    ),
+    (
+        "★",
+        "Bookmarks: go, add, edit (Ctrl+B)",
+        KeyCode::Char('b'),
+        KeyModifiers::CONTROL,
+    ),
+];
+
 /// Path title, with the bookmarks and directory history buttons at its right end.
 fn title_row(ui: &mut Ui, app: &App, i: usize, action: &mut Option<Action>) {
-    const BUTTONS: [(&str, &str, KeyCode, KeyModifiers); 2] = [
-        (
-            "🕒",
-            "Directory history (Alt+Down)",
-            KeyCode::Down,
-            KeyModifiers::ALT,
-        ),
-        (
-            "★",
-            "Bookmarks: go, add, edit (Ctrl+B)",
-            KeyCode::Char('b'),
-            KeyModifiers::CONTROL,
-        ),
-    ];
     let title = RichText::new(panel_title(app, i, false)).strong();
     let title = if i == app.active {
         title.color(ACCENT)
     } else {
         title
     };
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    // one row high: a bare `with_layout` takes the whole panel height and leaves none for the files
+    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
         for (icon, tip, code, mods) in BUTTONS {
             let b = Button::new(RichText::new(icon).font(icons())).frame(false);
             if ui.add(b.sense(Sense::CLICK)).on_hover_text(tip).clicked() {
@@ -163,34 +167,34 @@ fn tab_bar(ui: &mut Ui, app: &App, i: usize, action: &mut Option<Action>) {
 
 /// Column titles; the name column has two: Name and Ext (the extension stays part of the name).
 fn header_cols(mut h: egui_extras::TableRow, sort: (SortKey, bool), action: &mut Option<Action>) {
-    let cols: [&[(&str, SortKey)]; 3] = [
-        &[("Name", SortKey::Name), ("Ext", SortKey::Ext)],
-        &[("Size", SortKey::Size)],
-        &[("Date", SortKey::Date)],
-    ];
-    for titles in cols {
-        h.col(|ui| {
-            ui.horizontal(|ui| sort_titles(ui, titles, sort, action));
+    h.col(|ui| {
+        ui.horizontal(|ui| {
+            sort_title(ui, "Name", SortKey::Name, sort, action);
+            // Ext in the middle of the space left between Name and the Size column
+            let mid = Layout::left_to_right(Align::Center).with_main_align(Align::Center);
+            ui.with_layout(mid, |ui| sort_title(ui, "Ext", SortKey::Ext, sort, action));
         });
+    });
+    for (label, key) in [("Size", SortKey::Size), ("Date", SortKey::Date)] {
+        h.col(|ui| sort_title(ui, label, key, sort, action));
     }
 }
 
-fn sort_titles(
+fn sort_title(
     ui: &mut Ui,
-    titles: &[(&str, SortKey)],
+    label: &str,
+    key: SortKey,
     sort: (SortKey, bool),
     action: &mut Option<Action>,
 ) {
-    for &(label, key) in titles {
-        let label = match sort {
-            (k, false) if k == key => format!("{label} ⏶"),
-            (k, true) if k == key => format!("{label} ⏷"),
-            _ => label.to_owned(),
-        };
-        let l = Label::new(RichText::new(label).strong()).sense(Sense::CLICK);
-        if ui.add(l).clicked() {
-            *action = Some(Action::Sort(key));
-        }
+    let label = match sort {
+        (k, false) if k == key => format!("{label} ⏶"),
+        (k, true) if k == key => format!("{label} ⏷"),
+        _ => label.to_owned(),
+    };
+    let l = Label::new(RichText::new(label).strong()).sense(Sense::CLICK);
+    if ui.add(l).clicked() {
+        *action = Some(Action::Sort(key));
     }
 }
 
