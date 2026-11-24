@@ -134,8 +134,8 @@ impl FindForm {
     }
 
     /// Typing and space toggle on the focused row.
-    pub(super) fn key(&mut self, code: KeyCode, ctrl: bool) {
-        self.rows[self.focus].key(code, ctrl);
+    pub(super) fn key(&mut self, key: KeyEvent) {
+        self.rows[self.focus].key(key);
         self.tick_content();
     }
 
@@ -457,11 +457,7 @@ impl App {
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
             KeyCode::F(2 | 3 | 8) => form = self.saved_search_key(key.code, form),
-            code => form.key(
-                code,
-                key.modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
-            ),
+            _ => form.key(key),
         }
         self.mode = Mode::FindForm(form);
     }

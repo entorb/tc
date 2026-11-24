@@ -2,7 +2,7 @@
 
 use super::widgets::form_text;
 use super::{App, FormRow, Mode};
-use crate::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent};
 use std::time::SystemTime;
 use tc_core::cmdline::LineEdit;
 use tc_core::find::{parse_age, parse_size};
@@ -127,9 +127,9 @@ impl App {
                 let x = &mut f.exts[f.focus - f.rows.len()];
                 x.2 = !x.2;
             }
-            code => {
+            _ => {
                 if let Some(row) = f.rows.get_mut(f.focus) {
-                    row.key(code, key.modifiers.contains(KeyModifiers::CONTROL));
+                    row.key(key);
                 }
             }
         }

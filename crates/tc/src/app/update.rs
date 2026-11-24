@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 
-use crate::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent};
 
 use super::{App, FormRow, Mode, form_checked, zoom_step};
 
@@ -148,11 +148,8 @@ impl App {
             KeyCode::Esc | KeyCode::F(10) | KeyCode::Enter => return,
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
-            code => {
-                let ctrl = key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-                form.rows[form.focus].key(code, ctrl);
+            _ => {
+                form.rows[form.focus].key(key);
                 let rows = form.rows.clone();
                 self.mode = Mode::Settings(form);
                 return self.apply_settings(&rows);

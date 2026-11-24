@@ -4,7 +4,7 @@
 #[cfg(unix)]
 use super::form_text;
 use super::{App, Done, FormRow, Mode, form_checked};
-use crate::{KeyCode, KeyEvent, KeyModifiers};
+use crate::{KeyCode, KeyEvent};
 use std::path::PathBuf;
 #[cfg(unix)]
 use tc_core::cmdline::LineEdit;
@@ -189,11 +189,8 @@ impl App {
             },
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
-            code => {
-                let ctrl = key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-                form.rows[form.focus].key(code, ctrl);
+            _ => {
+                form.rows[form.focus].key(key);
                 form.error = None;
             }
         }
@@ -217,6 +214,7 @@ impl App {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::KeyModifiers;
     use std::os::unix::fs::PermissionsExt;
     use tc_core::panel::Panel;
 

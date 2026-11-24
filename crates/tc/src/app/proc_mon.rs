@@ -236,7 +236,7 @@ impl Procs {
             },
             KeyCode::Tab | KeyCode::Down => d.focus = (d.focus + 1) % n,
             KeyCode::BackTab | KeyCode::Up => d.focus = (d.focus + n - 1) % n,
-            code => d.rows[d.focus].key(code, key.modifiers.contains(KeyModifiers::CONTROL)),
+            _ => d.rows[d.focus].key(key),
         }
         self.draft = Some(d);
     }

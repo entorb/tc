@@ -26,20 +26,16 @@ impl FormRow {
     }
 
     /// Typing edits a text field, Space toggles a checkbox, Space/Left/Right cycle a choice.
-    pub(super) fn key(&mut self, code: KeyCode, ctrl: bool) {
-        match (self, code) {
+    pub(super) fn key(&mut self, key: KeyEvent) {
+        match (self, key.code) {
             (FormRow::Check(_, on), KeyCode::Char(' ')) => *on = !*on,
             (FormRow::Choice(_, opts, i), KeyCode::Char(' ') | KeyCode::Right) => {
                 *i = (*i + 1) % opts.len();
             }
             (FormRow::Choice(_, opts, i), KeyCode::Left) => *i = (*i + opts.len() - 1) % opts.len(),
-            (FormRow::Text(_, l), KeyCode::Char(c)) if !ctrl => l.insert(c),
-            (FormRow::Text(_, l), KeyCode::Backspace) => l.backspace(),
-            (FormRow::Text(_, l), KeyCode::Delete) => l.delete(),
-            (FormRow::Text(_, l), KeyCode::Left) => l.left(),
-            (FormRow::Text(_, l), KeyCode::Right) => l.right(),
-            (FormRow::Text(_, l), KeyCode::Home) => l.home(),
-            (FormRow::Text(_, l), KeyCode::End) => l.end(),
+            (FormRow::Text(_, l), _) => {
+                edit_key(l, key);
+            }
             _ => {}
         }
     }
@@ -272,7 +268,15 @@ pub(super) fn preset_key(
 
 /// Edit keys shared by all text prompts; true if `key` was one of them.
 pub(super) fn edit_key(l: &mut LineEdit, key: KeyEvent) -> bool {
+    // Alt: macOS Option+arrow, Ctrl+arrow switches Spaces there
+    let word = key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match key.code {
+        KeyCode::Left if word => l.word_left(),
+        KeyCode::Right if word => l.word_right(),
+        KeyCode::Backspace if word => l.delete_word(false),
+        KeyCode::Delete if word => l.delete_word(true),
         KeyCode::Left => l.left(),
         KeyCode::Right => l.right(),
         KeyCode::Home => l.home(),

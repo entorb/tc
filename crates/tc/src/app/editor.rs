@@ -390,7 +390,7 @@ impl App {
             }
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
-            code => form.rows[form.focus].key(code, key.modifiers.contains(KeyModifiers::CONTROL)),
+            _ => form.rows[form.focus].key(key),
         }
     }
 

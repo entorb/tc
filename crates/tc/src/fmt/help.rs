@@ -229,6 +229,8 @@ Up/Down         previous / next field
 Space           toggle checkbox
 Click           focus a field; toggles a checkbox, cycles a choice
 Left/Right      move in text
+Ctrl+Left/Right word left / right (Alt too: Mac Option)
+Ctrl+Bksp/Del   delete word left / right (Alt too)
 Alt+Up/Down     previous / next used settings (saved in
                 tc/sync-forms)
 
@@ -264,6 +266,8 @@ Up/Down / Tab   previous / next field
 Space           toggle checkbox
 Click           focus a field; toggles a checkbox, cycles a choice
 Left/Right      move in text
+Ctrl+Left/Right word left / right (Alt too: Mac Option)
+Ctrl+Bksp/Del   delete word left / right (Alt too)
 
 == Options ==
 One file: the fields show its values; only changed fields are
@@ -291,6 +295,8 @@ Up/Down         previous / next field
 Space           toggle checkbox
 Click           focus a field; toggles a checkbox, cycles a choice
 Left/Right      move in text
+Ctrl+Left/Right word left / right (Alt too: Mac Option)
+Ctrl+Bksp/Del   delete word left / right (Alt too)
 Alt+Up/Down     earlier / later searches (history)
 
 == Name ==
@@ -353,6 +359,8 @@ Up/Down         previous / next field
 Space           toggle checkbox, cycle choice
 Click           focus a field; toggles a checkbox, cycles a choice
 Left/Right      move in text, cycle choice
+Ctrl+Left/Right word left / right (Alt too: Mac Option)
+Ctrl+Bksp/Del   delete word left / right (Alt too)
 Alt+Up/Down     earlier / later settings (history)
 PgUp/PgDn       scroll the preview
 

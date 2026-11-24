@@ -298,11 +298,8 @@ impl App {
                 let end = form.preview.len().saturating_sub(fmt::RENAME_PREVIEW_ROWS);
                 form.scroll = (form.scroll + fmt::RENAME_PREVIEW_ROWS).min(end);
             }
-            code => {
-                let ctrl = key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-                form.rows[form.focus].key(code, ctrl);
+            _ => {
+                form.rows[form.focus].key(key);
                 form.names = None;
                 form.refresh();
             }

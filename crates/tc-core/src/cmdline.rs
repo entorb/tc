@@ -66,6 +66,38 @@ impl LineEdit {
         self.cur = 0;
     }
 
+    /// Byte offset of the word boundary before (`forward` false) or after the cursor, words
+    /// as in the editor: letters, digits, `_`.
+    fn word_end(&self, forward: bool) -> usize {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        if forward {
+            let rest = &self.text[self.cur..];
+            let skip = rest.find(|c| !word(c)).unwrap_or(rest.len());
+            let gap = rest[skip..].find(word).unwrap_or(rest.len() - skip);
+            self.cur + skip + gap
+        } else {
+            let head = self.text[..self.cur].trim_end_matches(|c| !word(c));
+            head.trim_end_matches(word).len()
+        }
+    }
+
+    pub fn word_left(&mut self) {
+        self.cur = self.word_end(false);
+    }
+
+    pub fn word_right(&mut self) {
+        self.cur = self.word_end(true);
+    }
+
+    /// Delete to the word boundary before (`forward` false) or after the cursor.
+    pub fn delete_word(&mut self, forward: bool) {
+        let to = self.word_end(forward);
+        let (lo, hi) = (to.min(self.cur), to.max(self.cur));
+        self.text.replace_range(lo..hi, "");
+        self.cur = lo;
+        self.browse = None;
+    }
+
     pub fn end(&mut self) {
         self.cur = self.text.len();
     }
@@ -272,6 +304,26 @@ pub fn open_command(path: &Path) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn word_moves_and_deletes() {
+        let mut l = LineEdit::from("ab_1, é x".to_owned());
+        l.word_left();
+        assert_eq!(&l.text[l.cur..], "x");
+        l.word_left();
+        assert_eq!(&l.text[l.cur..], "é x");
+        l.word_left();
+        assert_eq!(l.cur, 0);
+        l.word_right();
+        assert_eq!(&l.text[l.cur..], "é x");
+        l.delete_word(false);
+        assert_eq!((l.text.as_str(), l.cur), ("é x", 0));
+        l.delete_word(true);
+        assert_eq!((l.text.as_str(), l.cur), ("x", 0));
+        l.end();
+        l.delete_word(false);
+        assert_eq!((l.text.as_str(), l.cur), ("", 0));
+    }
 
     #[test]
     fn editing_with_multibyte() {
