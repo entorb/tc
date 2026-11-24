@@ -68,16 +68,6 @@ pub(super) const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
     CLOSE,
 ];
 
-pub(super) const RENAME_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
-    HELP,
-    ("Enter Rename", KeyCode::Enter, KeyModifiers::NONE),
-    f("F2 Save", 2),
-    f("F3 Load", 3),
-    f("F4 Names", 4),
-    f("F8 Del", 8),
-    CLOSE,
-];
-
 pub(super) const SETTINGS_FOOTER: [(&str, KeyCode, KeyModifiers); 2] = [HELP, CLOSE];
 
 /// Footer bar items: label, key sent when clicked.
@@ -315,7 +305,6 @@ impl App {
                     self.mode,
                     Mode::Found(_)
                         | Mode::FindForm(_)
-                        | Mode::MultiRename(_)
                         | Mode::SyncForm(_)
                         | Mode::Settings(_)
                         | Mode::Props(_)
@@ -344,7 +333,6 @@ impl App {
             Mode::Found(_) => &FOUND_FOOTER,
             Mode::Sync(_) => &SYNC_FOOTER,
             Mode::FindForm(_) => &FIND_FORM_FOOTER,
-            Mode::MultiRename(_) => &RENAME_FOOTER,
             Mode::SyncForm(_) | Mode::Props(_) => &FORM_FOOTER,
             Mode::Settings(_) => &SETTINGS_FOOTER,
             Mode::Stats(_) => &STATS_FOOTER,

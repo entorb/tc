@@ -266,15 +266,12 @@ pub struct App {
     /// Sync rows while a file is open in the viewer or editor; shown again after it.
     sync_back: Option<Box<Sync>>,
     /// Multi-rename form while its new names are edited in the editor, and the temp file's dir.
-    rename_back: Option<(RenameForm, TempDir)>,
     /// The batch being renamed, and the last one that finished completely (undo, until quit).
     rename_running: Option<RenameBatch>,
     rename_undo: Option<RenameBatch>,
     /// Saved find forms, one line each (see `FindForm::to_line`), and their file.
     searches: Vec<String>,
     searches_file: Option<PathBuf>,
-    rename_presets: Vec<String>,
-    rename_presets_file: Option<PathBuf>,
     /// The running transfer pastes a cut: `file_clip` is dropped once it succeeds.
     cut_pending: bool,
     /// Size calculation in a worker thread: directory and its progress (`scanned` = result ready).
@@ -362,13 +359,10 @@ impl App {
             sync_again: None,
             found: None,
             sync_back: None,
-            rename_back: None,
             rename_running: None,
             rename_undo: None,
             searches: Vec::new(),
             searches_file: None,
-            rename_presets: Vec::new(),
-            rename_presets_file: None,
             cut_pending: false,
             dir_job: None,
             view_numbers: false,
@@ -1305,7 +1299,6 @@ impl App {
         }
         self.popular_tick();
         self.restore_sync_back();
-        self.restore_rename_back();
         self.update_tick();
         if matches!(self.mode, Mode::Normal)
             && let Some(setup) = self.sync_again.take()

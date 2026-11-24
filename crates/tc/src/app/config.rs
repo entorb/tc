@@ -24,7 +24,6 @@ impl App {
             cmdline::load_history(&dir.join(name)).with_context(|| format!("cannot read {name}"))
         };
         self.searches = lines("searches")?;
-        self.rename_presets = lines("rename-presets")?;
         self.history = lines("history")?;
         self.finds = lines("find-forms")?;
         self.syncs = lines("sync-forms")?;
@@ -43,7 +42,6 @@ impl App {
         self.popular_file = Some(dir.join("popular"));
         self.connections_file = Some(dir.join("connections"));
         self.searches_file = Some(dir.join("searches"));
-        self.rename_presets_file = Some(dir.join("rename-presets"));
         self.history_file = Some(dir.join("history"));
         self.config_dir = Some(dir);
         Ok(())
@@ -188,7 +186,7 @@ impl App {
         self.mode = Mode::Message(match settings::remove_all(&dir) {
             Ok(n) => {
                 (self.hotlist_file, self.connections_file) = (None, None);
-                (self.rename_presets_file, self.popular_file) = (None, None);
+                self.popular_file = None;
                 (self.searches_file, self.history_file, self.config_dir) = (None, None, None);
                 format!(
                     "Deleted {n} file(s) in {}. Nothing is saved until tc restarts.",

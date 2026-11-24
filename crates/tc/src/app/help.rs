@@ -17,7 +17,8 @@ impl App {
                     | Mode::Connections(_)
                     | Mode::Drives(..)
                     | Mode::DirHistory(..)
-                    | Mode::Compare(_) => true,
+                    | Mode::Compare(_)
+                    | Mode::MultiRename(_) => true,
                     Mode::Xfer(x) => (x.ask.is_some() || x.error.is_some()) && x.rename.is_none(),
                     _ => false,
                 })

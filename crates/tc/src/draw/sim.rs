@@ -364,7 +364,7 @@ fn tool_screens_hide_the_menu_bar() {
     );
     let shown = frame(&ctx, &mut app, &mut look, vec![]);
     assert!(
-        shown.contains("Enter Rename") && shown.contains("a.txt"),
+        shown.contains("Rename") && shown.contains("Cancel") && shown.contains("a.txt"),
         "{shown}"
     );
     assert!(!shown.contains("Select"), "{shown}");

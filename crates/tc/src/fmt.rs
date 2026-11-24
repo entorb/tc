@@ -641,8 +641,64 @@ pub fn sync_footer(s: &Sync) -> String {
 pub const RENAME_PREVIEW_ROWS: usize = 12;
 
 /// Placeholder legend under the multi-rename form.
-pub const RENAME_FORM_KEYS: &str = "[N] name [E] ext ([N2-5] [N2,3] [N-3-] chars)  [C] counter
-[Y] [M] [D] [h] [n] [s] modified date/time  [[] = [";
+/// Tab titles of the multi-rename form (rows per tab: `app::multi_rename::TAB_ROWS`).
+pub const RENAME_TABS: [&str; 5] = ["Name", "Replace", "Placeholder", "Clean up", "Editor"];
+
+/// Name-tab buttons (placeholder, hover text): each inserts into the focused field.
+pub const RENAME_CHIPS: [(&str, &str); 6] = [
+    ("[N]", "name without the extension"),
+    ("[E]", "extension"),
+    ("[C]", "counter: start, step and digits are set below"),
+    ("[Y]", "year of the modified date"),
+    ("[M]", "month of the modified date, 01-12"),
+    ("[D]", "day of the modified date, 01-31"),
+];
+
+/// Placeholder mode, shown under the Find fields: pattern, replacement, example result.
+pub const RENAME_PLACEHOLDER_EXAMPLES: [(&str, &str, &str); 2] = [
+    (
+        "%a_%b_%c_%d",
+        "%d-%c-%b-%a",
+        "one_two_three_four -> four-three-two-one",
+    ),
+    ("IMG_%n", "Photo %n", "IMG_12 -> Photo 12"),
+];
+
+/// Hover text of a multi-rename option: what it does, with an example.
+pub const RENAME_TIPS: [(&str, &str); 9] = [
+    ("Find case-sensitive", "Plain only: off, 'x' finds 'X' too"),
+    (
+        "Regex",
+        "Find is a regex: $1 or ${1} in Replace is a group; (?-i) makes it case-sensitive",
+    ),
+    ("Underscore to space", "'two_words' -> 'two words'"),
+    ("Remove multiple spaces", "'long    space' -> 'long space'"),
+    ("Space before capitals", "'OneLongWord' -> 'One Long Word'"),
+    (
+        "Remove dots",
+        "'A.B.C.' -> 'ABC', 'Mr.' -> 'Mr', '...' -> ''",
+    ),
+    (
+        "Add to first number",
+        "'Picture 1' with 10 -> 'Picture 11'; empty: off",
+    ),
+    (
+        "Case",
+        "Every Word, small kept: 'the end of a dream' -> 'The End of a Dream'",
+    ),
+    (
+        "Counter digits",
+        "3 digits: the counter [C] shows 001, 002 ...",
+    ),
+];
+
+/// Hover text for a multi-rename option by its label.
+pub fn rename_tip(label: &str) -> Option<&'static str> {
+    RENAME_TIPS
+        .iter()
+        .find(|(l, _)| *l == label)
+        .map(|(_, t)| *t)
+}
 
 /// Form lines as (text, focused), the caret after the focused field's text.
 pub fn form_lines(rows: &[FormRow], focused: usize) -> Vec<(String, bool)> {
@@ -670,13 +726,21 @@ pub fn form_lines(rows: &[FormRow], focused: usize) -> Vec<(String, bool)> {
 }
 
 /// Multi-rename preview row: `old -> new`, or `old  ! why` (bool: is an error).
-pub fn rename_row(old: &str, new: &Result<String, String>) -> (String, bool) {
+pub fn rename_cell<'a>(old: &str, new: &'a Result<String, String>) -> RenameCell<'a> {
     match new {
-        Ok(n) if n == old => (format!("{old}  (unchanged)"), false),
-        Ok(n) => (format!("{old}  ->  {n}"), false),
-        Err(e) if e.is_empty() => (old.to_owned(), false),
-        Err(e) => (format!("{old}  ! {e}"), true),
+        Ok(n) if n == old => RenameCell::Same,
+        Ok(n) => RenameCell::New(n),
+        Err(e) if e.is_empty() => RenameCell::Blank,
+        Err(e) => RenameCell::Bad(e),
     }
+}
+
+/// The new-name column of a preview row.
+pub enum RenameCell<'a> {
+    Same,
+    New(&'a str),
+    Blank,
+    Bad(&'a str),
 }
 
 /// Treemap tile color of a file type, darkened 18% per `shade` step (nested or alternating tiles).

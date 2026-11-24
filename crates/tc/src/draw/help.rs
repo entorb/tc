@@ -110,9 +110,16 @@ fn help_cells(row: &mut TableRow, line: &str, action: Option<(KeyCode, KeyModifi
         fmt::HelpLine::More(info) => (RichText::new(""), info),
         fmt::HelpLine::Text(t) => (RichText::new(t).color(MUTED), ""),
     };
+    // prose runs across the info column too: painted on the layer, not clipped to the cell
+    let prose = matches!(fmt::help_line(line), fmt::HelpLine::Text(_));
     row.col(|ui| {
         // painted, not a label: a long title runs over the info column without widening the
         // popup (a wider popup is pushed off the window's left edge while the line is visible)
+        let painter = if prose {
+            ui.ctx().layer_painter(ui.layer_id())
+        } else {
+            ui.painter().clone()
+        };
         let g = egui::WidgetText::from(key).into_galley(
             ui,
             Some(egui::TextWrapMode::Extend),
@@ -121,7 +128,7 @@ fn help_cells(row: &mut TableRow, line: &str, action: Option<(KeyCode, KeyModifi
         );
         let size = egui::vec2(ui.available_width(), g.size().y);
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-        ui.painter().galley(rect.left_top(), g, TEXT);
+        painter.galley(rect.left_top(), g, TEXT);
     });
     row.col(|ui| {
         ui.label(RichText::new(info).color(color));

@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 use jiff::ZonedDateTime;
-use regex::{NoExpand, Regex, RegexBuilder};
+use regex::{Regex, RegexBuilder};
 
 use crate::ops::Progress;
 use crate::vfs::Side;
@@ -24,6 +24,18 @@ pub enum Case {
     First,
     /// First letter of every word uppercase, the rest lowercase.
     Words,
+    /// Like `Words`, but small words (a, an, the, ...) stay lowercase and words with inner
+    /// capitals (ABC, McX) are kept.
+    WordsSmall,
+}
+
+/// How the find text is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Find {
+    #[default]
+    Plain,
+    /// A regex, case-insensitive unless `(?-i)`; `$1` / `${1}` in Replace is a group.
+    Regex,
 }
 
 /// What the form describes.
@@ -33,12 +45,23 @@ pub struct Spec {
     pub ext_mask: String,
     pub find: String,
     pub replace: String,
-    pub regex: bool,
+    pub find_mode: Find,
+    /// Placeholder stage, applied after the find: `%a` matches any text, `%n` digits only;
+    /// `%a` in `ph_replace` is the group of the first `%a` in `ph_find`.
+    pub ph_find: String,
+    pub ph_replace: String,
     pub case_sensitive: bool,
     pub case: Case,
     pub start: i64,
     pub step: i64,
     pub width: usize,
+    /// Clean-up toggles, applied to the name part after find / replace.
+    pub underscore: bool,
+    pub collapse: bool,
+    pub space_caps: bool,
+    pub dots: bool,
+    /// Added to the first number of the name; 0 is off.
+    pub add: i64,
 }
 
 impl Default for Spec {
@@ -48,12 +71,19 @@ impl Default for Spec {
             ext_mask: "[E]".into(),
             find: String::new(),
             replace: String::new(),
-            regex: false,
+            find_mode: Find::Plain,
+            ph_find: String::new(),
+            ph_replace: String::new(),
             case_sensitive: false,
             case: Case::Keep,
             start: 1,
             step: 1,
             width: 1,
+            underscore: false,
+            collapse: false,
+            space_caps: false,
+            dots: false,
+            add: 0,
         }
     }
 }
@@ -62,29 +92,108 @@ impl Default for Spec {
 pub struct Rule {
     spec: Spec,
     find: Option<Regex>,
+    /// Replace text as a regex template (`$` escaped unless it is a regex).
+    template: String,
+    /// The placeholder stage: its pattern and template.
+    ph: Option<(Regex, String)>,
+    /// `Mr.`, `Dr.` ...: the dot goes.
+    titles: Regex,
 }
 
 impl Spec {
     pub fn compile(self) -> std::result::Result<Rule, String> {
-        let find = if self.find.is_empty() {
+        let (pattern, template) = match self.find_mode {
+            _ if self.find.is_empty() => (None, String::new()),
+            Find::Plain => (
+                Some(regex::escape(&self.find)),
+                self.replace.replace('$', "$$"),
+            ),
+            Find::Regex => (Some(self.find.clone()), self.replace.clone()),
+        };
+        // only Plain text has the case-sensitive option; regexes use (?-i)
+        let insensitive = !(self.find_mode == Find::Plain && self.case_sensitive);
+        let find = pattern
+            .map(|p| build(&p, insensitive, "Find"))
+            .transpose()?;
+        let ph = if self.ph_find.is_empty() {
             None
         } else {
-            let pattern = if self.regex {
-                self.find.clone()
-            } else {
-                regex::escape(&self.find)
-            };
-            let re = RegexBuilder::new(&pattern)
-                .case_insensitive(!self.case_sensitive)
-                .build()
-                // the last line of the regex message is the short reason
-                .map_err(|e| {
-                    format!("Find: {}", e.to_string().lines().last().unwrap_or_default())
-                })?;
-            Some(re)
+            let (p, t) = placeholders(&self.ph_find, &self.ph_replace);
+            Some((build(&p, true, "Search")?, t))
         };
-        Ok(Rule { spec: self, find })
+        let titles = Regex::new(r"\b(Mr|Miss|Mrs|No|Nr|Dr)\.").map_err(|e| e.to_string())?;
+        Ok(Rule {
+            spec: self,
+            find,
+            template,
+            ph,
+            titles,
+        })
     }
+}
+
+/// `pattern` compiled; the error names the field it came from.
+fn build(pattern: &str, insensitive: bool, field: &str) -> std::result::Result<Regex, String> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(insensitive)
+        .build()
+        // the last line of the regex message is the short reason
+        .map_err(|e| {
+            format!(
+                "{field}: {}",
+                e.to_string().lines().last().unwrap_or_default()
+            )
+        })
+}
+
+/// Find pattern and replace template for `%a` placeholders: each `%x` in Find is a group
+/// (`%n` digits, else any text); each `%x` in Replace is that group, unknown letters are empty.
+fn placeholders(find: &str, replace: &str) -> (String, String) {
+    let mut pattern = String::new();
+    let mut letters: Vec<char> = Vec::new();
+    let mut rest = find;
+    while let Some(i) = rest.find('%') {
+        pattern += &regex::escape(&rest[..i]);
+        let mut cs = rest[i + 1..].chars();
+        match cs.next() {
+            Some(l) if l.is_ascii_alphanumeric() => {
+                pattern += if l == 'n' { r"(\d+)" } else { "(.+?)" };
+                letters.push(l);
+                rest = cs.as_str();
+            }
+            _ => {
+                pattern += "%";
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    pattern += &regex::escape(rest);
+    // a placeholder before a literal stops at its first occurrence; one at the end takes the rest
+    if pattern.ends_with("(.+?)") {
+        let n = pattern.len();
+        pattern.replace_range(n - 5..n, "(.+)");
+    }
+
+    let mut template = String::new();
+    let mut rest = replace;
+    while let Some(i) = rest.find('%') {
+        template += &rest[..i].replace('$', "$$");
+        let mut cs = rest[i + 1..].chars();
+        match cs.next() {
+            Some(l) if l.is_ascii_alphanumeric() => {
+                if let Some(g) = letters.iter().position(|&x| x == l) {
+                    template += &format!("${{{}}}", g + 1);
+                }
+                rest = cs.as_str();
+            }
+            _ => {
+                template += "%";
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    template += &rest.replace('$', "$$");
+    (pattern, template)
 }
 
 /// `photo.tar.gz` -> (`photo.tar`, `gz`); `.bashrc` and `README` have no extension.
@@ -117,19 +226,22 @@ impl Rule {
         let mut new_stem = expand(&self.spec.name_mask, &ctx)?;
         let mut new_ext = expand(&self.spec.ext_mask, &ctx)?;
         if let Some(re) = &self.find {
-            new_stem = if self.spec.regex {
-                re.replace_all(&new_stem, self.spec.replace.as_str())
-            } else {
-                re.replace_all(&new_stem, NoExpand(&self.spec.replace))
-            }
-            .into_owned();
+            new_stem = re
+                .replace_all(&new_stem, self.template.as_str())
+                .into_owned();
         }
+        if let Some((re, t)) = &self.ph {
+            new_stem = re.replace_all(&new_stem, t.as_str()).into_owned();
+        }
+        new_stem = clean(new_stem, &self.spec, &self.titles)?;
+        new_stem = trim_brackets(&new_stem);
         match self.spec.case {
             Case::Keep => {}
             Case::Lower => (new_stem, new_ext) = (new_stem.to_lowercase(), new_ext.to_lowercase()),
             Case::Upper => (new_stem, new_ext) = (new_stem.to_uppercase(), new_ext.to_uppercase()),
             Case::First => new_stem = capitalize(&new_stem, false),
             Case::Words => new_stem = capitalize(&new_stem, true),
+            Case::WordsSmall => new_stem = small_words(&new_stem),
         }
         let new = if new_ext.is_empty() {
             new_stem
@@ -165,6 +277,153 @@ fn capitalize(s: &str, words: bool) -> String {
         }
     }
     out
+}
+
+/// Clean-up toggles on the name part, in the order of the Perl reference tool.
+fn clean(mut s: String, spec: &Spec, titles: &Regex) -> std::result::Result<String, String> {
+    if spec.dots {
+        s = titles
+            .replace_all(&drop_initial_dots(&s), "$1")
+            .into_owned();
+        s = drop_double_dots(&s);
+    }
+    if spec.space_caps {
+        s = space_before_caps(&s);
+    }
+    if spec.underscore {
+        s = s.replace('_', " ");
+    }
+    if spec.collapse {
+        s = collapse_spaces(&s);
+    }
+    if spec.add != 0 {
+        s = add_to_first_number(&s, spec.add)?;
+    }
+    Ok(s)
+}
+
+/// `A.B.C.` -> `ABC`: drop the dot after a capital when a capital, `]`, `)`, the end or a
+/// later `.x` follows.
+fn drop_initial_dots(s: &str) -> String {
+    let cs: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < cs.len() {
+        out.push(cs[i]);
+        if cs[i].is_uppercase() && cs.get(i + 1) == Some(&'.') && dot_is_initial(&cs[i + 2..]) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn dot_is_initial(rest: &[char]) -> bool {
+    match rest.first() {
+        None => true,
+        Some(c) if c.is_uppercase() || matches!(c, ']' | ')') => true,
+        _ => rest
+            .windows(2)
+            .any(|w| w[0] == '.' && w[1].is_alphanumeric()),
+    }
+}
+
+/// `...` -> `` : a dot next to another dot goes.
+fn drop_double_dots(s: &str) -> String {
+    let cs: Vec<char> = s.chars().collect();
+    cs.iter()
+        .enumerate()
+        .filter(|&(i, &c)| c != '.' || !(i > 0 && cs[i - 1] == '.' || cs.get(i + 1) == Some(&'.')))
+        .map(|(_, &c)| c)
+        .collect()
+}
+
+/// `OneLongWord` -> `One Long Word`; no space before the first character.
+fn space_before_caps(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    let mut prev: Option<char> = None;
+    for c in s.chars() {
+        if c.is_uppercase() && prev.is_some_and(|p| !p.is_uppercase() && !p.is_whitespace()) {
+            out.push(' ');
+        }
+        out.push(c);
+        prev = Some(c);
+    }
+    out
+}
+
+/// `long    space` -> `long space`.
+fn collapse_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if !(c == ' ' && out.ends_with(' ')) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Add `add` to the first number in `s` (`Picture 1` +10 -> `Picture 11`).
+fn add_to_first_number(s: &str, add: i64) -> std::result::Result<String, String> {
+    let Some(start) = s.find(|c: char| c.is_ascii_digit()) else {
+        return Ok(s.to_owned());
+    };
+    let len = s[start..]
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(s.len() - start);
+    let num: i64 = s[start..start + len]
+        .parse()
+        .map_err(|_| "number too large".to_owned())?;
+    let sum = num.checked_add(add).ok_or("number too large")?;
+    Ok(format!("{}{sum}{}", &s[..start], &s[start + len..]))
+}
+
+/// Trim the ends, and spaces just inside `( [ {` and `) ] }`.
+fn trim_brackets(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.trim().chars() {
+        if matches!(c, ')' | ']' | '}') {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+        }
+        if c == ' ' && matches!(out.chars().last(), Some('(' | '[' | '{')) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+const SMALL_WORDS: [&str; 7] = ["a", "an", "at", "in", "of", "the", "and"];
+
+/// Every word capitalized, except small words (not the first) and words that keep their own
+/// capitals (`ABC`, `McX`).
+fn small_words(s: &str) -> String {
+    s.split(' ')
+        .enumerate()
+        .map(|(i, w)| {
+            let lower = w.to_lowercase();
+            if keeps_capitals(w) {
+                w.to_owned()
+            } else if i > 0 && SMALL_WORDS.contains(&lower.as_str()) {
+                lower
+            } else {
+                capitalize(w, true)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn keeps_capitals(w: &str) -> bool {
+    w.chars()
+        .zip(w.chars().skip(1))
+        .any(|(a, b)| a.is_uppercase() && b.is_uppercase())
+        || w.strip_prefix("Mac")
+            .or_else(|| w.strip_prefix("Mc"))
+            .is_some_and(|t| t.starts_with(char::is_uppercase))
 }
 
 /// A single file name component the target file system accepts.
@@ -371,7 +630,7 @@ mod tests {
     use std::fs;
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::{Case, Progress, Side, Spec, apply, plan, range, undo};
+    use super::{Case, Find, Progress, Side, Spec, apply, plan, range, undo};
     use crate::vfs::mem::Mem;
 
     #[test]
@@ -454,12 +713,12 @@ mod tests {
         let r = rule(|s| {
             s.find = r"(\d+)-(\d+)".into();
             s.replace = "${2}_$1".into();
-            s.regex = true;
+            s.find_mode = Find::Regex;
         });
         assert_eq!(name(&r, "pic 1-2.png", 0).unwrap(), "pic 2_1.png");
         let s = Spec {
             find: "(".into(),
-            regex: true,
+            find_mode: Find::Regex,
             ..Spec::default()
         };
         assert!(s.compile().is_err());
@@ -468,6 +727,118 @@ mod tests {
         assert_eq!(case(Case::Upper), "MY FILE-NAME.JPG");
         assert_eq!(case(Case::First), "My file-name.JPG");
         assert_eq!(case(Case::Words), "My File-Name.JPG");
+        assert_eq!(case(Case::WordsSmall), "My FILE-name.JPG");
+    }
+
+    #[test]
+    fn placeholder_find_swaps_groups() {
+        let r = rule(|s| {
+            s.ph_find = "%a - %b".into();
+            s.ph_replace = "%b - %a".into();
+        });
+        assert_eq!(name(&r, "x - y.txt", 0).unwrap(), "y - x.txt");
+        let r = rule(|s| {
+            s.ph_find = "%a - %n - %t".into();
+            s.ph_replace = "[%a] - %n - %t".into();
+        });
+        assert_eq!(name(&r, "Trip - 12 - Day", 0).unwrap(), "[Trip] - 12 - Day");
+        // `$` and `.` are literal in placeholder mode
+        let r = rule(|s| {
+            s.ph_find = "%a.".into();
+            s.ph_replace = "$%a".into();
+        });
+        assert_eq!(name(&r, "x..y", 0).unwrap(), "$x.y");
+    }
+
+    #[test]
+    fn placeholder_groups_match_the_first_occurrence() {
+        let ph = |find: &str, replace: &str| {
+            rule(|s| {
+                s.ph_find = find.into();
+                s.ph_replace = replace.into();
+            })
+        };
+        // before a literal: the first occurrence; at the end: the rest of the name
+        assert_eq!(name(&ph("%a_", "%a-"), "chk_rs", 0).unwrap(), "chk-rs");
+        assert_eq!(name(&ph("%a_%b", "%b-%a"), "x_y_z", 0).unwrap(), "y_z-x");
+        assert_eq!(
+            name(&ph("%a_%b", "%b - %a"), "tom_jerry", 0).unwrap(),
+            "jerry - tom"
+        );
+        assert_eq!(
+            name(&ph("%a_%b_%c_%d", "%d-%c-%b-%a"), "1_2_3_4_5", 0).unwrap(),
+            "4_5-3-2-1"
+        );
+    }
+
+    #[test]
+    fn clean_up_toggles() {
+        let n = |r: &super::Rule, s| name(r, s, 0).unwrap();
+        let r = rule(|s| s.underscore = true);
+        assert_eq!(n(&r, "two_words.txt"), "two words.txt");
+        let r = rule(|s| s.collapse = true);
+        assert_eq!(n(&r, "long    space.txt"), "long space.txt");
+        let r = rule(|s| s.space_caps = true);
+        assert_eq!(n(&r, "OneLongWord.txt"), "One Long Word.txt");
+        assert_eq!(n(&r, "HTMLParser.txt"), "HTMLParser.txt");
+        let r = rule(|s| s.dots = true);
+        assert_eq!(n(&r, "A.B.C..txt"), "ABC.txt");
+        assert_eq!(n(&r, "Mr.Smith...txt"), "MrSmith.txt");
+        assert_eq!(n(&r, "a.b.c.txt"), "a.b.c.txt");
+        let r = rule(|s| s.add = 10);
+        assert_eq!(n(&r, "Picture 1.jpg"), "Picture 11.jpg");
+        assert_eq!(n(&r, "no digits.jpg"), "no digits.jpg");
+        assert!(name(&rule(|s| s.add = i64::MAX), "a1", 0).is_err());
+        // trims ends and spaces inside brackets, always
+        assert_eq!(n(&rule(|_| {}), "( a ) .txt"), "(a).txt");
+        let r = rule(|s| s.case = Case::WordsSmall);
+        assert_eq!(n(&r, "the end of a dream.txt"), "The End of a Dream.txt");
+        assert_eq!(n(&r, "ABC road.txt"), "ABC Road.txt");
+    }
+
+    #[test]
+    fn placeholder_examples_from_the_form() {
+        let ph = |find: &str, replace: &str| {
+            rule(|s| {
+                s.ph_find = find.into();
+                s.ph_replace = replace.into();
+            })
+        };
+        assert_eq!(
+            name(&ph("%a_%b", "%b - %a"), "tom_jerry", 0).unwrap(),
+            "jerry - tom"
+        );
+        assert_eq!(
+            name(&ph("IMG_%n", "Photo %n"), "IMG_12", 0).unwrap(),
+            "Photo 12"
+        );
+        assert_eq!(
+            name(&ph("%a_%b_%c_%d", "%d-%c-%b-%a"), "one_two_three_four", 0).unwrap(),
+            "four-three-two-one"
+        );
+        // %n takes digits only
+        assert!(name(&ph("IMG_%n", "x"), "IMG_ab", 0).unwrap() == "IMG_ab");
+    }
+
+    #[test]
+    fn case_sensitive_only_for_plain_text() {
+        let plain = |mode| {
+            rule(|s| {
+                s.find = "ab".into();
+                s.replace = "X".into();
+                s.find_mode = mode;
+                s.case_sensitive = true;
+            })
+        };
+        assert_eq!(
+            name(&plain(Find::Plain), "AB ab.txt", 0).unwrap(),
+            "AB X.txt"
+        );
+        assert_eq!(
+            name(&plain(Find::Regex), "AB ab.txt", 0).unwrap(),
+            "X X.txt"
+        );
+        assert_eq!(name(&plain(Find::Regex), "AB.txt", 0).unwrap(), "X.txt");
     }
 
     #[cfg(unix)]

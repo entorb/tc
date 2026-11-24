@@ -53,6 +53,15 @@ pub fn translate(ev: &Event, alt: bool) -> Option<Input> {
 
 /// Option+key typed an ASCII symbol this frame (`[`, `@`, `|` on many macOS layouts):
 /// the text is the input, not the Alt+key shortcut. Non-ASCII Option text (∫, ç) stays a shortcut.
+/// Keys the app keeps while an inline editor has the keyboard: Esc, F-keys, Alt+1..5 (tabs)
+/// and Ctrl+PgUp/PgDn; the rest is typing for the editor.
+pub fn app_key_in_editor(k: &KeyEvent) -> bool {
+    matches!(k.code, KeyCode::Esc | KeyCode::F(_))
+        || (k.modifiers.contains(KeyModifiers::ALT) && matches!(k.code, KeyCode::Char('1'..='5')))
+        || (k.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(k.code, KeyCode::PageUp | KeyCode::PageDown))
+}
+
 pub fn option_typed(events: &[Event]) -> bool {
     events.iter().any(|e| {
         let Event::Text(t) = e else { return false };

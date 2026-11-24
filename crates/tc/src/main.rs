@@ -117,7 +117,11 @@ impl Gui {
             if typed && keys::is_alt_char(ev) {
                 continue;
             }
+            // an inline editor with the keyboard takes typing, Enter, Ctrl+Z and paste itself
+            let editing = self.app.rename_editor_focused();
             match keys::translate(ev, alt && !typed) {
+                Some(keys::Input::Key(k)) if editing && !keys::app_key_in_editor(&k) => {}
+                Some(keys::Input::Paste(_)) if editing => {}
                 // in the file panel Ctrl+V pastes files; elsewhere it pastes text into the prompt or editor
                 Some(keys::Input::Key(k))
                     if k.code == tc::KeyCode::Char('v')
