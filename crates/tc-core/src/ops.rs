@@ -759,18 +759,15 @@ mod tests {
     #[cfg(unix)] // sockets and FIFOs are Unix-only
     #[test]
     fn copy_skips_sockets_and_fifos() {
-        use rustix::fs::{CWD, FileType, Mode, mknodat};
         let tmp = tempfile::tempdir().unwrap();
         let src = tree(tmp.path());
         let _sock = std::os::unix::net::UnixListener::bind(src.join("d.sock")).unwrap();
-        mknodat(
-            CWD,
-            src.join("sub/pipe"),
-            FileType::Fifo,
-            Mode::RUSR | Mode::WUSR,
-            0,
-        )
-        .unwrap();
+        // rustix has no mknodat on macOS; the POSIX tool works everywhere
+        let made = std::process::Command::new("mkfifo")
+            .arg(src.join("sub/pipe"))
+            .status()
+            .unwrap();
+        assert!(made.success());
         copy(&src, &tmp.path().join("dst")).unwrap(); // a FIFO open would hang here
         let dst = tmp.path().join("dst");
         assert_eq!(fs::read_to_string(dst.join("sub/b.txt")).unwrap(), "b");
