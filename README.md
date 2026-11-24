@@ -70,6 +70,7 @@ Releases are zips (`tc-<OS>-<arch>.zip`) holding the plain `tc` / `tc.exe`. The 
 - Right-click menu on entries (view, edit, copy, move, rename, delete, clipboard, properties, terminal); middle click opens a directory in a new tab
 - Sort by name, extension, date, size (Ctrl+F3..F6 or title click: Name, Ext, Size, Date)
 - Quick search (type a name, or Ctrl+S), filter popup (`/`: name, size, age, file types of the directory; ends on leaving it or Esc); dot files are always shown; F10 quits
+- Local panels re-read their directory when entries are added, removed or renamed (polled each second, cursor and marks kept; sizes of files growing in place need Ctrl+R; not remote, archive or found lists)
 - Git: ignored entries (`.gitignore`, `info/exclude`, global excludes) and `.git` dirs shown dim; local panels only, re-read on reload
 - History (Alt+Left/Right; Alt+Down or the 🕓 panel button lists it), Ctrl+Left/Right shows the cursor directory in the other panel, drives (Alt+F1/F2), bookmarks (Ctrl+D adds, Ctrl+B lists: Insert/`a` adds, Delete/Backspace removes, F4/`e` edits the alias, Ctrl+Up/Down or Shift+Up/Down reorders; file lines `alias<TAB>path` or `path`, older files load unchanged, a tab in an alias-less path of an old file misparses)
 - Sync browsing (Ctrl+K): entering a directory or going up in one panel repeats it in the other; local directories only, switches off when the other panel cannot follow
@@ -80,8 +81,10 @@ Releases are zips (`tc-<OS>-<arch>.zip`) holding the plain `tc` / `tc.exe`. The 
 
 ### File operations
 
-- F5 copy, F6 move, F8 delete in a worker; after 2 s a popup shows bytes, files, dirs done / total with rates per second and an ETA (regression on bytes, refreshed each second); Esc cancels and removes the partial target
+- F5 copy, F6 move, F8 delete in a worker; after 1 s a popup shows bytes, files, dirs done / total with rates per second and an ETA (regression on bytes, refreshed each second); Esc cancels and removes the partial target
+- Sockets, pipes and devices are skipped by copy; a move to another drive refuses them (the source stays); viewer, editor and find leave them alone
 - Conflict dialog: overwrite, skip, rename, newer only (also for all). Overwrite goes through a temp file and rename; a move deletes the source only after success
+- A file that fails asks retry, skip (also for all) or cancel; a move keeps the source of a skipped file, a delete its directory. Remote transfers ask per selected item
 - F2 / Shift+F6 rename (F2 with several marked opens multi-rename), F7 mkdir, F8 delete (trash or permanent)
 - Symlink and hard link (F9 → File): link to the cursor entry in the other panel's directory, target and link path editable; never replaces an existing path; local panels only, hard links to files only
 - Properties (Alt+Enter, F9 → File): info on the marked entries or the cursor entry; Unix: mode (octal with rwx preview), owner and group, optionally recursive; elsewhere the read-only flag; one file: prefilled, only changed fields applied; several or a directory: empty fields, filled ones applied to all; symlinks keep their mode and are never followed; local panels only
@@ -124,8 +127,8 @@ Releases are zips (`tc-<OS>-<arch>.zip`) holding the plain `tc` / `tc.exe`. The 
 
 ### Viewer (F3) and editor (F4)
 
-- Viewer streams from disk (multi-GB files): search, go to line or %, wrap, line numbers, encoding detection; `h` hex view (offset, 16 bytes, ASCII; reads only the visible rows; `g` takes an offset `0x..`/decimal/`N%`, find jumps to the row of the matching line); Alt+Left/Right (or Alt+b/f, as macOS terminals send Option+arrows) view the previous / next file of the panel it was opened from (panel cursor follows; skips directories and media files; local and find-result panels only, no wrap at the ends)
-- Editor: undo / redo, selection, clipboard, find / replace in one dialog (F3; regex with `$1` groups or plain text, case, one by one; matches within a line), go to line, wrap, line numbers, bracket match, encoding and CRLF detection; warns when the file changed on disk. Files over 1 GB or free RAM offer the viewer
+- Viewer streams from disk (multi-GB files): search, go to line or %, wrap, line numbers, encoding detection; `h` hex view (offset, 16 bytes, ASCII; reads only the visible rows; `g` takes an offset `0x..`/decimal/`N%`, find jumps to the row of the matching line); Alt+Left/Right (or Alt+b/f, as macOS terminals send Option+arrows) view the previous / next file of the panel it was opened from (panel cursor follows; skips directories and media files; local and find-result panels only, no wrap at the ends); re-reads the file when it changes on disk (polled each second, position kept)
+- Editor: undo / redo, selection, clipboard, VS Code line keys (copy / cut / paste whole lines, move and copy lines up / down), find / replace in one dialog (F3; regex with `$1` groups or plain text, case, one by one; matches within a line), go to line, wrap, line numbers, bracket match, encoding and CRLF detection; save trims trailing blanks and ends the file with a line break; watches the file (each second): reloads it when there are no edits, else asks to overwrite or reload. Files over 1 GB or free RAM offer the viewer
 - Markdown: save (and F5) adds blank lines around headings, lists and ``` blocks, one undo step; never removes lines
 - Syntax colors for common languages (rs, c/cpp, js/ts, java, go, py, sh, rb, lua, php, sql, toml/yaml, properties, json, html/xml, md); per row only, multi-line strings and comments may color wrong
 - Shift+F4 opens the cursor file (or a new one) in an external editor (`code`)

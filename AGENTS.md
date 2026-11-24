@@ -33,6 +33,8 @@ Each of these shipped as a bug once.
 - Windows: pass shell commands raw to `cmd /C` (no Rust arg quoting); Ctrl+Insert is taken by the system, offer Alt+Shift+C.
 - macOS may eat Ctrl+F-keys and Alt keys. Every feature needs an F9 menu entry.
 - Read state (cursor name, selection) before replacing the data it points into (File Stats rescan bug).
+- eframe is built with `default-features = false`: keep its `clipboard` feature, else `ctx.copy_text` silently only fills an in-process string (copy looked broken on every OS).
+- Opening a FIFO blocks forever, sockets fail: read local file content through `ops::open_regular`; copies skip specials (`ops/copy.rs` `is_special`).
 - Empty filter + Enter keeps the list; it is not "filter matches nothing".
 - Tool screens (File Stats, Find results, Sync, Processes, Multi-rename: `App::sub_screen`) own the window: no menu bar or toolbar, F-key bar at the bottom. Toolbar disabled in dialogs and prompts; icons come from one loaded emoji font.
 - Footer keys must appear in their F1 help: test `footer_keys_are_documented_in_their_help` in `app.rs`.

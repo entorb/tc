@@ -49,6 +49,7 @@ esac
 etime
 fclonefileat
 fffd
+fifos
 filemanager
 fkey
 flate
@@ -77,7 +78,9 @@ lzma
 memchr
 misaligns
 misparses
+mkfifo
 mklink
+mknodat
 mlsd
 mlst
 mmin
@@ -129,6 +132,7 @@ ropey
 rposition
 rsplit
 rundll
+rusr
 russh
 rustix
 rustls
@@ -161,6 +165,7 @@ treemap
 unclipped
 unlinkat
 unmappable
+unmarks
 unpushed
 ureq
 userland
@@ -175,6 +180,7 @@ windowfocus
 winit
 winresource
 wirks
+wusr
 xabc
 xattr
 xaybab
@@ -188,7 +194,10 @@ xkbcomp
 xtest
 xtst
 xtst
+xtwo
+xxhi
 xxyz
 yazi
 zstd
+äöüßxyz
 çødé

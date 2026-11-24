@@ -25,4 +25,5 @@ Core logic shared by all front ends and backends. Root rules in [../../AGENTS.md
 - Temp dirs via `tempfile`, never real user paths.
 - Cover non-UTF-8 names, symlinks, permission errors and cross-device moves where relevant.
 - Prove streaming with large or synthetic input (sparse file via `set_len`).
+- `#[cfg(unix)]` is not Linux: rustix gates some calls per OS (`mknodat` missing on macOS); check its docs' platform list.
 - Feature `mem`: in-memory `Remote` for tests of dependent crates.
