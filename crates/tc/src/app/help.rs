@@ -12,7 +12,8 @@ impl App {
             || (self.input.is_none()
                 && !self.help
                 && match &self.mode {
-                    Mode::Hotlist(_)
+                    Mode::Bookmarks(_)
+                    | Mode::BookmarkEdit(_)
                     | Mode::Popular(_)
                     | Mode::Connections(_)
                     | Mode::Drives(..)
@@ -179,7 +180,7 @@ mod tests {
             .position(|l| l.starts_with("Ctrl+B "))
             .unwrap();
         app.help_click(line);
-        assert!(!app.help && matches!(app.mode, Mode::Hotlist(_)));
+        assert!(!app.help && matches!(app.mode, Mode::Bookmarks(_)));
     }
 
     #[test]
@@ -244,6 +245,6 @@ mod tests {
         }
         assert!(app.help_action_at(app.help_sel).is_some());
         key(&mut app, KeyCode::Enter);
-        assert!(!app.help && matches!(app.mode, Mode::Hotlist(_)));
+        assert!(!app.help && matches!(app.mode, Mode::Bookmarks(_)));
     }
 }

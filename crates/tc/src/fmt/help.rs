@@ -7,7 +7,7 @@ Type to filter this help, Up/Down select, Enter runs the key.
 
 == Highlights ==
 F9              menu with all features (when keys are eaten)
-Ctrl+B          bookmarks (hotlist)
+Ctrl+B          bookmarks
 Ctrl+Z          popular directories (most visited and recent)
 Ctrl+Space      FILE STATS (like ncdu): biggest files and dirs
                 of the current tree, with % and bar
@@ -28,7 +28,7 @@ PgUp/PgDn       page up / down
 Home/End        first / last entry
 Alt+Left        history back
 Alt+Right       history forward
-Alt+Down        directory history of the panel (also the 🕒 button
+Alt+Down        directory history of the panel (also the 🕓 button
                 top right of the panel; ★ next to it: bookmarks)
 Ctrl+K          sync browsing on / off: entering a directory or
                 going up repeats it in the other panel (local
@@ -141,7 +141,7 @@ Alt+Enter       properties of marked entries, else the cursor
 == Tools ==
 Settings        (F9 Tools) daily update check on / off
 Delete config files
-                (F9 Tools) delete tc's saved files: hotlist,
+                (F9 Tools) delete tc's saved files: bookmarks,
                 popular dirs, connections, histories, searches, session
 
 == Quit ==
@@ -389,13 +389,23 @@ Esc / F10       close";
 pub const HELP_LISTS: &str = "\
 == Bookmarks (Ctrl+B) ==
 Up/Down         move
-Enter           go to the directory in the active panel
-Insert / a      add the active panel's directory
-F4 / e          edit the alias (empty removes it)
+Enter / Click   go to the directory in the active panel
+Insert / a      add the active panel's directory (✚; greyed
+                while it is in the list)
+F4 / e          edit page: all bookmarks (Edit… button)
 Ctrl+Up/Down    move the bookmark (also Shift+Up/Down), saved at once
-Delete/Bksp     remove the bookmark
+Delete/Bksp     remove the selected bookmark (➖)
 /               filter: Enter keeps, Esc clears
-Esc / q / F10   close
+Esc / q / F10   close (also a click beside the list)
+
+== Edit bookmarks (F4 in the bookmarks) ==
+Tab             next field: alias, path, next row (Shift+Tab back)
+Up/Down         previous / next row
+Ctrl+Up/Down    move the row (⏶ ⏷; also Shift+Up/Down)
+Insert          add the active panel's directory (✚)
+F8              delete the row (➖; also Ctrl+Delete)
+Enter           save all (Save; empty alias shows the path)
+Esc / F10       discard changes, back to the list (Cancel)
 
 == Popular directories (Ctrl+Z) ==
 Up/Down         move, best ranked (visits, recent first) on top
@@ -425,7 +435,7 @@ Esc / q / F10   close
 
 == Directory history (Alt+Down) ==
 Up/Down         move, newest on top
-Enter           go there (a history step: back / forward stay)
+Enter / Click   go there (a history step: back / forward stay)
 Esc / q / F10   close";
 pub const HELP_CONFLICT: &str = "\
 == Target exists ==
@@ -602,7 +612,8 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Props(_) => ("Help: properties", HELP_PROPS),
         Mode::Found(_) => ("Help: found files", HELP_FOUND),
         Mode::MultiRename(_) => ("Help: multi-rename", HELP_RENAME),
-        Mode::Hotlist(_)
+        Mode::Bookmarks(_)
+        | Mode::BookmarkEdit(_)
         | Mode::Popular(_)
         | Mode::Connections(_)
         | Mode::Drives(..)

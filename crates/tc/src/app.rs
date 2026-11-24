@@ -20,6 +20,7 @@ use tc_core::vfs::Remote;
 use tc_core::{Error, hotlist, ops, view::Viewer};
 use tc_remote::Prompt;
 
+mod bookmark_edit;
 mod bookmarks;
 mod browse_sync;
 mod compare;
@@ -41,6 +42,7 @@ mod tabs;
 mod update;
 mod widgets;
 mod xfer;
+pub use bookmark_edit::{BmClick, BookmarkForm, BookmarkRow};
 pub use connect::Connecting;
 pub use editor::{Ask, Input, SearchForm, Step};
 pub use file_stats::Stats;
@@ -101,7 +103,7 @@ pub enum Mode {
     /// Command line, run with Enter.
     Cmd(LineEdit),
     /// Bookmark list with the selected row.
-    Hotlist(usize),
+    Bookmarks(usize),
     /// Ctrl+Z popular directories with the selected row.
     Popular(usize),
     /// F9 menu bar: open group and selected entry.
@@ -156,8 +158,8 @@ pub enum Mode {
     Connections(usize),
     /// Connection URL being added (`None`) or edited (row).
     ConnEdit(Option<usize>, LineEdit),
-    /// Alias of the bookmark in this row being edited.
-    HotlistAlias(usize, LineEdit),
+    /// Alias and path of a bookmark being edited (F4 in the bookmarks).
+    BookmarkEdit(Box<BookmarkForm>),
     /// Connect running in a worker; may ask for a host key or password.
     Connecting(Connecting),
     /// Asks before deleting tc's files in this config directory.
@@ -439,7 +441,7 @@ impl App {
                     self.mode = Mode::ConnEdit(row, l);
                 }
             },
-            Mode::HotlistAlias(row, l) => self.hotlist_alias_key(key, row, l),
+            Mode::BookmarkEdit(f) => self.bookmark_edit_key(key, *f),
             Mode::Connecting(c) => self.connecting_key(c, key),
             Mode::Confirm(op, targets, text) => self.confirm_key(op, targets, text, key.code),
             Mode::ResetConfig(dir) => self.reset_config_key(key.code, dir),
@@ -472,7 +474,7 @@ impl App {
                 }
             },
             Mode::Cmd(l) => self.cmd_key(l, key),
-            Mode::Hotlist(sel) => self.hotlist_key(key, sel),
+            Mode::Bookmarks(sel) => self.hotlist_key(key, sel),
             Mode::Popular(sel) => self.popular_key(key, sel),
             Mode::Compare(sel) => self.compare_key(key.code, sel),
             Mode::Menu(group, sel) => self.menu_key(key.code, group, sel),
@@ -709,7 +711,7 @@ impl App {
             KeyCode::Char('o') => self.start_terminal(),
             KeyCode::Char('e') => self.sync_open(),
             KeyCode::Char('n') => self.open_list(Mode::Connections(0)),
-            KeyCode::Char('b') => self.open_list(Mode::Hotlist(0)),
+            KeyCode::Char('b') => self.open_list(Mode::Bookmarks(0)),
             KeyCode::Char('z') => self.popular_open(),
             KeyCode::Char('k') => self.toggle_browse_sync(),
             KeyCode::Char(' ') => self.spawn_stats(),
@@ -1118,8 +1120,12 @@ impl App {
             | Mode::Mkdir(l)
             | Mode::Link(link::LinkAsk { line: l, .. })
             | Mode::NewFile(l)
-            | Mode::HotlistAlias(_, l)
             | Mode::ConnEdit(_, l) => paste_line(l, &text),
+            Mode::BookmarkEdit(f) => {
+                if let Some(l) = f.line_mut() {
+                    paste_line(l, &text);
+                }
+            }
             Mode::Connecting(Connecting {
                 ask: Some((Prompt::Password(_), l)),
                 ..

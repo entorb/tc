@@ -113,7 +113,6 @@ impl Mode {
             | Mode::Mkdir(l)
             | Mode::Link(LinkAsk { line: l, .. })
             | Mode::NewFile(l)
-            | Mode::HotlistAlias(_, l)
             | Mode::ConnEdit(_, l)
             | Mode::Editor(_, l)
             | Mode::Connecting(Connecting {
@@ -128,6 +127,7 @@ impl Mode {
             Mode::MultiRename(f) => text_row(&mut f.rows, f.focus),
             Mode::Settings(f) => text_row(&mut f.rows, f.focus),
             Mode::Props(f) => text_row(&mut f.rows, f.focus),
+            Mode::BookmarkEdit(f) => f.line_mut(),
             Mode::Filter(f) => text_row(&mut f.rows, f.focus),
             Mode::Procs(p) => p
                 .draft

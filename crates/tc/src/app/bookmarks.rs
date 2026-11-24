@@ -1,12 +1,17 @@
-//! Hotlist (Ctrl+D) of bookmarked directories.
+//! Bookmarks (Ctrl+B lists, Ctrl+D adds) of directories.
 
-use super::{App, Filter, Mode, REMOTE, edit_key, list_nav, list_rows};
+use super::{App, BookmarkForm, Filter, Mode, REMOTE, list_nav, list_rows};
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
-use tc_core::cmdline::LineEdit;
 use tc_core::hotlist;
 
 impl App {
+    /// The active panel is local and its directory not bookmarked yet.
+    pub fn can_bookmark(&self) -> bool {
+        let panel = &self.panels[self.active];
+        panel.remote().is_none() && !self.hotlist.iter().any(|b| b.path == panel.path())
+    }
+
     /// Bookmarks the active panel's directory; the row of the new or existing entry.
     pub(super) fn hotlist_add(&mut self) -> Option<usize> {
         if self.panels[self.active].remote().is_some() {
@@ -39,6 +44,11 @@ impl App {
         {
             self.mode = Mode::Message(e.to_string());
         }
+    }
+
+    /// Bookmark and directory history lists go to the clicked row at once, not on double click.
+    pub fn list_click_opens(&self) -> bool {
+        matches!(self.mode, Mode::Bookmarks(_) | Mode::DirHistory(..))
     }
 
     /// Alt+Down: the active panel's visited directories, newest first.
@@ -90,12 +100,12 @@ impl App {
                 sel = self.hotlist_move(sel, key.code == KeyCode::Down);
             }
             if !matches!(self.mode, Mode::Message(_)) {
-                self.mode = Mode::Hotlist(sel);
+                self.mode = Mode::Bookmarks(sel);
             }
             return;
         }
         if list_nav(&mut self.list_filter, &self.hotlist, &mut sel, key) {
-            self.mode = Mode::Hotlist(sel);
+            self.mode = Mode::Bookmarks(sel);
             return;
         }
         let shown = list_rows(&self.hotlist, &self.list_filter).contains(&sel);
@@ -108,9 +118,8 @@ impl App {
                     _ => return,
                 }
             }
-            KeyCode::F(4) | KeyCode::Char('e') if shown => {
-                let alias = self.hotlist[sel].alias.clone();
-                self.mode = Mode::HotlistAlias(sel, LineEdit::from(alias));
+            KeyCode::F(4) | KeyCode::Char('e') => {
+                self.mode = Mode::BookmarkEdit(Box::new(BookmarkForm::new(&self.hotlist, sel)));
                 return;
             }
             KeyCode::Enter if shown => {
@@ -133,24 +142,7 @@ impl App {
             }
             _ => {}
         }
-        self.mode = Mode::Hotlist(sel);
-    }
-
-    pub(super) fn hotlist_alias_key(&mut self, key: KeyEvent, row: usize, mut l: LineEdit) {
-        match key.code {
-            KeyCode::Enter => {
-                self.hotlist[row].alias = l.text.replace('\t', "").trim().to_owned();
-                self.hotlist_save();
-                if !matches!(self.mode, Mode::Message(_)) {
-                    self.mode = Mode::Hotlist(row);
-                }
-            }
-            KeyCode::Esc => self.mode = Mode::Hotlist(row),
-            _ => {
-                edit_key(&mut l, key);
-                self.mode = Mode::HotlistAlias(row, l);
-            }
-        }
+        self.mode = Mode::Bookmarks(sel);
     }
 }
 
@@ -200,12 +192,12 @@ mod tests {
         key(&mut app, KeyCode::F(4));
         type_keys(&mut app, "Work");
         key(&mut app, KeyCode::Enter);
-        assert!(matches!(app.mode, Mode::Hotlist(0)));
+        assert!(matches!(app.mode, Mode::Bookmarks(0)));
         let saved = hotlist::load_bookmarks(&file).unwrap();
         assert_eq!(saved[0].alias, "Work");
         assert!(saved[0].label().starts_with("Work  "));
         with(&mut app, KeyCode::Down, KeyModifiers::CONTROL);
-        assert!(matches!(app.mode, Mode::Hotlist(1)));
+        assert!(matches!(app.mode, Mode::Bookmarks(1)));
         assert_eq!(hotlist::load_bookmarks(&file).unwrap()[1].alias, "Work");
         // filter active: positions are ambiguous, nothing moves
         key(&mut app, KeyCode::Char('/'));
@@ -247,5 +239,25 @@ mod tests {
         ctrl(&mut app, 'b');
         key(&mut app, KeyCode::Backspace); // same as Delete
         assert!(app.hotlist.is_empty() && hotlist::load_bookmarks(&file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn bookmarks_buttons_add_delete_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = two_panels(tmp.path(), tmp.path());
+        with(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        let keys = |app: &App| match crate::fmt::dialog(app) {
+            Some(crate::fmt::Dialog::List { title, buttons, .. }) => {
+                assert_eq!(title, "Bookmarks");
+                buttons.iter().map(|b| (b.2, b.3)).collect::<Vec<_>>()
+            }
+            _ => panic!("no list"),
+        };
+        let (ins, del, edit) = (KeyCode::Insert, KeyCode::Delete, KeyCode::F(4));
+        assert_eq!(keys(&app), [(ins, true), (del, false), (edit, true)]);
+        key(&mut app, KeyCode::Insert);
+        assert_eq!(keys(&app), [(ins, false), (del, true), (edit, true)]);
+        key(&mut app, KeyCode::Delete);
+        assert!(app.hotlist.is_empty());
     }
 }

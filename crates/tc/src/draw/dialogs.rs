@@ -1,12 +1,13 @@
 use super::chrome::{line_edit, list_button, text_box};
 use super::help::show_help;
-use super::{ACCENT, MUTED, TEXT, modal};
+use super::{ACCENT, MUTED, TEXT, icons, modal};
 use eframe::egui::{
     self, Button, Color32, ComboBox, Context, Label, Response, RichText, ScrollArea, Sense,
     TextStyle, Ui, vec2,
 };
 use tc::app::{
-    App, FilterForm, FindForm, FormRow, Mode, PropsForm, RenameForm, SettingsForm, SyncForm,
+    App, BmClick, BookmarkForm, BookmarkRow, FilterForm, FindForm, FormRow, Mode, PropsForm,
+    RenameForm, SettingsForm, SyncForm,
 };
 use tc::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
 use tc::fmt::{ProcInfo, procs_confirm, procs_info};
@@ -22,6 +23,8 @@ enum FormAct {
     Key(KeyCode),
     /// List row clicked: move the selection by this many rows, Enter when double-clicked.
     Pick(isize, bool),
+    /// Bookmarks edit page.
+    Bookmark(BmClick),
 }
 pub(super) fn overlays(ctx: &Context, app: &mut App) {
     let mut pressed = None;
@@ -40,6 +43,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         (None, Mode::SyncForm(form)) => show_sync_form(ctx, form),
         (None, Mode::Settings(form)) => show_settings(ctx, form),
         (None, Mode::Props(form)) => show_props(ctx, form),
+        (None, Mode::BookmarkEdit(form)) => show_bookmark_edit(ctx, form),
         (None, Mode::Filter(form)) => show_filter(ctx, form),
         (None, Mode::Procs(p)) => match (&p.draft, procs_info(p)) {
             (Some(d), _) => show_form(
@@ -99,12 +103,13 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         Some(FormAct::Row(i)) => app.form_click(i),
         Some(FormAct::Choose(i, k)) => app.form_choose(i, k),
         Some(FormAct::Key(c)) => app.on_key(KeyEvent::new(c, KeyModifiers::NONE)),
+        Some(FormAct::Bookmark(c)) => app.bookmark_click(c),
         Some(FormAct::Pick(by, double)) => {
             let key = if by < 0 { KeyCode::Up } else { KeyCode::Down };
             for _ in 0..by.unsigned_abs() {
                 app.on_key(KeyEvent::new(key, KeyModifiers::NONE));
             }
-            if double {
+            if double || app.list_click_opens() {
                 app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             }
         }
@@ -114,47 +119,78 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
 
 /// Dialog as egui widgets; returns the key of a clicked button or checkbox (the app owns the keys).
 fn show_dialog(ctx: &Context, id: &str, d: &Dialog) -> Option<FormAct> {
-    modal(id)
-        .show(ctx, |ui| {
-            ui.set_min_width(420.0);
-            ui.set_max_width(720.0);
-            match d {
-                Dialog::Text { title, text } => {
-                    ui.heading(*title);
-                    ui.separator();
-                    text_with_keys(ui, text).map(FormAct::Key)
-                }
-                Dialog::Edit {
-                    title,
-                    head,
-                    line,
-                    tail,
-                } => {
-                    ui.heading(*title);
-                    ui.separator();
-                    if !head.is_empty() {
-                        ui.label(head.as_str());
-                    }
-                    line_edit(ui, line);
-                    text_with_keys(ui, tail.trim_start()).map(FormAct::Key)
-                }
-                Dialog::List {
-                    title,
-                    rows,
-                    sel,
-                    empty,
-                } => {
-                    ui.heading(title);
-                    ui.separator();
-                    let act = list_rows(ui, rows, *sel);
-                    if rows.is_empty() {
-                        ui.label(*empty);
-                    }
-                    act
-                }
+    let r = modal(id).show(ctx, |ui| {
+        ui.set_min_width(420.0);
+        ui.set_max_width(720.0);
+        match d {
+            Dialog::Text { title, text } => {
+                ui.heading(*title);
+                ui.separator();
+                text_with_keys(ui, text).map(FormAct::Key)
             }
-        })
-        .inner
+            Dialog::Edit {
+                title,
+                head,
+                line,
+                tail,
+            } => {
+                ui.heading(*title);
+                ui.separator();
+                if !head.is_empty() {
+                    ui.label(head.as_str());
+                }
+                line_edit(ui, line);
+                text_with_keys(ui, tail.trim_start()).map(FormAct::Key)
+            }
+            Dialog::List {
+                title,
+                rows,
+                sel,
+                empty,
+                buttons,
+            } => {
+                ui.heading(title);
+                ui.separator();
+                let act = list_rows(ui, rows, *sel);
+                if rows.is_empty() {
+                    ui.label(*empty);
+                }
+                act.or(list_buttons(ui, buttons))
+            }
+        }
+    });
+    // a click beside a list closes it (Esc); prompts and questions stay until answered
+    let outside = matches!(d, Dialog::List { .. }) && r.backdrop_response.clicked();
+    r.inner.or(outside.then_some(FormAct::Key(KeyCode::Esc)))
+}
+
+/// Buttons under a list; the key of the clicked one.
+/// One-glyph labels are icons (icon font), the tooltip names the key.
+fn list_buttons(ui: &mut Ui, buttons: &[(&str, &str, KeyCode, bool)]) -> Option<FormAct> {
+    if buttons.is_empty() {
+        return None;
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        let mut act = None;
+        for &(label, tip, code, enabled) in buttons {
+            let text = match label.chars().count() {
+                1 => RichText::new(label).font(icons()),
+                _ => RichText::new(label),
+            };
+            let b = Button::new(text).sense(Sense::CLICK);
+            if ui
+                .add_enabled(enabled, b)
+                .on_hover_text(tip)
+                .on_disabled_hover_text(tip)
+                .clicked()
+            {
+                act = Some(FormAct::Key(code));
+            }
+        }
+        act
+    })
+    .inner
 }
 
 fn list_rows(ui: &mut Ui, rows: &[String], sel: usize) -> Option<FormAct> {
@@ -308,6 +344,98 @@ fn show_info(ctx: &Context, info: &ProcInfo) -> Option<FormAct> {
     r.backdrop_response
         .clicked()
         .then_some(FormAct::Key(KeyCode::Esc))
+}
+
+/// Icon buttons of the bookmark list and edit page; must exist in the icon font (test).
+pub(super) const BM_ICONS: [&str; 4] = ["✚", "➖", "⏶", "⏷"];
+
+fn icon_button(ui: &mut Ui, icon: &str, tip: &str) -> bool {
+    ui.add(Button::new(RichText::new(icon).font(icons())).sense(Sense::CLICK))
+        .on_hover_text(tip)
+        .clicked()
+}
+
+/// All bookmarks as rows: order buttons, alias, path, delete; Add, Save, Cancel below.
+fn show_bookmark_edit(ctx: &Context, form: &BookmarkForm) -> Option<FormAct> {
+    let r = modal("bookmark-edit").show(ctx, |ui| {
+        ui.set_width(860.0);
+        ui.heading("Edit bookmarks");
+        ui.separator();
+        let mut act = None;
+        ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            egui::Grid::new("bookmark-edit-grid")
+                .num_columns(5)
+                .spacing(vec2(8.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label("");
+                    ui.label("");
+                    ui.label(RichText::new("Alias").strong().color(MUTED));
+                    ui.label(RichText::new("Path").strong().color(MUTED));
+                    ui.end_row();
+                    for (i, row) in form.rows.iter().enumerate() {
+                        if let Some(c) = bookmark_row(ui, i, row, form.focus) {
+                            act = Some(c);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+        if form.rows.is_empty() {
+            ui.label(RichText::new("(no bookmarks, ✚ adds the current directory)").color(MUTED));
+        }
+        if let Some(e) = &form.error {
+            ui.label(RichText::new(e).color(Color32::LIGHT_RED));
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if icon_button(ui, BM_ICONS[0], "Add the current directory (Insert)") {
+                act = Some(BmClick::Add);
+            }
+            if ui.add(Button::new("Save").sense(Sense::CLICK)).clicked() {
+                act = Some(BmClick::Save);
+            }
+            if ui.add(Button::new("Cancel").sense(Sense::CLICK)).clicked() {
+                act = Some(BmClick::Cancel);
+            }
+        });
+        act
+    });
+    r.inner.map(FormAct::Bookmark)
+}
+
+/// One edit row: up / down, alias and path fields, delete.
+fn bookmark_row(
+    ui: &mut Ui,
+    i: usize,
+    row: &BookmarkRow,
+    focus: (usize, usize),
+) -> Option<BmClick> {
+    let mut act = None;
+    ui.horizontal(|ui| {
+        if icon_button(ui, BM_ICONS[2], "Move up (Ctrl+Up)") {
+            act = Some(BmClick::Up(i));
+        }
+        if icon_button(ui, BM_ICONS[3], "Move down (Ctrl+Down)") {
+            act = Some(BmClick::Down(i));
+        }
+    });
+    ui.label(RichText::new(format!("{}", i + 1)).color(MUTED));
+    for (c, (l, w)) in [(&row.alias, 200.0), (&row.path, 480.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let r = ui.allocate_ui(vec2(w, ui.spacing().interact_size.y), |ui| {
+            ui.set_width(w);
+            text_box(ui, l, focus == (i, c))
+        });
+        if r.inner.clicked() {
+            act = Some(BmClick::Field(i, c));
+        }
+    }
+    if icon_button(ui, BM_ICONS[1], "Delete this bookmark (F8)") {
+        act = Some(BmClick::Delete(i));
+    }
+    act
 }
 
 /// OK / Cancel buttons; not focusable, so Tab, Space and Enter stay with the app.

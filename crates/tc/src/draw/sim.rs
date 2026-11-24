@@ -60,7 +60,7 @@ fn tables_and_dialogs_draw() {
         shown.contains("Highlights") && shown.contains("Ctrl+B"),
         "{shown}"
     );
-    assert!(shown.contains("bookmarks (hotlist)"), "{shown}");
+    assert!(shown.contains("bookmarks"), "{shown}");
     run(&mut app, vec![press(Key::Escape, Modifiers::NONE)]);
     run(&mut app, vec![press(Key::ArrowDown, Modifiers::NONE)]);
     run(&mut app, vec![press(Key::M, Modifiers::CTRL)]);
@@ -215,4 +215,68 @@ fn dialog_buttons_take_no_egui_focus() {
         ctx.memory(eframe::egui::Memory::focused).is_none(),
         "click: {shown}"
     );
+}
+
+#[test]
+/// The title row with its buttons leaves room for the file list.
+fn panel_draws_title_buttons_and_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    frame(&ctx, &mut app, &mut look, vec![]);
+    let shown = frame(&ctx, &mut app, &mut look, vec![]);
+    assert!(shown.contains("a.txt") && shown.contains("🕓"), "{shown}");
+}
+
+#[test]
+/// Toolbar and panel button icons exist in `emoji-icon-font` (else they draw as empty boxes).
+fn icons_exist_in_icon_font() {
+    use eframe::egui::{FontFamily, FontId};
+    let ctx = egui::Context::default();
+    let mut fonts = egui::FontDefinitions::default();
+    let only = FontFamily::Name("only".into());
+    fonts
+        .families
+        .insert(only.clone(), vec!["emoji-icon-font".into()]);
+    ctx.set_fonts(fonts);
+    ctx.run_ui(RawInput::default(), |_| {})
+        .textures_delta
+        .clear();
+    let id = FontId::new(16.0, only);
+    let icons = tc::app::TOOLBAR.iter().flat_map(|g| g.iter().map(|t| t.0));
+    let panel = super::panel::BUTTONS.iter().map(|b| b.0);
+    for icon in icons.chain(panel).chain(super::dialogs::BM_ICONS) {
+        assert!(ctx.fonts_mut(|f| f.has_glyphs(&id, icon)), "{icon}");
+    }
+}
+
+#[test]
+/// Bookmarks edit page draws every row's alias and path, and its buttons.
+fn bookmark_edit_page_draws_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    app.hotlist = vec![tc_core::hotlist::Bookmark {
+        alias: "Work".into(),
+        path: "/srv/work".into(),
+    }];
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    frame(
+        &ctx,
+        &mut app,
+        &mut look,
+        vec![press(Key::B, Modifiers::CTRL)],
+    );
+    frame(
+        &ctx,
+        &mut app,
+        &mut look,
+        vec![press(Key::F4, Modifiers::NONE)],
+    );
+    let shown = frame(&ctx, &mut app, &mut look, vec![]);
+    for t in ["Edit bookmarks", "Work", "/srv/work", "Save", "Cancel"] {
+        assert!(shown.contains(t), "{t}: {shown}");
+    }
 }

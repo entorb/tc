@@ -2,6 +2,7 @@
 
 mod help;
 
+use crate::KeyCode;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -144,6 +145,8 @@ pub enum Dialog<'a> {
         /// Position in `rows`.
         sel: usize,
         empty: &'static str,
+        /// Buttons under the list: label (one glyph: an icon), tooltip, the key a click sends, enabled.
+        buttons: Vec<(&'static str, &'static str, KeyCode, bool)>,
     },
 }
 
@@ -171,7 +174,43 @@ fn list_dialog<'a>(
         sel: view.iter().position(|&i| i == sel).unwrap_or(0),
         rows: view.iter().map(|&i| rows[i].label().into_owned()).collect(),
         empty,
+        buttons: Vec::new(),
     })
+}
+
+/// Bookmarks with Add (while the local panel directory is not listed), Delete (the selected
+/// row) and Edit (the edit page).
+fn bookmarks_dialog(app: &App, sel: usize) -> Option<Dialog<'_>> {
+    let mut d = list_dialog(
+        ("Bookmarks", &app.hotlist, sel),
+        &app.list_filter,
+        "(empty, Insert or Ctrl+D adds the current directory)",
+    )?;
+    if let Dialog::List { rows, buttons, .. } = &mut d {
+        let add = app.can_bookmark();
+        let any = !rows.is_empty();
+        buttons.extend([
+            (
+                "✚",
+                "Add the current directory (Insert)",
+                KeyCode::Insert,
+                add,
+            ),
+            (
+                "➖",
+                "Delete the selected bookmark (Delete)",
+                KeyCode::Delete,
+                any,
+            ),
+            (
+                "Edit…",
+                "Edit all: order, alias, path, add, delete (F4)",
+                KeyCode::F(4),
+                true,
+            ),
+        ]);
+    }
+    Some(d)
 }
 
 fn text<'a>(title: &'a str, text: String) -> Option<Dialog<'a>> {
@@ -209,11 +248,7 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             OK_CANCEL,
         ),
         Mode::Editor(_, l) => edit("Editor not found, enter editor command", "", l, OK_CANCEL),
-        Mode::Hotlist(sel) => list_dialog(
-            ("Hotlist", &app.hotlist, *sel),
-            &app.list_filter,
-            "(empty, Insert or Ctrl+D adds the current directory)",
-        ),
+        Mode::Bookmarks(sel) => bookmarks_dialog(app, *sel),
         Mode::Popular(sel) => list_dialog(
             ("Popular directories", &app.popular, *sel),
             &app.list_filter,
@@ -236,15 +271,6 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             ("Connections", &app.connections, *sel),
             &app.list_filter,
             "(empty, Insert adds one)",
-        ),
-        Mode::HotlistAlias(row, l) => edit(
-            "Bookmark alias",
-            &format!(
-                "{}\n(empty removes the alias)",
-                app.hotlist[*row].path.to_string_lossy()
-            ),
-            l,
-            "[Enter] Save   [Esc] Cancel",
         ),
         Mode::ConnEdit(_, l) => edit(
             "Connection",
