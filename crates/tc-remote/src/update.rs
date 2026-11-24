@@ -53,7 +53,15 @@ mod tests {
     #[test]
     #[ignore = "network: asks GitHub"]
     fn live_latest_tag() {
-        let tag = super::latest_tag().unwrap();
+        let tag = match super::latest_tag() {
+            Ok(tag) => tag,
+            // Unauthenticated GitHub quota (60/h per IP) answers 403: not a code bug
+            Err(e) if e.to_string().contains("http status: 403") => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
         assert!(tag.starts_with('v'), "{tag}");
     }
 }
