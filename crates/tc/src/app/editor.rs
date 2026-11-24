@@ -78,7 +78,7 @@ impl App {
         code: KeyCode,
     ) {
         match code {
-            KeyCode::Char('y' | 'Y') => self.open_viewer(path),
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.open_viewer(path),
             KeyCode::Char('n' | 'N') if can_load => self.spawn_load(path, None),
             KeyCode::Char('n' | 'N') | KeyCode::Esc => {}
             _ => {
@@ -637,7 +637,7 @@ impl App {
             Ok(SizeCheck::Large(n)) => {
                 self.mode = ask(
                     format!(
-                        "File is {}, open in viewer instead?\n\n[y] Viewer   [n] Edit   [Esc] Cancel",
+                        "File is {}, open in viewer instead?\n\n[y/Enter] Viewer   [n] Edit   [Esc] Cancel",
                         edit::human(n)
                     ),
                     true,
@@ -645,7 +645,7 @@ impl App {
             }
             Err(e @ Error::OutOfMemory { .. }) => {
                 self.mode = ask(
-                    format!("{e}. Open in viewer?\n\n[y] Viewer   [Esc] Cancel"),
+                    format!("{e}. Open in viewer?\n\n[y/Enter] Viewer   [Esc] Cancel"),
                     false,
                 )
             }
@@ -863,7 +863,7 @@ mod tests {
         key(&mut app, KeyCode::Char('x'));
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::AskExit(_)));
-        key(&mut app, KeyCode::Char('y'));
+        key(&mut app, KeyCode::Enter); // Enter = yes
         assert!(matches!(
             app.mode,
             Mode::AskSave {
@@ -871,7 +871,7 @@ mod tests {
                 ..
             }
         ));
-        key(&mut app, KeyCode::Char('y')); // to LF
+        key(&mut app, KeyCode::Enter); // to LF
         wait(&mut app);
         assert!(matches!(app.mode, Mode::Normal));
         let text = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();

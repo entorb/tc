@@ -319,11 +319,14 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
                 Step::Encoding => format!("File is {}. Convert to UTF-8?", editor.encoding_name()),
                 Step::Eol => "Convert line endings to LF?".to_owned(),
             };
-            text("Save", format!("{t}\n\n[y] Yes   [n] No   [Esc] Cancel"))
+            text(
+                "Save",
+                format!("{t}\n\n[y/Enter] Yes   [n] No   [Esc] Cancel"),
+            )
         }
         Mode::AskExit(_) => text(
             "Edit",
-            "Save changes?\n\n[y] Yes   [n] No   [Esc] Cancel".to_owned(),
+            "Save changes?\n\n[y/Enter] Yes   [n] No   [Esc] Cancel".to_owned(),
         ),
         _ => None,
     }

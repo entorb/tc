@@ -511,7 +511,7 @@ impl App {
                 can_load,
             } => self.ask_viewer_key(path, text, can_load, key.code),
             Mode::AskExit(editor) => match key.code {
-                KeyCode::Char('y' | 'Y') => {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     self.next_save_prompt(editor, true, false, Step::Encoding)
                 }
                 KeyCode::Char('n' | 'N') => self.leave_editor(),
@@ -530,6 +530,11 @@ impl App {
                 step,
             } => match key.code {
                 KeyCode::Char('r' | 'R') if step == Step::Changed => self.reload_editor(editor),
+                // Enter answers yes, except over another program's changes
+                KeyCode::Enter if step != Step::Changed => match step {
+                    Step::Encoding => self.next_save_prompt(editor, exit, true, Step::Eol),
+                    _ => self.spawn_save(editor, to_utf8, true, exit),
+                },
                 KeyCode::Char(c @ ('y' | 'Y' | 'n' | 'N')) => {
                     let yes = c.eq_ignore_ascii_case(&'y');
                     match step {

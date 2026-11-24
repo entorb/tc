@@ -517,7 +517,7 @@ F2 / Ctrl+S     save: trailing blanks trimmed, final line break
                 headings, lists and ``` blocks
 F5              Markdown: add those blank lines now (undo:
                 Ctrl+Z)
-Esc / F10       exit (asks if unsaved)
+Esc / F10       exit (asks if unsaved: y / Enter saves)
                 changed on disk (checked each second, and on
                 save): no edits: read again; else asks:
                 y overwrite, r reload (drops edits), n keep
