@@ -28,8 +28,8 @@ Adding features of
 ## Highlights
 
 - **Highly performant**
-- **File Stats (ncdu)**: Ctrl+Space shows the biggest files and directories of a tree; browse, view, edit, delete; toggle between bytes and file count
 - **SSH / SFTP / FTP / FTPS**: Ctrl+N, remote panels work like local ones
+- **File Stats (ncdu)**: Ctrl+Space shows the biggest files and directories of a tree; browse, view, edit, delete; toggle between bytes and file count
 - **Processes (top/btop)**: Ctrl+P, sort, filter, kill; on an SSH/SFTP panel those of the server
 - **Synchronize directories**: Ctrl+E
 - **Multi-file-rename**: Ctrl+M with undo
@@ -50,25 +50,28 @@ scripts/run_checks.sh/.cmd # same checks as CI
 
 Opens in the current directory; extra arguments are passed on. On Linux `tc` needs X11 or Wayland with `libxkbcommon` and OpenGL.
 
-Downloaded binaries are not signed:
+Releases are zips (`tc-<OS>-<arch>.zip`) holding the plain `tc` / `tc.exe`. The binaries are not signed:
 
-- macOS: `xattr -d com.apple.quarantine ./tc-macos && chmod +x ./tc-macos`
+- macOS: `xattr -d com.apple.quarantine ./tc`
 - Windows: SmartScreen **More info → Run anyway**, or `Unblock-File .\tc.exe`
 
 ## Features
 
 ### Panels
 
-- Norton Commander look; two panels with tabs (Ctrl+T); local tabs are restored at start
+- Norton Commander look; two panels with tabs (Ctrl+T); local tabs are restored at start; Ctrl+Shift+T reopens a closed local tab (last 10), Ctrl+Shift+O moves a tab to the other side
 - Font size (Ctrl+= / Ctrl+-, F9 → Tools → Settings) is saved with the session
 - Left / Right go to the parent / into the directory under the cursor
+- Tool screens (find results, sync, File Stats, processes, multi-rename) cover the whole window with their own F-key bar
+- Popups close by their ✖ button or a click beside them (running copies, scans and connects only by ✖); F1 help opens in its own window (move it beside tc, which stays usable; clicking a key line runs it in tc)
 - Status line shows the free space of the local filesystem (not remote, archive or found lists)
 - Directories load in a worker; huge or slow directories stay usable, Esc cancels
-- Select by key, mouse, glob mask (`+` / `-` / `*`); Space sizes a directory
-- Sort by name, extension, date, size (Ctrl+F3..F6 or title click)
-- Quick search (Ctrl+S), quick filter (`/`); dot files are always shown
+- Select by key, mouse (Shift / Ctrl+click), glob mask (`+` / `-` / `*`), all (Ctrl+A), same extension (Alt+.); Ctrl+Shift+R restores a dropped selection (same directory only); Space sizes a directory; status line shows `n of total selected`
+- Right-click menu on entries (view, edit, copy, move, rename, delete, clipboard, properties, terminal); middle click opens a directory in a new tab
+- Sort by name, extension, date, size (Ctrl+F3..F6 or title click: Name, Ext, Size, Date)
+- Quick search (type a name, or Ctrl+S), filter popup (`/`: name, size, age, file types of the directory; ends on leaving it or Esc); dot files are always shown; F10 quits
 - Git: ignored entries (`.gitignore`, `info/exclude`, global excludes) and `.git` dirs shown dim; local panels only, re-read on reload
-- History (Alt+Left/Right), drives (Alt+F1/F2), bookmarks (Ctrl+D adds, Ctrl+B lists: Insert/`a` adds, Delete/Backspace removes, F4/`e` edits the alias, Ctrl+Up/Down or Shift+Up/Down reorders; file lines `alias<TAB>path` or `path`, older files load unchanged, a tab in an alias-less path of an old file misparses)
+- History (Alt+Left/Right; Alt+Down or the 🕓 panel button lists it), Ctrl+Left/Right shows the cursor directory in the other panel, drives (Alt+F1/F2), bookmarks (Ctrl+D adds, Ctrl+B lists: Insert/`a` adds, Delete/Backspace removes, F4/`e` edits the alias, Ctrl+Up/Down or Shift+Up/Down reorders; file lines `alias<TAB>path` or `path`, older files load unchanged, a tab in an alias-less path of an old file misparses)
 - Sync browsing (Ctrl+K): entering a directory or going up in one panel repeats it in the other; local directories only, switches off when the other panel cannot follow
 - Popular directories (Ctrl+Z): local directories you visit, ranked by visits and recency (max 500, saved in `popular`); Enter goes there, Delete forgets; not remote, archive or found lists
 - Compare panels (Ctrl+Y): per panel select newer, single (only there), different (size or date), or combinations; files only, same-named directories never differ; Enter repeats the last choice

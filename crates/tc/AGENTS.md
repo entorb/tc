@@ -11,6 +11,12 @@ The app: library `lib.rs` (`app`, `fmt`: state, keys, dialogs, help; no drawing)
 - Items shared across modules are `pub(super)` and imported in `app.rs`; siblings use `super::Name`.
 - Text fields: `draw/chrome.rs` `text_box` is an egui `TextEdit` with keyboard events hidden (the app owns keys); a mouse caret goes back through `App::set_caret` (`apply_caret`; no key replay). Read egui's caret from `out.state`, not `out.cursor_range` (computed before the mouse). Never put a click sense on top of a text field.
 - Render only visible rows; no I/O, sorting or allocation per frame. Slow I/O runs in a worker with progress and cancel.
+- Table cells: wrap header and body cells in `draw/chrome.rs` `cell` (vertically centered, `right` for numbers); a plain `ui.label` sits at the top and misaligns next to a right-aligned cell. New tables use `draw/lists.rs` `click_table` / `head_row`, new headers get a line in `draw/sim.rs` `table_headers_share_one_line`.
+- Popup sizes: inside, use `ui.available_height()`, never `min_rect()` after `set_min_size` (already the full size). `set_max_size` does not stop children from widening a popup: an unclipped label (`TextWrapMode::Extend`, `clip(false)` column) grows it past the window and egui shoves it off the left edge, only while that row is visible. Text meant to overflow a cell is painted (`painter().galley`), not added. Test popups by their `area_rect` across frames, not only by painted texts.
+- F1 help is its own OS window (`show_viewport_immediate`), tc stays usable: its keys go to `App::help_key`, never through `on_key`. Tests have no native windows (embedded): there the help must not read input (tc's events, handled twice).
+- Scroll behavior (no rubber-band, no coasting) is set once for every scroll area in `draw.rs` `setup_fonts` (test `scrolling_has_no_rubber_band`); never per widget. Look and feel that should hold app-wide belongs in the global style, not in one screen's code.
+- Row math against egui tables: a row's pitch is its height plus `spacing().item_spacing.y`. Visible rows come from the output's `inner_rect`, not the space reserved. To force an offset, let egui clamp it, and read the offset back only in a frame that didn't force one (that frame still reports the old offset). Test scrolling with End / wheel to the last line (`help_scrolls_to_the_last_line`).
+- Scrolling: set a scroll offset or `scroll_to_*` only when the app's row changed, never every frame (undoes the wheel's smooth steps; jitters and repaints forever on fractional DPI). Thousands of shapes (treemap): build one cached `Mesh`, not per-frame stroked rects.
 
 ## UI feature checklist
 
@@ -23,3 +29,4 @@ A user-facing feature is done when all apply:
 - F9 menu entry; toolbar icon if it is a tool (same icon font, tooltip shows the key).
 - List screens follow conventions: `/` filter, Ctrl+R refresh, Esc / `q` / F10 close.
 - README: one overview line under the matching feature section, limits included; no key details.
+- Looked at: `scripts/ui_shot.sh` screenshot of the new screen, read it as an image (layout, clipping, footer).

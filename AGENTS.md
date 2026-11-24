@@ -29,11 +29,12 @@ Each of these shipped as a bug once.
 - Temp names: `.tc-tmp-*`; never remove a temp file tc did not create (remote overwrite spares foreign ones).
 - FTP has no exclusive create: refuse writes when the target listing fails instead of risking an overwrite.
 - Child processes (external editor, `ssh`, clipboard tools): wait or reap them; no zombies.
+- Windows: `fs::rename` refuses to replace a read-only file (git objects); overwrite via `ops::rename_over`. File-op tests run on all three OSes in CI: no `#[cfg(unix)]` on a test unless the API is Unix-only.
 - Windows: pass shell commands raw to `cmd /C` (no Rust arg quoting); Ctrl+Insert is taken by the system, offer Alt+Shift+C.
 - macOS may eat Ctrl+F-keys and Alt keys. Every feature needs an F9 menu entry.
 - Read state (cursor name, selection) before replacing the data it points into (File Stats rescan bug).
 - Empty filter + Enter keeps the list; it is not "filter matches nothing".
-- Toolbar hidden on sub-screens (File Stats, Find results, Sync, Processes), disabled in dialogs and prompts; icons come from one loaded emoji font.
+- Tool screens (File Stats, Find results, Sync, Processes, Multi-rename: `App::sub_screen`) own the window: no menu bar or toolbar, F-key bar at the bottom. Toolbar disabled in dialogs and prompts; icons come from one loaded emoji font.
 - Footer keys must appear in their F1 help: test `footer_keys_are_documented_in_their_help` in `app.rs`.
 
 ## Reference Code
@@ -64,6 +65,8 @@ Project `entorb_tc` ([.sonarcloud.properties](.sonarcloud.properties)), scans ev
 
 - No new bugs, vulnerabilities, hotspots or smells; low duplication.
 - Cognitive complexity max 30 (rust:S3776). Clippy counts lower than Sonar: near ~20 branches/nesting, extract match arms, loops, `let`-chains into helpers. Sonar counts nested closures: egui `show`/`ui.horizontal`/table `header`/`body` callbacks with branches go into `fn`s (tab bar, header, row, dropdown); `tick`-style `if let … return` chains go into `*_tick` helpers. New crates need `[lints] workspace = true`.
+- Long `loop`/`while` bodies with several `if … continue` token branches (tokenizers, scanners): move each branch into a helper returning `bool`/`Option` before it passes ~25 (rust:S3776 hit `syntax::tokens`).
+- `set_readonly(false)` / permission changes (rust:S2612) are flagged even in `#[cfg(windows)]` code: end the line with `// NOSONAR rust:S2612: <why>`.
 - No wildcard imports (rust:S2208), also in `mod tests`/`mod mem`.
 - Method paths, not trivial closures: `is_some_and(JoinHandle::is_finished)` (rust:S1612). Also `.and_then(std::ffi::OsStr::to_str)`, not `|e| e.to_str()`.
 - Fix at the root cause; `NOSONAR` only for proven false positives (comment why).
@@ -91,6 +94,7 @@ Files and directories can be huge (multi-GB logs, 100k-entry dirs, slow mounts).
 - `cargo fmt`, `cargo shear --fix`.
 - `scripts/run_checks.sh` runs every `scripts/chk_*.sh`: pre-commit (`prek`, may auto-fix: re-run), fmt, clippy `-D warnings`, tests, shear, `cargo deny`, cspell (add real words to `cspell-words.txt`).
 - Long compiler output: `| grep -E '^(error|warning)' | head`; fix the first error first.
+- UI check (Linux devbox, headless): `scripts/ui_shot.sh STEP...` builds tc, runs it in Xvfb (1280x800), runs the steps, then Read the PNGs. Steps: `"shot F.png"`, `"key F1 ctrl+f shift+F4 Down"` (XTEST via `scripts/ui_key.py`), `"wait 2"`, or any xdotool command (`"type abc"`, `"mousemove 300 300 click 1"`). Example: `scripts/ui_shot.sh "key F9" "shot $TMP/menu.png"`. Save PNGs to the scratchpad, never the repo. tc opens in the caller's directory and uses the real user config. Never send keys through `xdotool key`: on Xvfb it adds Alt to F-keys (F1 becomes Alt+F1).
 
 Tests:
 
@@ -103,9 +107,9 @@ Tests:
 2. Non-trivial logic tested; remote changes have `live_*` tests; file ops follow `crates/tc-core/AGENTS.md`.
 3. Context7 consulted for new crate APIs.
 4. UI changes: follow the checklist in `crates/tc/AGENTS.md`.
-5. Continues improvement:
+5. Continuous improvement:
    - if a complex problem was solved or a bug created and fixed, update AGENTS.md files to prevent similar issues in future.
-   - if many tokens where used on a task, suggest ways for future token reduction
+   - if many tokens were used on a task, suggest ways for future token reduction
 
 ## Agent Efficiency
 
