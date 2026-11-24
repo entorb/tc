@@ -1,8 +1,9 @@
 //! Lazy text viewer: keeps only the byte offset of the top line, reads visible lines on demand.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use encoding_rs::Encoding;
 use regex::Regex;
@@ -26,12 +27,15 @@ pub struct Viewer {
     top_line: Option<u64>,
     /// Show bytes as offset, hex and ASCII rows of 16; `top` is then a multiple of 16.
     hex: bool,
+    /// Modification time at open, to notice outside changes.
+    mtime: Option<SystemTime>,
 }
 
 impl Viewer {
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = crate::ops::open_regular(path)?;
-        let len = file.metadata()?.len();
+        let meta = file.metadata()?;
+        let len = meta.len();
         // shortcut: guesses from the first chunk only, upgrade if later text differs
         let mut head = Vec::with_capacity(CHUNK);
         (&file).take(CHUNK as u64).read_to_end(&mut head)?;
@@ -48,7 +52,31 @@ impl Viewer {
             wrap: false,
             top_line: Some(0),
             hex: false,
+            mtime: meta.modified().ok(),
         })
+    }
+
+    /// The file was written (time or size changed) since it was opened.
+    pub fn changed_on_disk(&self) -> bool {
+        fs::metadata(&self.path)
+            .is_ok_and(|m| m.len() != self.len || m.modified().ok() != self.mtime)
+    }
+
+    /// Open the file again after it changed: same position and view settings, clamped to the
+    /// new length. On error the old view stays.
+    pub fn reload(&mut self) -> io::Result<()> {
+        let mut fresh = Self::open(&self.path)?;
+        fresh.wrap = self.wrap;
+        fresh.left = self.left;
+        fresh.set_hex(self.hex)?;
+        if self.top <= fresh.len {
+            // shortcut: a rewritten file may put `top` mid-line, fine for appended logs
+            (fresh.top, fresh.top_line) = (self.top, self.top_line);
+        } else {
+            fresh.goto_offset(fresh.len)?;
+        }
+        *self = fresh;
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -405,6 +433,22 @@ mod tests {
         // detected as a legacy encoding, never fails on odd bytes
         let (_t, mut v) = viewer(b"\xff\xfe\n");
         assert_eq!(v.lines(5, 80).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reload_keeps_position_and_clamps() {
+        let (mut t, mut v) = viewer(b"a\nb\nc\n");
+        v.scroll(1).unwrap();
+        assert!(!v.changed_on_disk());
+        std::io::Write::write_all(&mut t, b"d\n").unwrap(); // appended: size differs
+        assert!(v.changed_on_disk());
+        v.reload().unwrap();
+        assert!(!v.changed_on_disk());
+        assert_eq!(v.lines(10, 80).unwrap(), ["b", "c", "d"]);
+        assert_eq!(v.top_line(), Some(1));
+        fs::write(t.path(), "x").unwrap(); // shrunk below the top
+        v.reload().unwrap();
+        assert_eq!(v.lines(10, 80).unwrap(), ["x"]);
     }
 
     #[test]

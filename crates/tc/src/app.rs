@@ -304,6 +304,9 @@ pub struct App {
     pub connections_file: Option<PathBuf>,
     /// Remote file open in the editor: saves are uploaded to it; the temp copy lives until the editor closes.
     edit_remote: Option<(Arc<dyn Remote>, PathBuf, TempDir)>,
+    /// Last check of the viewed or edited file for outside changes, and the change already asked about.
+    watch_at: Instant,
+    watch_seen: Option<std::time::SystemTime>,
     /// Daily update check on (settings), the local date it last ran, and the running check.
     update_check: bool,
     update_day: String,
@@ -380,6 +383,8 @@ impl App {
             connections: Vec::new(),
             connections_file: None,
             edit_remote: None,
+            watch_at: Instant::now(),
+            watch_seen: None,
             update_check: true,
             update_day: String::new(),
             update_job: None,
@@ -524,6 +529,7 @@ impl App {
                 exit,
                 step,
             } => match key.code {
+                KeyCode::Char('r' | 'R') if step == Step::Changed => self.reload_editor(editor),
                 KeyCode::Char(c @ ('y' | 'Y' | 'n' | 'N')) => {
                     let yes = c.eq_ignore_ascii_case(&'y');
                     match step {
@@ -1247,6 +1253,7 @@ impl App {
     /// Collect a finished worker result.
     pub fn tick(&mut self) {
         self.free_tick();
+        self.watch_tick();
         // dialogs keep a pending listing waiting so its error cannot replace them
         if matches!(self.mode, Mode::Normal) {
             for p in &mut self.panels {

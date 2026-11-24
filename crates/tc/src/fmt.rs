@@ -310,7 +310,12 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
         Mode::AskViewer { text: t, .. } => text("Edit", t.clone()),
         Mode::AskSave { editor, step, .. } => {
             let t = match step {
-                Step::Changed => "File changed on disk. Overwrite it?".to_owned(),
+                Step::Changed => {
+                    return text(
+                        "File changed on disk",
+                        "Another program changed the file.\n\n[y] Overwrite it with mine   [r] Reload from disk (drops my edits)\n[n] / [Esc] Keep editing".to_owned(),
+                    );
+                }
                 Step::Encoding => format!("File is {}. Convert to UTF-8?", editor.encoding_name()),
                 Step::Eol => "Convert line endings to LF?".to_owned(),
             };

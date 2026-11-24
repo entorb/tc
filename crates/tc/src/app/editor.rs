@@ -5,6 +5,7 @@ use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::thread;
+use std::time::{Duration, Instant};
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
 use tc_core::vfs::{self, Side};
@@ -12,6 +13,9 @@ use tc_core::{
     Error, ops, search,
     view::{Viewer, parse_offset},
 };
+
+/// Files up to this size are saved and reloaded on the UI thread: no worker, no panel flash.
+const INLINE_BYTES: u64 = 4 << 20;
 
 /// What a text prompt in the viewer or editor asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,8 +678,8 @@ impl App {
             .as_ref()
             .map(|(r, p, _)| (r.clone(), p.clone()));
         // a worker hides the editor until it is done: the panels flash for a moment
-        // shortcut: saved inline up to 4 MiB on disk, bigger or remote files keep the worker
-        let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= 4 << 20);
+        // shortcut: saved inline up to INLINE_BYTES on disk, bigger or remote files keep the worker
+        let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= INLINE_BYTES);
         if upload.is_none() && small {
             let result = editor.save(to_utf8, to_lf, &AtomicU64::new(0), &AtomicBool::new(false));
             return self.saved(editor, result, exit);
@@ -691,6 +695,67 @@ impl App {
             }
             Done::Saved(editor, result)
         });
+    }
+
+    /// Once a second: a viewed file that changed on disk is read again, an edited one too unless
+    /// it has unsaved edits; then the editor asks (once per change).
+    pub(super) fn watch_tick(&mut self) {
+        if self.watch_at.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.watch_at = Instant::now();
+        match &mut self.mode {
+            Mode::View { view, .. } if view.changed_on_disk() => {
+                self.note = match view.reload() {
+                    Ok(()) => "reloaded: the file changed on disk".into(),
+                    Err(e) => format!("reload failed: {e}"),
+                };
+            }
+            Mode::Edit {
+                editor,
+                error: None,
+            } if editor.changed_on_disk() && editor.disk_mtime() != self.watch_seen => {
+                self.watch_seen = editor.disk_mtime();
+                let Mode::Edit { editor, .. } = std::mem::replace(&mut self.mode, Mode::Normal)
+                else {
+                    return;
+                };
+                if editor.dirty() {
+                    self.mode = Mode::AskSave {
+                        editor,
+                        to_utf8: false,
+                        exit: false,
+                        step: Step::Changed,
+                    };
+                } else {
+                    self.reload_editor(editor);
+                    self.note = "reloaded: the file changed on disk".into();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Read the edited file again, edits dropped; cursor line and view settings stay.
+    pub(super) fn reload_editor(&mut self, editor: Editor) {
+        let (path, line) = (editor.path().to_owned(), editor.cursor.0 + 1);
+        if !std::fs::metadata(&path).is_ok_and(|m| m.len() <= INLINE_BYTES) {
+            return self.spawn_load(path, Some(line as u64));
+        }
+        self.mode = match Editor::open(&path, &AtomicU64::new(0), &AtomicBool::new(false)) {
+            Ok(mut fresh) => {
+                fresh.goto_line(line);
+                (fresh.wrap, fresh.numbers) = (editor.wrap, editor.numbers);
+                Mode::Edit {
+                    editor: fresh,
+                    error: None,
+                }
+            }
+            Err(e) => Mode::Edit {
+                editor,
+                error: Some(e.to_string()),
+            },
+        };
     }
 
     /// Back in the editor after a save (with its error), or out of it when saved on exit.
@@ -831,6 +896,63 @@ mod tests {
         key(&mut app, KeyCode::F(4));
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    /// Write `text` to `f` with a later modification time, as another program would.
+    fn write_later(f: &std::path::Path, text: &str, secs: u64) {
+        std::fs::write(f, text).unwrap();
+        let t = std::time::SystemTime::now() + std::time::Duration::from_secs(secs);
+        let file = std::fs::File::options().write(true).open(f).unwrap();
+        file.set_modified(t).unwrap();
+    }
+
+    /// Run the watch now instead of waiting a second.
+    fn watch(app: &mut App) {
+        app.watch_at = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        app.tick();
+    }
+
+    #[test]
+    fn editor_and_viewer_follow_changes_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "one\n").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::F(4));
+        wait(&mut app);
+        // no edits: read again silently
+        write_later(&f, "two\n", 5);
+        watch(&mut app);
+        assert_eq!(rows(&mut app), ["two", ""]);
+        // unsaved edits: asks once; n keeps mine
+        key(&mut app, KeyCode::Char('x'));
+        write_later(&f, "three\n", 10);
+        watch(&mut app);
+        assert!(matches!(
+            app.mode,
+            Mode::AskSave {
+                step: Step::Changed,
+                ..
+            }
+        ));
+        key(&mut app, KeyCode::Char('n'));
+        watch(&mut app);
+        assert!(matches!(app.mode, Mode::Edit { .. }));
+        assert_eq!(rows(&mut app), ["xtwo", ""]);
+        // F2 asks again; r reloads from disk
+        key(&mut app, KeyCode::F(2));
+        key(&mut app, KeyCode::Char('r'));
+        assert_eq!(rows(&mut app), ["three", ""]);
+        key(&mut app, KeyCode::Esc);
+        // viewer: appended lines show up
+        key(&mut app, KeyCode::F(3));
+        write_later(&f, "three\nfour\n", 15);
+        watch(&mut app);
+        let Mode::View { view, .. } = &mut app.mode else {
+            panic!("not in viewer")
+        };
+        assert_eq!(view.lines(5, 30).unwrap(), ["three", "four"]);
     }
 
     #[test]

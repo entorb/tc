@@ -70,9 +70,12 @@ impl Editor {
 
     /// The file was modified by someone else since it was opened or saved.
     pub fn changed_on_disk(&self) -> bool {
-        fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .is_ok_and(|t| Some(t) != self.mtime)
+        self.disk_mtime().is_some_and(|t| Some(t) != self.mtime)
+    }
+
+    /// Modification time of the file on disk now.
+    pub fn disk_mtime(&self) -> Option<SystemTime> {
+        fs::metadata(&self.path).and_then(|m| m.modified()).ok()
     }
 
     pub fn dirty(&self) -> bool {

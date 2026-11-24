@@ -506,6 +506,8 @@ Alt+Left/Right  previous / next file of the panel (skips dirs and media); Alt+b/
 w / Alt+W       wrap long lines
 l / Alt+L       line numbers
 F4              edit this file at the top line (local files)
+                a file changed on disk is read again (checked
+                each second, position kept)
 Esc / q / F10   close
 F3              close";
 pub const HELP_EDIT: &str = "\
@@ -516,6 +518,9 @@ F2 / Ctrl+S     save: trailing blanks trimmed, final line break
 F5              Markdown: add those blank lines now (undo:
                 Ctrl+Z)
 Esc / F10       exit (asks if unsaved)
+                changed on disk (checked each second, and on
+                save): no edits: read again; else asks:
+                y overwrite, r reload (drops edits), n keep
 
 == Move ==
 Up/Down         line up / down
