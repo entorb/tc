@@ -15,7 +15,7 @@ use regex::Regex;
 use tc_core::archive::{Archive, Format, TempDir};
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::Editor;
-use tc_core::panel::{Panel, SortKey};
+use tc_core::panel::{EntryFilter, Panel, SortKey};
 use tc_core::vfs::Remote;
 use tc_core::{Error, hotlist, ops, view::Viewer};
 use tc_remote::Prompt;
@@ -32,6 +32,7 @@ mod help;
 mod link;
 mod menu;
 mod multi_rename;
+mod panel_filter;
 mod popular;
 mod proc_mon;
 mod props;
@@ -50,6 +51,7 @@ pub use menu::{
 };
 pub use multi_rename::RenameForm;
 use multi_rename::{RenameBatch, rename_rows};
+pub use panel_filter::FilterForm;
 pub use proc_mon::Procs;
 pub use props::PropsForm;
 pub use sync::{Sync, SyncForm};
@@ -92,8 +94,8 @@ pub enum Mode {
     NewFile(LineEdit),
     /// Quick search text (cursor jumps to the next match).
     Search(String),
-    /// Quick filter text (non-matching entries hidden).
-    Filter(String),
+    /// Panel filter popup (`/`).
+    Filter(Box<FilterForm>),
     /// Command prompt for the external editor (shown when the default is missing).
     Editor(PathBuf, LineEdit),
     /// Command line, run with Enter.
@@ -198,6 +200,8 @@ pub struct App {
     pub tab: [usize; 2],
     /// Closed local tabs (side, directory), newest last, for Ctrl+Shift+T.
     closed_tabs: Vec<(usize, PathBuf)>,
+    /// Last applied filter popup per side, to prefill it while that filter is shown.
+    filter_forms: [Option<FilterForm>; 2],
     pub active: usize,
     pub mode: Mode,
     pub quit: bool,
@@ -317,6 +321,7 @@ impl App {
             tabs: Default::default(),
             tab: [0; 2],
             closed_tabs: Vec::new(),
+            filter_forms: Default::default(),
             active: 0,
             mode: Mode::Normal,
             quit: false,
@@ -416,7 +421,7 @@ impl App {
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Normal => self.normal_mode_key(key),
             Mode::Search(text) => self.search_key(text, key),
-            Mode::Filter(text) => self.filter_key(text, key),
+            Mode::Filter(f) => self.filter_key(f, key),
             Mode::Editor(path, mut cmd) => match key.code {
                 KeyCode::Enter => self.external_edit(path, cmd.text),
                 KeyCode::Esc => {}
@@ -658,7 +663,7 @@ impl App {
                 if panel.cancel_load() {
                     return;
                 }
-                panel.apply_filter("");
+                panel.apply_filter(EntryFilter::default());
                 if let Err(e) = panel.leave_virtual() {
                     self.mode = Mode::Message(e.to_string());
                 }
@@ -794,27 +799,6 @@ impl App {
         self.mode = Mode::Search(text);
     }
 
-    fn filter_key(&mut self, mut text: String, key: KeyEvent) {
-        let panel = &mut self.panels[self.active];
-        match key.code {
-            KeyCode::Enter => return,
-            KeyCode::Esc => {
-                panel.apply_filter("");
-                return;
-            }
-            KeyCode::Backspace => {
-                text.pop();
-                panel.apply_filter(&text);
-            }
-            KeyCode::Char(c) => {
-                text.push(c);
-                panel.apply_filter(&text);
-            }
-            _ => {}
-        }
-        self.mode = Mode::Filter(text);
-    }
-
     /// Remember the command and hand it to the main loop; empty does nothing.
     fn run_cmd(&mut self, text: &str) {
         let cmd = text.trim();
@@ -907,7 +891,7 @@ impl App {
                     self.calc_dir_size(dir);
                 }
             }
-            KeyCode::Char('/') => self.mode = Mode::Filter(panel.filter().to_owned()),
+            KeyCode::Char('/') => self.filter_open(),
             KeyCode::Char('+') => self.ask(Ask::Select),
             KeyCode::Char('-') => self.ask(Ask::Deselect),
             KeyCode::Char('*') => panel.invert_selection(),

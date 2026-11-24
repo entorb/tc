@@ -65,7 +65,7 @@ Middle click    open the directory in a new tab
 Right click     menu: view, edit, copy, move, rename, delete,
                 clipboard, same extension, properties, terminal
 Double click    open directory / archive, view file
-Click title     sort by name / size / date (again: reverse)
+Click title     sort by name / ext / size / date (again: reverse)
 Click F-bar     run the key shown on the label
 Click menu bar  open the F9 menu
 R-click tab     close the tab (not the last one)
@@ -98,8 +98,12 @@ Ctrl+Y          compare with the other panel and select, per
 a..z, 0..9      type a name to start quick search (not ~ + - * / :)
 Ctrl+S          quick search: type to jump to a match, Ctrl+S
                 next match, Enter / Esc stop searching
-/               quick filter: type to hide other entries,
-                Enter keeps the filter, Esc clears it
+/               filter popup: name part, min / max size (10k, 5M),
+                newer / older than (30m, 12h, 7d), file types of
+                this directory (checkboxes; none = all; types and
+                sizes hide directories). Tab / Up / Down move,
+                Space toggles a type, Enter applies, Esc cancels.
+                The filter ends on leaving the directory; Esc clears it
 Ctrl+F          find files
 Ctrl+E          synchronize directories (left / right panel)
 :               command line (Up/Down: earlier commands)

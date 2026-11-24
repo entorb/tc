@@ -13,9 +13,11 @@ use crate::vfs::{Remote, Side, rpath};
 use crate::{Result, io_err};
 
 mod entries;
+mod filter;
 mod git;
 mod load;
 mod select;
+pub use filter::{EntryFilter, ext_counts};
 
 pub(crate) use entries::{entry_for, entry_with};
 use entries::{read_entries, sort_entries};
@@ -140,8 +142,8 @@ pub struct Panel {
     selected: HashSet<OsString>,
     /// Last dropped selection and its directory, for [`Panel::restore_selection`].
     prev_sel: Option<(PathBuf, HashSet<OsString>)>,
-    /// Lowercased name filter; `all` keeps the unfiltered list while it is set.
-    filter: String,
+    /// Active filter (`/` popup); `all` keeps the unfiltered list while it is set.
+    filter: EntryFilter,
     all: Option<Vec<Entry>>,
     /// Visited directories, oldest first, `pos` is the current one.
     history: Vec<PathBuf>,
@@ -181,7 +183,7 @@ impl Panel {
             cursor: 0,
             selected: HashSet::new(),
             prev_sel: None,
-            filter: String::new(),
+            filter: EntryFilter::default(),
             all: None,
             virt: false,
             hits: HashMap::new(),
@@ -336,7 +338,7 @@ impl Panel {
         };
         self.entries = entries;
         self.all = None;
-        self.filter.clear();
+        self.filter = EntryFilter::default();
         self.virt = false;
         self.cursor = 0;
     }
@@ -357,7 +359,7 @@ impl Panel {
         self.entries = entries;
         self.hits = hits;
         self.all = None;
-        self.filter.clear();
+        self.filter = EntryFilter::default();
         self.unselect_all();
         self.cursor = 0;
         self.virt = true;
@@ -444,7 +446,7 @@ impl Panel {
         self.all = None;
         if !self.filter.is_empty() {
             let f = std::mem::take(&mut self.filter);
-            self.apply_filter(&f);
+            self.apply_filter(f);
         }
         let names: HashSet<&OsStr> = self.entries.iter().map(|e| e.name.as_os_str()).collect();
         self.selected.retain(|n| names.contains(n.as_os_str()));
@@ -788,13 +790,13 @@ mod tests {
         assert_eq!(p.current().unwrap().name, "Banana");
         assert!(!p.search("zzz", 0));
         assert!(p.search("ap", 1)); // wraps past the end
-        p.apply_filter("AP");
+        p.apply_filter(EntryFilter::by_name("AP"));
         assert_eq!(names(&p), ["..", "apple", "grape"]);
         assert_eq!(p.current().unwrap().name, "grape");
         fs::write(tmp.path().join("cap"), "").unwrap();
         p.reload().unwrap(); // filter survives reload
         assert_eq!(names(&p), ["..", "apple", "cap", "grape"]);
-        p.apply_filter("");
+        p.apply_filter(EntryFilter::default());
         assert_eq!(p.entries().len(), 5);
     }
 
@@ -888,7 +890,7 @@ mod tests {
         p.toggle_select(); // deselect "a"
         assert_eq!(p.selection_info(), (1, 5));
         p.select_mask("*", true);
-        p.apply_filter("b");
+        p.apply_filter(EntryFilter::by_name("b"));
         assert_eq!(p.selection_info(), (1, 5));
     }
 

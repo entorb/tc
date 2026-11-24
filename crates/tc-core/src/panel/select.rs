@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use super::{CompareKind, Entry, Panel, compare};
+use super::{CompareKind, Entry, EntryFilter, Panel, compare};
 
 impl Panel {
     /// Select entries `a..=b` (any order), not "..", and put the cursor on `b`.
@@ -19,26 +19,31 @@ impl Panel {
         self.cursor = b.min(last);
     }
 
-    /// Active name filter (lowercased), empty if none.
-    pub fn filter(&self) -> &str {
+    /// Active filter; [`EntryFilter::is_empty`] if none.
+    pub fn filter(&self) -> &EntryFilter {
         &self.filter
     }
 
-    /// Show only ".." and entries whose name contains `text` (case-insensitive); in memory, no re-read.
-    pub fn apply_filter(&mut self, text: &str) {
+    /// Every entry of the directory, also those the filter hides.
+    pub fn all_entries(&self) -> &[Entry] {
+        self.all.as_deref().unwrap_or(&self.entries)
+    }
+
+    /// Show only ".." and the entries `filter` keeps; in memory, no re-read.
+    pub fn apply_filter(&mut self, filter: EntryFilter) {
         let keep = self.current().map(|e| e.name.clone());
         let all = self
             .all
             .take()
             .unwrap_or_else(|| std::mem::take(&mut self.entries));
-        self.filter = text.to_lowercase();
+        self.filter = filter;
         self.entries = if self.filter.is_empty() {
             all.clone()
         } else {
-            let f = &self.filter;
-            let hit =
-                |e: &&Entry| e.is_parent() || e.name.to_string_lossy().to_lowercase().contains(f);
-            all.iter().filter(hit).cloned().collect()
+            all.iter()
+                .filter(|e| self.filter.matches(e))
+                .cloned()
+                .collect()
         };
         if !self.filter.is_empty() {
             self.all = Some(all);

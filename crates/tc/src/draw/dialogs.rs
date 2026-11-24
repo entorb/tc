@@ -5,7 +5,9 @@ use eframe::egui::{
     self, Button, Color32, ComboBox, Context, Label, Response, RichText, ScrollArea, Sense,
     TextStyle, Ui, vec2,
 };
-use tc::app::{App, FindForm, FormRow, Mode, PropsForm, RenameForm, SettingsForm, SyncForm};
+use tc::app::{
+    App, FilterForm, FindForm, FormRow, Mode, PropsForm, RenameForm, SettingsForm, SyncForm,
+};
 use tc::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
 use tc::fmt::{ProcInfo, procs_confirm, procs_info};
 use tc::{KeyCode, KeyEvent, KeyModifiers};
@@ -38,6 +40,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         (None, Mode::SyncForm(form)) => show_sync_form(ctx, form),
         (None, Mode::Settings(form)) => show_settings(ctx, form),
         (None, Mode::Props(form)) => show_props(ctx, form),
+        (None, Mode::Filter(form)) => show_filter(ctx, form),
         (None, Mode::Procs(p)) => match (&p.draft, procs_info(p)) {
             (Some(d), _) => show_form(
                 ctx,
@@ -328,6 +331,53 @@ fn ok_cancel_buttons(ui: &mut Ui, ok: &str) -> Option<FormAct> {
 }
 
 /// Multi-rename over the whole window: form, then as many old -> new rows as fit; keys go through the app.
+/// Panel filter: text fields, then the file types of the directory as checkboxes, OK / Cancel.
+fn show_filter(ctx: &Context, form: &FilterForm) -> Option<FormAct> {
+    modal("panel-filter")
+        .show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.heading("Filter");
+            ui.separator();
+            let act = form_rows(ui, &form.rows, form.focus, form.error.as_deref());
+            ui.separator();
+            ui.label(RichText::new("File types (none checked: all)").strong());
+            let types = ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| filter_types(ui, form))
+                .inner;
+            act.or(types).or(ok_cancel(ui, "OK"))
+        })
+        .inner
+}
+
+/// File type checkboxes, wrapped; a click reports its form row (after the text rows).
+fn filter_types(ui: &mut Ui, form: &FilterForm) -> Option<FormAct> {
+    let first = form.rows.len();
+    ui.horizontal_wrapped(|ui| {
+        let mut act = None;
+        for (k, (ext, n, on)) in form.exts.iter().enumerate() {
+            let name = if ext.is_empty() {
+                "(none)".to_owned()
+            } else {
+                format!(".{ext}")
+            };
+            let color = if form.focus == first + k {
+                ACCENT
+            } else {
+                TEXT
+            };
+            let mut on = *on; // a copy: the app toggles the real one on the click
+            let r = ui.checkbox(&mut on, RichText::new(format!("{name} ({n})")).color(color));
+            unfocus(&r);
+            if r.clicked() {
+                act = Some(FormAct::Row(first + k));
+            }
+        }
+        act
+    })
+    .inner
+}
+
 /// Properties: the fields, then the mode preview and file info, OK / Cancel.
 fn show_props(ctx: &Context, form: &PropsForm) -> Option<FormAct> {
     let lines = form.lines().join("\n");

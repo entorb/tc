@@ -91,6 +91,7 @@ impl Mode {
             Mode::Settings(f) => Some((&f.rows, &mut f.focus)),
             Mode::Props(f) => Some((&f.rows, &mut f.focus)),
             Mode::Procs(p) => p.draft.as_mut().map(|d| (d.rows.as_slice(), &mut d.focus)),
+            Mode::Filter(f) => Some((&f.rows, &mut f.focus)),
             _ => None,
         }
     }
@@ -127,6 +128,7 @@ impl Mode {
             Mode::MultiRename(f) => text_row(&mut f.rows, f.focus),
             Mode::Settings(f) => text_row(&mut f.rows, f.focus),
             Mode::Props(f) => text_row(&mut f.rows, f.focus),
+            Mode::Filter(f) => text_row(&mut f.rows, f.focus),
             Mode::Procs(p) => p
                 .draft
                 .as_mut()
@@ -166,6 +168,16 @@ impl App {
 
     /// Click on form row `row`: focuses it; a checkbox toggles, a choice cycles (as Space would).
     pub fn form_click(&mut self, row: usize) {
+        // filter popup: rows past the text fields are its file type checkboxes
+        if let Mode::Filter(f) = &mut self.mode
+            && row >= f.rows.len()
+        {
+            if row < f.rows.len() + f.exts.len() {
+                f.focus = row;
+                self.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+            }
+            return;
+        }
         let Some((rows, focus)) = self.form_rows_mut() else {
             return;
         };

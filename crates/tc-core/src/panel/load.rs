@@ -7,7 +7,7 @@ use std::time::Duration;
 use std::{io, thread};
 
 use super::entries::{read_entries, remote_entries, sort_entries};
-use super::{Entry, LOAD_WAIT, Panel, SortKey};
+use super::{Entry, EntryFilter, LOAD_WAIT, Panel, SortKey};
 use crate::vfs::Remote;
 use crate::{Result, io_err};
 
@@ -145,7 +145,7 @@ impl Panel {
         self.dir_sizes.clear();
         self.sel_sum.set(None);
         self.all = None;
-        self.filter.clear();
+        self.filter = EntryFilter::default();
         self.virt = false;
         self.hits.clear();
         self.archive = None;

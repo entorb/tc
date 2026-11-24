@@ -175,7 +175,7 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
             ("Synchronize dirs    Ctrl+E", KeyCode::Char('e'), C),
             ("Go to found file    Ctrl+G", KeyCode::Char('g'), C),
             ("Quick search        Ctrl+S", KeyCode::Char('s'), C),
-            ("Quick filter        /", KeyCode::Char('/'), N),
+            ("Filter              /", KeyCode::Char('/'), N),
             ("Command line        :", KeyCode::Char(':'), N),
             ("Terminal here       Ctrl+O", KeyCode::Char('o'), C),
             // no shortcut: `Null` is never typed, only sent by these entries and F1 help

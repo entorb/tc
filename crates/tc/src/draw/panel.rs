@@ -161,23 +161,36 @@ fn tab_bar(ui: &mut Ui, app: &App, i: usize, action: &mut Option<Action>) {
     });
 }
 
+/// Column titles; the name column has two: Name and Ext (the extension stays part of the name).
 fn header_cols(mut h: egui_extras::TableRow, sort: (SortKey, bool), action: &mut Option<Action>) {
-    for (label, key) in [
-        ("Name", SortKey::Name),
-        ("Size", SortKey::Size),
-        ("Date", SortKey::Date),
-    ] {
+    let cols: [&[(&str, SortKey)]; 3] = [
+        &[("Name", SortKey::Name), ("Ext", SortKey::Ext)],
+        &[("Size", SortKey::Size)],
+        &[("Date", SortKey::Date)],
+    ];
+    for titles in cols {
+        h.col(|ui| {
+            ui.horizontal(|ui| sort_titles(ui, titles, sort, action));
+        });
+    }
+}
+
+fn sort_titles(
+    ui: &mut Ui,
+    titles: &[(&str, SortKey)],
+    sort: (SortKey, bool),
+    action: &mut Option<Action>,
+) {
+    for &(label, key) in titles {
         let label = match sort {
             (k, false) if k == key => format!("{label} ⏶"),
             (k, true) if k == key => format!("{label} ⏷"),
             _ => label.to_owned(),
         };
-        h.col(|ui| {
-            let l = Label::new(RichText::new(label).strong()).sense(Sense::CLICK);
-            if ui.add(l).clicked() {
-                *action = Some(Action::Sort(key));
-            }
-        });
+        let l = Label::new(RichText::new(label).strong()).sense(Sense::CLICK);
+        if ui.add(l).clicked() {
+            *action = Some(Action::Sort(key));
+        }
     }
 }
 

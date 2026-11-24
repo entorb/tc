@@ -399,8 +399,7 @@ pub fn panel_title(app: &App, i: usize, sort_tag: bool) -> String {
     let active = i == app.active;
     match &app.mode {
         Mode::Search(t) if active => title += &format!(" [search: {t}]"),
-        Mode::Filter(t) if active => title += &format!(" [filter: {t}]"),
-        _ if !panel.filter().is_empty() => title += &format!(" [filter: {}]", panel.filter()),
+        _ if !panel.filter().is_empty() => title += &format!(" [filter: {}]", panel.filter().label),
         _ => {}
     }
     title
