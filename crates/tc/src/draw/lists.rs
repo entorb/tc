@@ -317,13 +317,24 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
                 ("Min", Some(('r', ProcSort::Run))),
                 ("Command", None),
             ];
+            let c = &p.crit;
+            // a column shows 🔍 while its filter field is set
+            let filtered = [
+                false,
+                false,
+                c.min_cpu > 0.0,
+                c.min_mem > 0,
+                c.min_run > 0,
+                !c.text.is_empty(),
+            ];
             for (k, (title, key)) in cols.into_iter().enumerate() {
                 let arrow = match key {
                     Some((_, s)) if s == p.sort => " ⏷",
                     _ => "",
                 };
+                let icon = if filtered[k] { " 🔍" } else { "" };
                 head.col(|ui| {
-                    let t = RichText::new(format!("{title}{arrow}"))
+                    let t = RichText::new(format!("{title}{icon}{arrow}"))
                         .strong()
                         .color(MUTED);
                     let add = |ui: &mut Ui| ui.add(Label::new(t).sense(Sense::CLICK)).clicked();

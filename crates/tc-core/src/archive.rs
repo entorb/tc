@@ -1,4 +1,4 @@
-//! Read-only archive browsing: zip, tar (plain, gz, xz) and single `.xz` files.
+//! Read-only archive browsing: zip, tar (plain, gz, bz2, xz) and single `.gz`, `.bz2`, `.xz` files.
 //!
 //! The entry list is read once; file data is only streamed out on demand. Entry names are
 //! sanitized when listed (absolute paths and `..` are dropped), only regular files and
@@ -20,6 +20,7 @@ use crate::{Error, Result, io_err};
 pub enum Codec {
     None,
     Gz,
+    Bz2,
     Xz,
 }
 
@@ -29,7 +30,7 @@ pub enum Format {
     Zip,
     Tar(Codec),
     /// One compressed file.
-    Xz,
+    Single(Codec),
 }
 
 impl Format {
@@ -41,12 +42,18 @@ impl Format {
             Self::Zip
         } else if ends(&[".tar.gz", ".tgz"]) {
             Self::Tar(Codec::Gz)
+        } else if ends(&[".tar.bz2", ".tbz2", ".tbz"]) {
+            Self::Tar(Codec::Bz2)
         } else if ends(&[".tar.xz", ".txz"]) {
             Self::Tar(Codec::Xz)
         } else if ends(&[".tar"]) {
             Self::Tar(Codec::None)
+        } else if ends(&[".gz"]) {
+            Self::Single(Codec::Gz)
+        } else if ends(&[".bz2"]) {
+            Self::Single(Codec::Bz2)
         } else if ends(&[".xz"]) {
-            Self::Xz
+            Self::Single(Codec::Xz)
         } else {
             return None;
         })
@@ -189,6 +196,7 @@ impl Archive {
         Ok(match codec {
             Codec::None => Box::new(f),
             Codec::Gz => Box::new(flate2::bufread::MultiGzDecoder::new(f)),
+            Codec::Bz2 => Box::new(bzip2::bufread::MultiBzDecoder::new(f)),
             Codec::Xz => Box::new(lzma_rust2::XzReader::new(f, true)),
         })
     }
@@ -204,7 +212,7 @@ impl Archive {
         a.items = match format {
             Format::Zip => a.list_zip()?,
             Format::Tar(c) => a.list_tar(c, progress, cancel)?,
-            Format::Xz => {
+            Format::Single(_) => {
                 let name = file.file_stem().unwrap_or_default().to_string_lossy();
                 let path = sanitize(name.as_bytes()).ok_or_else(|| err("bad file name"))?;
                 let modified = fs::metadata(file).and_then(|m| m.modified()).ok();
@@ -377,8 +385,8 @@ impl Archive {
                     }
                 }
             }
-            Format::Xz => {
-                let mut r = self.stream(Codec::Xz, &sink)?;
+            Format::Single(c) => {
+                let mut r = self.stream(c, &sink)?;
                 if let Some(f) = files.get(&0) {
                     put(&mut r, f)?;
                 }
@@ -509,6 +517,12 @@ mod tests {
         fs::write(&gz, e.finish().unwrap()).unwrap();
         check(&open(&gz));
 
+        let bz = tmp.path().join("a.tar.bz2");
+        let mut e = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        e.write_all(&raw).unwrap();
+        fs::write(&bz, e.finish().unwrap()).unwrap();
+        check(&open(&bz));
+
         let xz = tmp.path().join("a.tar.xz");
         let mut w =
             lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::with_preset(1)).unwrap();
@@ -518,18 +532,30 @@ mod tests {
     }
 
     #[test]
-    fn plain_xz() {
+    fn plain_single_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("log.txt.xz");
-        let mut w =
+        let data = b"hello";
+        let mut xz =
             lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::with_preset(1)).unwrap();
-        w.write_all(b"hello").unwrap();
-        fs::write(&p, w.finish().unwrap()).unwrap();
-        let a = open(&p);
-        assert_eq!(names(&a, ""), ["log.txt"]);
-        let (p, c) = no();
-        let (_t, f) = a.extract_temp("log.txt", u64::MAX, &p, &c).unwrap();
-        assert_eq!(fs::read(f).unwrap(), b"hello");
+        xz.write_all(data).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(data).unwrap();
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(data).unwrap();
+        let files = [
+            ("log.txt.xz", xz.finish().unwrap()),
+            ("log.txt.gz", gz.finish().unwrap()),
+            ("log.txt.bz2", bz.finish().unwrap()),
+        ];
+        for (name, bytes) in files {
+            let p = tmp.path().join(name);
+            fs::write(&p, bytes).unwrap();
+            let a = open(&p);
+            assert_eq!(names(&a, ""), ["log.txt"]);
+            let (p, c) = no();
+            let (_t, f) = a.extract_temp("log.txt", u64::MAX, &p, &c).unwrap();
+            assert_eq!(fs::read(f).unwrap(), data, "{name}");
+        }
     }
 
     #[test]
@@ -582,7 +608,10 @@ mod tests {
         let d = |n: &str| Format::detect(Path::new(n));
         assert_eq!(d("A.TAR.GZ"), Some(Format::Tar(Codec::Gz)));
         assert_eq!(d("x.txz"), Some(Format::Tar(Codec::Xz)));
-        assert_eq!(d("x.xz"), Some(Format::Xz));
+        assert_eq!(d("x.tar.bz2"), Some(Format::Tar(Codec::Bz2)));
+        assert_eq!(d("x.xz"), Some(Format::Single(Codec::Xz)));
+        assert_eq!(d("x.gz"), Some(Format::Single(Codec::Gz)));
+        assert_eq!(d("x.bz2"), Some(Format::Single(Codec::Bz2)));
         assert_eq!(d("x.txt"), None);
     }
 }
