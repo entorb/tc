@@ -5,21 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: Create a Release?
+        description: Create release?
         type: boolean
         default: false
+      release_title:
+        description: Release title
+        type: string
+        required: false
       tag_name:
         description: Tag name (e.g. v1.0.0), auto-incremented if not provided.
         type: string
         required: false
-      release_title:
-        description: Release title?
-        type: string
-        required: false
-      prerelease:
-        description: Prerelease?
-        type: boolean
-        default: false
   schedule:
     - cron: '0 5 * * 0'  # Sunday 05:00 UTC, audit alert
   push:
@@ -111,7 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]  # ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
@@ -148,7 +144,7 @@ jobs:
         if: inputs.release || runner.os == 'macOS'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: tc-${{ runner.os }}${{ runner.os == 'Linux' && runner.arch == 'ARM64' && '-arm64' || '' }}
+          name: tc-${{ runner.os }}
           path: target/release/tc${{ runner.os == 'Windows' && '.exe' || '' }}
           retention-days: 7
 
@@ -231,12 +227,12 @@ jobs:
       - name: Create Release
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Invalid tag: $TAG"; exit 1; }
-          # artifact zips drop the exec bit
-          chmod +x dist/tc-Linux/tc dist/tc-macOS/tc dist/tc-Linux-arm64/tc
-          mv dist/tc-Linux/tc dist/tc-linux
-          mv dist/tc-Linux-arm64/tc dist/tc-linux-arm64
-          mv dist/tc-macOS/tc dist/tc-macos
-          mv dist/tc-Windows/tc.exe dist/tc.exe
+          # artifact zips drop the exec bit; release zips keep the plain binary name
+          # (and Edge does not block a .zip download like a bare .exe)
+          chmod +x dist/tc-Linux/tc dist/tc-macOS/tc
+          (cd dist/tc-Linux && zip -q ../tc-Linux-amd64.zip tc)
+          (cd dist/tc-macOS && zip -q ../tc-macOS-arm64.zip tc)
+          (cd dist/tc-Windows && zip -q ../tc-Windows-amd64.zip tc.exe)
           # generated notes plus a footer on how to start the unsigned macOS and Windows binaries
           NOTES="$RUNNER_TEMP/notes.md"
           gh api -X POST "repos/$GH_REPO/releases/generate-notes" -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" --jq .body > "$NOTES"
@@ -249,9 +245,8 @@ jobs:
           The binaries are not signed or notarized, so Gatekeeper blocks them. Clear the quarantine flag in Terminal, then run:
 
           ```sh
-          xattr -d com.apple.quarantine ./tc-macos
-          chmod +x ./tc-macos
-          ./tc-macos
+          xattr -d com.apple.quarantine ./tc
+          ./tc
           ```
 
           ### Running the Windows build
@@ -264,11 +259,10 @@ jobs:
           ```
           EOF
           gh release create "$TAG" --target "$GITHUB_SHA" --title "${TAG#v}${TITLE:+ $TITLE}" \
-            --notes-file "$NOTES" ${PRERELEASE:+--prerelease} \
-            dist/tc-linux dist/tc-linux-arm64 dist/tc-macos dist/tc.exe
+            --notes-file "$NOTES"\
+            dist/tc-Linux-amd64.zip dist/tc-macOS-arm64.zip dist/tc-Windows-amd64.zip
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag_name || needs.core.outputs.next_tag }}
           TITLE: ${{ inputs.release_title }}
-          PRERELEASE: ${{ inputs.prerelease && '1' || '' }}
