@@ -130,18 +130,15 @@ jobs:
       - name: Run rs test
         run: cargo test --workspace --all-features --locked
 
-      # Linux/Windows release binaries only for releases; macOS always, thin LTO outside releases
       - name: Build release
-        if: inputs.release || runner.os == 'macOS'
+        if: inputs.release
         run: cargo build --release --locked -p tc
         env:
-          # release tag built into the binary for the daily update check; empty: no check
-          TC_VERSION: ${{ inputs.release && (inputs.tag_name || needs.core.outputs.next_tag) || '' }}
-          CARGO_PROFILE_RELEASE_LTO: ${{ inputs.release && 'true' || 'thin' }}
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.release && '1' || '16' }}
+          # release tag built into the binary for the daily update check
+          TC_VERSION: ${{ inputs.tag_name || needs.core.outputs.next_tag }}
 
       - name: Upload binary
-        if: inputs.release || runner.os == 'macOS'
+        if: inputs.release
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: tc-${{ runner.os }}
