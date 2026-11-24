@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{Error, Result, io_err};
 
+mod copy;
+use copy::{copy_file, copy_tree};
+
 /// Copy chunk: bounds memory and the delay until a cancel is noticed.
 const CHUNK: usize = 1 << 20;
 
@@ -100,13 +103,21 @@ pub fn count(path: &Path, cancel: &AtomicBool) -> Counts {
         let Ok(meta) = fs::symlink_metadata(&path) else {
             continue;
         };
-        if meta.is_dir() {
-            c.dirs += 1;
-            let items = fs::read_dir(&path).into_iter().flatten().flatten();
-            stack.extend(items.map(|i| i.path()));
-        } else {
+        if !meta.is_dir() {
             c.files += 1;
             c.bytes += meta.len();
+            continue;
+        }
+        c.dirs += 1;
+        // entry metadata comes with the listing on Windows: no open per file
+        for item in fs::read_dir(&path).into_iter().flatten().flatten() {
+            match item.metadata() {
+                Ok(m) if !m.is_dir() => {
+                    c.files += 1;
+                    c.bytes += m.len();
+                }
+                _ => stack.push(item.path()),
+            }
         }
     }
     c
@@ -228,8 +239,30 @@ fn replace(src: &Path, target: &Path, mv: bool, p: &Progress) -> Result<()> {
     } else {
         copy_file(src, &tmp, &meta, p, true)?;
     }
-    fs::rename(&tmp, target).map_err(io_err(target))?;
+    rename_over(&tmp, target).map_err(io_err(target))?;
     if mv { delete(src) } else { Ok(()) }
+}
+
+/// Rename onto an existing `target`. Windows refuses to replace a read-only file: its flag is
+/// lifted for the rename (the user confirmed the overwrite) and restored on failure.
+pub(crate) fn rename_over(from: &Path, target: &Path) -> io::Result<()> {
+    let renamed = fs::rename(from, target);
+    #[cfg(windows)]
+    if renamed
+        .as_ref()
+        .is_err_and(|e| e.kind() == io::ErrorKind::PermissionDenied)
+        && let Ok(meta) = fs::symlink_metadata(target)
+        && meta.permissions().readonly()
+    {
+        let mut writable = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)] // Windows: only the attribute
+        writable.set_readonly(false);
+        fs::set_permissions(target, writable)?;
+        return fs::rename(from, target).inspect_err(|_| {
+            let _ = fs::set_permissions(target, meta.permissions());
+        });
+    }
+    renamed
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -414,67 +447,6 @@ fn prepare(src: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> Result<()> {
-    let meta = fs::symlink_metadata(src).map_err(io_err(src))?;
-    if meta.is_symlink() {
-        let link = fs::read_link(src).map_err(io_err(src))?;
-        platform::symlink(&link, dst, src).map_err(io_err(dst))
-    } else if meta.is_dir() {
-        fs::create_dir(dst).map_err(io_err(dst))?;
-        for item in fs::read_dir(src).map_err(io_err(src))? {
-            let item = item.map_err(io_err(src))?;
-            copy_tree(&item.path(), &dst.join(item.file_name()), p)?;
-        }
-        p.dir_done();
-        // after the contents, so a read-only source dir does not block them
-        fs::set_permissions(dst, meta.permissions()).map_err(io_err(dst))
-    } else {
-        copy_file(src, dst, &meta, p, false)
-    }
-}
-
-/// Chunked copy so progress and cancel work inside a huge file; keeps the modification time.
-/// `sync`: flush to disk before it replaces a file. Leaves a partial `dst` on error; callers
-/// remove it.
-fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress, sync: bool) -> Result<()> {
-    if let Ok(mut cur) = p.current.lock() {
-        cur.clear();
-        cur.push(src);
-    }
-    let from = fs::File::open(src).map_err(io_err(src))?;
-    // create_new: a file that appeared since the existence check is never truncated
-    let mut to = fs::File::create_new(dst).map_err(io_err(dst))?;
-    let mut buf = Vec::new();
-    loop {
-        if p.cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
-        }
-        let n = platform::copy_chunk(&from, &mut to, &mut buf).map_err(io_err(dst))?;
-        if n == 0 {
-            break;
-        }
-        p.done.fetch_add(n, Ordering::Relaxed);
-    }
-    if let Ok(t) = meta.modified() {
-        let _ = to.set_modified(t);
-    }
-    if sync {
-        to.sync_all().map_err(io_err(dst))?;
-    }
-    p.files.fetch_add(1, Ordering::Relaxed);
-    fs::set_permissions(dst, meta.permissions()).map_err(io_err(dst))
-}
-
-/// Read and write up to [`CHUNK`] bytes through `buf`; 0 at end of file.
-#[cfg(not(target_os = "linux"))]
-fn copy_chunk_buffered(from: &fs::File, to: &mut fs::File, buf: &mut Vec<u8>) -> io::Result<u64> {
-    use std::io::{Read, Write};
-    buf.resize(CHUNK, 0);
-    let n = (&*from).read(buf)?;
-    to.write_all(&buf[..n])?;
-    Ok(n as u64)
-}
-
 /// Only called on targets this operation created.
 fn remove_partial(target: &Path) {
     let _ = delete(target);
@@ -501,7 +473,7 @@ mod platform {
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub(super) use super::copy_chunk_buffered as copy_chunk;
+    pub(super) use super::copy::copy_chunk_buffered as copy_chunk;
 }
 
 #[cfg(windows)]
@@ -510,7 +482,7 @@ mod platform {
     use std::process::{Command, Stdio};
     use std::{fs, io, path::Path};
 
-    pub(super) use super::copy_chunk_buffered as copy_chunk;
+    pub(super) use super::copy::copy_chunk_buffered as copy_chunk;
 
     /// ERROR_PRIVILEGE_NOT_HELD: symlinks need admin rights or developer mode.
     const NO_PRIVILEGE: i32 = 1314;
@@ -571,10 +543,12 @@ mod platform {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn symlink_points_to_target_and_never_replaces() {
         let tmp = tempfile::tempdir().unwrap();
+        if !dir_link(tmp.path(), &tmp.path().join("probe")) {
+            return;
+        }
         let (t, l) = (tmp.path().join("t"), tmp.path().join("l"));
         fs::write(&t, "x").unwrap();
         symlink(&t, &l).unwrap();
@@ -647,6 +621,88 @@ mod tests {
         src
     }
 
+    /// Directory symlink; false where the user may not create symlinks (Windows without
+    /// developer mode or admin rights).
+    fn dir_link(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(target, link);
+        match made {
+            Ok(()) => true,
+            Err(e) if cfg!(windows) && e.raw_os_error() == Some(1314) => false,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// Make `path` unreadable for this process while the guard lives; `None` as root.
+    #[cfg(unix)]
+    fn lock(path: &Path) -> Option<Box<dyn std::any::Any>> {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::read(path)
+            .is_err()
+            .then(|| Box::new(()) as Box<dyn std::any::Any>)
+    }
+
+    /// Make `path` unreadable for this process while the guard (an exclusive handle) lives.
+    #[cfg(windows)]
+    fn lock(path: &Path) -> Option<Box<dyn std::any::Any>> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let f = fs::File::options().read(true).share_mode(0).open(path);
+        Some(Box::new(f.unwrap()))
+    }
+
+    fn set_readonly(path: &Path, on: bool) {
+        let mut perm = fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perm.set_readonly(on);
+        fs::set_permissions(path, perm).unwrap();
+    }
+
+    /// Paths beyond Windows' MAX_PATH (260) take the stream copy.
+    #[test]
+    fn copy_and_delete_long_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut deep = tmp.path().join("src");
+        for i in 0..6 {
+            deep.push(format!("{i}{}", "d".repeat(50)));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("f.txt"), "deep").unwrap();
+        let dst = tmp.path().join("dst");
+        copy(&tmp.path().join("src"), &dst).unwrap();
+        let rel = deep.strip_prefix(tmp.path().join("src")).unwrap();
+        assert_eq!(read(dst.join(rel).join("f.txt")), "deep");
+        let p = Progress::default();
+        remove(&dst, &p).unwrap();
+        assert!(!dst.exists());
+    }
+
+    /// Read-only files (git objects) keep the flag on copy and can be replaced and deleted.
+    #[test]
+    fn read_only_files_copy_replace_and_delete() {
+        let (_t, src, dst) = clash();
+        set_readonly(&src.join("a.txt"), true);
+        set_readonly(&dst.join("a.txt"), true);
+        copy(&src.join("a.txt"), &dst.join("b.txt")).unwrap();
+        assert!(
+            fs::metadata(dst.join("b.txt"))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        run(false, &src.join("a.txt"), &dst.join("a.txt"), |_, _| {
+            Decision::Overwrite
+        })
+        .unwrap();
+        assert_eq!(read(dst.join("a.txt")), "a");
+        delete(&dst.join("b.txt")).unwrap();
+        assert!(!dst.join("b.txt").exists());
+        remove(&src, &Progress::default()).unwrap();
+        assert!(!src.exists());
+    }
+
     #[test]
     fn copy_dir_recursive() {
         let tmp = tempfile::tempdir().unwrap();
@@ -656,6 +712,49 @@ mod tests {
         copy(&src, &dst.join("src")).unwrap();
         assert_eq!(fs::read_to_string(dst.join("src/sub/b.txt")).unwrap(), "b");
         assert!(src.join("a.txt").exists());
+    }
+
+    /// Many files in nested and read-only directories go through the parallel workers.
+    #[test]
+    fn copy_many_files_into_read_only_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        for d in 0..5 {
+            fs::create_dir_all(src.join(format!("d{d}/e"))).unwrap();
+            for f in 0..40 {
+                fs::write(src.join(format!("d{d}/e/{f}")), format!("{d}-{f}")).unwrap();
+            }
+            let ro = src.join(format!("d{d}"));
+            let mut perm = fs::metadata(&ro).unwrap().permissions();
+            perm.set_readonly(true);
+            fs::set_permissions(&ro, perm).unwrap();
+        }
+        let p = Progress::default();
+        super::copy(
+            &src,
+            &tmp.path().join("dst"),
+            &mut |_, _| Decision::Cancel,
+            &p,
+        )
+        .unwrap();
+        assert_eq!(p.files.load(Ordering::Relaxed), 200);
+        let got = fs::read_to_string(tmp.path().join("dst/d4/e/39")).unwrap();
+        assert_eq!(got, "4-39");
+        assert!(
+            fs::metadata(tmp.path().join("dst/d0"))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        for d in 0..5 {
+            for root in ["src", "dst"] {
+                let dir = tmp.path().join(format!("{root}/d{d}"));
+                let mut perm = fs::metadata(&dir).unwrap().permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                perm.set_readonly(false);
+                fs::set_permissions(&dir, perm).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -777,7 +876,6 @@ mod tests {
         assert!(mkdir(tmp.path(), OsStr::new("new")).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlinks_copied_and_deleted_as_links() {
         let tmp = tempfile::tempdir().unwrap();
@@ -785,7 +883,10 @@ mod tests {
         let outside = tmp.path().join("outside");
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("keep"), "").unwrap();
-        std::os::unix::fs::symlink(&outside, src.join("link")).unwrap();
+        if !dir_link(&outside, &src.join("link")) {
+            return;
+        }
+        dir_link(&tmp.path().join("gone"), &src.join("dangling"));
         let dst = tmp.path().join("dst");
         fs::create_dir(&dst).unwrap();
         copy(&src, &dst.join("src")).unwrap();
@@ -794,22 +895,20 @@ mod tests {
                 .unwrap()
                 .is_symlink()
         );
+        let dangling = fs::symlink_metadata(dst.join("src/dangling")).unwrap();
+        assert!(dangling.is_symlink());
         delete(&src).unwrap();
         assert!(!src.exists());
         assert!(outside.join("keep").exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn failed_copy_cleans_partial_target() {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let src = tree(tmp.path());
-        let locked = src.join("sub/b.txt");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        if fs::read(&locked).is_ok() {
-            return; // running as root, permission cannot be tested
-        }
+        let Some(_lock) = lock(&src.join("sub/b.txt")) else {
+            return;
+        };
         let dst = tmp.path().join("dst");
         fs::create_dir(&dst).unwrap();
         assert!(copy(&src, &dst.join("src")).is_err());
@@ -941,16 +1040,13 @@ mod tests {
         assert_eq!(read(src.join("a.txt")), "a");
     }
 
-    #[cfg(unix)]
     #[test]
     fn failed_overwrite_keeps_old_target() {
-        use std::os::unix::fs::PermissionsExt;
         let (_t, src, dst) = clash();
         let locked = src.join("a.txt");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        if fs::read(&locked).is_ok() {
-            return; // running as root
-        }
+        let Some(_lock) = lock(&locked) else {
+            return;
+        };
         let r = run(false, &locked, &dst.join("a.txt"), |_, _| {
             Decision::Overwrite
         });
@@ -971,6 +1067,7 @@ mod tests {
 
     /// Cancel after the first chunk of a 2 GiB sparse file (never fully read).
     #[test]
+    #[cfg_attr(target_os = "macos", ignore = "APFS clones the file at once")]
     fn cancel_mid_file_leaves_no_partial() {
         let (_t, src, dst) = clash();
         let big = src.join("big");
@@ -1014,7 +1111,6 @@ mod tests {
         assert_eq!(p.dirs_done.load(Ordering::Relaxed), 2);
     }
 
-    #[cfg(unix)]
     #[test]
     fn remove_counts_and_keeps_symlink_target() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1022,7 +1118,9 @@ mod tests {
         let outside = tmp.path().join("outside");
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("keep"), "k").unwrap();
-        std::os::unix::fs::symlink(&outside, src.join("sub/link")).unwrap();
+        if !dir_link(&outside, &src.join("sub/link")) {
+            return;
+        }
         let p = Progress::default();
         scan(std::slice::from_ref(&src), &p);
         remove(&src, &p).unwrap();

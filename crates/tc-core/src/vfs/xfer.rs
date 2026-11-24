@@ -401,6 +401,30 @@ mod tests {
         assert_eq!(m.paths(), ["/"]);
     }
 
+    /// Windows refuses to rename onto a read-only file; a confirmed overwrite still works.
+    #[test]
+    fn download_overwrites_read_only_file() {
+        let m = Mem::new();
+        m.put("/a", b"new");
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path().join("a");
+        fs::write(&t, "old").unwrap();
+        let mut perm = fs::metadata(&t).unwrap().permissions();
+        perm.set_readonly(true);
+        fs::set_permissions(&t, perm).unwrap();
+        let t = t.to_str().unwrap();
+        go(
+            &Side::Remote(m),
+            "/a",
+            &Side::Local,
+            t,
+            false,
+            Decision::Overwrite,
+        )
+        .unwrap();
+        assert_eq!(fs::read(t).unwrap(), b"new");
+    }
+
     #[test]
     fn conflicts_skip_overwrite_rename_mismatch() {
         let m = Mem::new();

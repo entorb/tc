@@ -164,7 +164,7 @@ impl Side {
     pub(crate) fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         match self {
             Side::Remote(r) => r.rename(&rpath(from), &rpath(to)),
-            Side::Local => fs::rename(from, to).map_err(io_err(from)),
+            Side::Local => ops::rename_over(from, to).map_err(io_err(from)),
         }
     }
 
