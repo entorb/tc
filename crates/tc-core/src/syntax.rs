@@ -552,17 +552,7 @@ pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, K
             prev_word = false;
             continue;
         }
-        if lang.markdown
-            && (c == '*' || c == '_' && !prev_word)
-            && let Some(end) = emphasis(rest)
-        {
-            let kind = if rest[1..].starts_with(c) {
-                Kind::Bold
-            } else {
-                Kind::Italic
-            };
-            out.push((i..i + end, kind));
-            while it.next_if(|&(j, _)| j < i + end).is_some() {}
+        if lang.markdown && emphasis_token(&mut it, rest, i, c, prev_word, &mut out) {
             prev_word = false;
             continue;
         }
@@ -577,6 +567,31 @@ pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, K
         prev_word = false;
     }
     out
+}
+
+/// Push a bold/italic token starting at byte `i` and consume it; false if none starts here.
+fn emphasis_token(
+    it: &mut std::iter::Peekable<std::str::CharIndices>,
+    rest: &str,
+    i: usize,
+    c: char,
+    prev_word: bool,
+    out: &mut Vec<(Range<usize>, Kind)>,
+) -> bool {
+    if !(c == '*' || c == '_' && !prev_word) {
+        return false;
+    }
+    let Some(end) = emphasis(rest) else {
+        return false;
+    };
+    let kind = if rest[1..].starts_with(c) {
+        Kind::Bold
+    } else {
+        Kind::Italic
+    };
+    out.push((i..i + end, kind));
+    while it.next_if(|&(j, _)| j < i + end).is_some() {}
+    true
 }
 
 /// Number or keyword token for the word `w` (first char `c`), if it is one.

@@ -256,7 +256,7 @@ pub(crate) fn rename_over(from: &Path, target: &Path) -> io::Result<()> {
     {
         let mut writable = meta.permissions();
         #[allow(clippy::permissions_set_readonly_false)] // Windows: only the attribute
-        writable.set_readonly(false);
+        writable.set_readonly(false); // NOSONAR rust:S2612: Windows read-only attribute only, user confirmed the overwrite
         fs::set_permissions(target, writable)?;
         return fs::rename(from, target).inspect_err(|_| {
             let _ = fs::set_permissions(target, meta.permissions());
