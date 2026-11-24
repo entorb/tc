@@ -81,7 +81,7 @@ Dim entries     git-ignored (.gitignore, info/exclude, global
 == Selection ==
 Insert          select entry, cursor moves down
 Space           same; on a local directory also sizes it
-Shift+Up/Down   select range
+Shift+Up/Down   mark / unmark the entry and move on
 Shift+Home/End  select up to the first / last entry
 Ctrl+A          select all, directories too
 Ctrl+Shift+A    unselect all

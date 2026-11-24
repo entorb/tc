@@ -76,6 +76,11 @@ impl Panel {
 
     /// Toggle selection of the cursor entry and move down.
     pub fn toggle_select(&mut self) {
+        self.toggle_and_move(1);
+    }
+
+    /// Toggle selection of the cursor entry, then move the cursor by `delta`.
+    pub fn toggle_and_move(&mut self, delta: isize) {
         if let Some(entry) = self.current().filter(|e| !e.is_parent()) {
             let name = entry.name.clone();
             if !self.selected.remove(&name) {
@@ -83,7 +88,7 @@ impl Panel {
             }
             self.sel_sum.set(None);
         }
-        self.move_cursor(1);
+        self.move_cursor(delta);
     }
 
     /// Select (`on`) or deselect visible files matching `masks`; directories are left alone.

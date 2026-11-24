@@ -336,3 +336,22 @@ fn delete_is_f8_and_ctrl_arrow_opens_cursor_dir_in_other_panel() {
     key(&mut app, KeyCode::Delete);
     assert!(matches!(app.mode, Mode::Confirm(Op::Delete, ..)));
 }
+
+#[test]
+fn shift_up_down_marks_and_unmarks() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["a", "b", "c"] {
+        std::fs::write(tmp.path().join(f), "").unwrap();
+    }
+    let mut app = two_panels(tmp.path(), tmp.path());
+    key(&mut app, KeyCode::Down); // skip ".."
+    let shift = |app: &mut App, code| with(app, code, KeyModifiers::SHIFT);
+    shift(&mut app, KeyCode::Down);
+    shift(&mut app, KeyCode::Down);
+    assert_eq!(app.panels[0].selection_info().0, 2); // a, b
+    shift(&mut app, KeyCode::Up); // c toggled on, back on b
+    shift(&mut app, KeyCode::Up); // b off
+    shift(&mut app, KeyCode::Up); // a off
+    assert_eq!(app.panels[0].selection_info().0, 1); // only c
+    assert_eq!(app.panels[0].current().unwrap().name, "..");
+}

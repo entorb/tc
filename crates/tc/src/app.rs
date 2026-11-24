@@ -635,11 +635,9 @@ impl App {
             KeyCode::Char('c' | 'C') if alt && shift => self.copy_paths(),
             KeyCode::Down if alt => self.dir_history_open(),
             KeyCode::Up | KeyCode::Down if shift => {
-                let panel = &mut self.panels[self.active];
-                let c = panel.cursor();
-                // select the entry left behind
-                panel.select_range(c, c);
-                panel.move_cursor(if key.code == KeyCode::Up { -1 } else { 1 });
+                // toggle the entry left behind: walking back over a marked range unmarks it
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                self.panels[self.active].toggle_and_move(delta);
             }
             KeyCode::Home | KeyCode::End if shift => {
                 let panel = &mut self.panels[self.active];
