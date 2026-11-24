@@ -205,19 +205,28 @@ fn place(src: &Path, target: &Path, mv: bool, ctx: &mut Ctx) -> Result<()> {
     }
 }
 
+/// Open a file for reading; sockets, pipes and devices are refused (opening a FIFO blocks forever).
+pub(crate) fn open_regular(path: &Path) -> io::Result<fs::File> {
+    if fs::metadata(path).is_ok_and(|m| copy::is_special(&m)) {
+        let msg = "socket, pipe or device: no file content to read";
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
+    }
+    fs::File::open(path)
+}
+
 /// Target does not exist: plain move or copy.
 fn create(src: &Path, target: &Path, mv: bool, p: &Progress) -> Result<()> {
     if mv {
         return match fs::rename(src, target) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-                copy_tree(src, target, p).inspect_err(|_| remove_partial(target))?;
+                copy_tree(src, target, p, false).inspect_err(|_| remove_partial(target))?;
                 delete(src)
             }
             Err(e) => Err(io_err(src)(e)),
         };
     }
-    copy_tree(src, target, p).inspect_err(|_| remove_partial(target))
+    copy_tree(src, target, p, true).inspect_err(|_| remove_partial(target))
 }
 
 /// Replace file `target` atomically: the old one stays until the new one is complete.
@@ -234,8 +243,12 @@ fn replace(src: &Path, target: &Path, mv: bool, p: &Progress) -> Result<()> {
         .map_err(io_err(parent))?;
     let tmp = dir.path().join(target.file_name().unwrap_or_default());
     let meta = fs::symlink_metadata(src).map_err(io_err(src))?;
+    if copy::is_special(&meta) {
+        // a FIFO would block the open forever; the existing target stays
+        return Err(Error::Special(src.to_owned()));
+    }
     if meta.is_symlink() {
-        copy_tree(src, &tmp, p)?;
+        copy_tree(src, &tmp, p, true)?;
     } else {
         copy_file(src, &tmp, &meta, p, true)?;
     }
@@ -619,6 +632,34 @@ mod tests {
         fs::write(src.join("a.txt"), "a").unwrap();
         fs::write(src.join("sub/b.txt"), "b").unwrap();
         src
+    }
+
+    #[cfg(unix)] // sockets and FIFOs are Unix-only
+    #[test]
+    fn copy_skips_sockets_and_fifos() {
+        use rustix::fs::{CWD, FileType, Mode, mknodat};
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tree(tmp.path());
+        let _sock = std::os::unix::net::UnixListener::bind(src.join("d.sock")).unwrap();
+        mknodat(
+            CWD,
+            src.join("sub/pipe"),
+            FileType::Fifo,
+            Mode::RUSR | Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        copy(&src, &tmp.path().join("dst")).unwrap(); // a FIFO open would hang here
+        let dst = tmp.path().join("dst");
+        assert_eq!(fs::read_to_string(dst.join("sub/b.txt")).unwrap(), "b");
+        assert!(!dst.join("d.sock").exists() && !dst.join("sub/pipe").exists());
+        // overwriting a file with a FIFO fails and keeps the file
+        let ask = |_: &Path, _: &Path| Decision::Overwrite;
+        let r = run(false, &src.join("sub/pipe"), &dst.join("a.txt"), ask);
+        assert!(matches!(r, Err(Error::Special(_))));
+        assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "a");
+        // viewer, editor, find and remote uploads refuse it instead of blocking
+        assert!(super::open_regular(&src.join("sub/pipe")).is_err());
     }
 
     /// Directory symlink; false where the user may not create symlinks (Windows without

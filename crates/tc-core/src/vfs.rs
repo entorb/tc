@@ -129,7 +129,7 @@ impl Side {
     ) -> Result<()> {
         match self {
             Side::Remote(r) => r.read(&rpath(p), f),
-            Side::Local => f(&mut fs::File::open(p).map_err(io_err(p))?),
+            Side::Local => f(&mut crate::ops::open_regular(p).map_err(io_err(p))?),
         }
     }
 

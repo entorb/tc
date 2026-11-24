@@ -302,7 +302,7 @@ fn scan(
     cancel: &AtomicBool,
     mut hit: impl FnMut(u64, &str) -> bool,
 ) -> Option<bool> {
-    let mut reader = BufReader::new(File::open(path).ok()?);
+    let mut reader = BufReader::new(crate::ops::open_regular(path).ok()?);
     let (mut buf, mut line, mut matched) = (Vec::new(), 1, false);
     loop {
         buf.clear();

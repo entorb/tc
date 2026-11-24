@@ -20,11 +20,12 @@ const WORKERS: usize = 4;
 type Job = (PathBuf, PathBuf, fs::Metadata);
 
 /// Copy `src` (file, symlink or directory tree) to the new path `dst`. Leaves partial targets
-/// on error; callers remove them.
-pub(super) fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> Result<()> {
+/// on error; callers remove them. Sockets, pipes and devices cannot be copied: `skip_special`
+/// skips them, otherwise they fail with [`Error::Special`] (a move must not delete them).
+pub(super) fn copy_tree(src: &Path, dst: &Path, p: &Progress, skip_special: bool) -> Result<()> {
     let meta = fs::symlink_metadata(src).map_err(io_err(src))?;
     if !meta.is_dir() {
-        return copy_leaf(src, dst, &meta, p);
+        return copy_leaf(src, dst, &meta, p, skip_special);
     }
     let (tx, rx) = mpsc::sync_channel::<Job>(256);
     let rx = Mutex::new(rx);
@@ -40,6 +41,7 @@ pub(super) fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> Result<()> {
             dirs: &mut dirs,
             stop: &stop,
             p,
+            skip_special,
         };
         if let Err(e) = w.dir(src, dst, &meta) {
             fail(&failed, &stop, e);
@@ -94,6 +96,7 @@ struct Walk<'a> {
     dirs: &'a mut Vec<(PathBuf, fs::Permissions)>,
     stop: &'a AtomicBool,
     p: &'a Progress,
+    skip_special: bool,
 }
 
 impl Walk<'_> {
@@ -113,8 +116,8 @@ impl Walk<'_> {
             let m = item.metadata().map_err(io_err(&s))?;
             if m.is_dir() {
                 self.dir(&s, &d, &m)?;
-            } else if m.is_symlink() {
-                copy_leaf(&s, &d, &m, self.p)?;
+            } else if m.is_symlink() || is_special(&m) {
+                copy_leaf(&s, &d, &m, self.p, self.skip_special)?;
             } else if self.tx.send((s, d, m)).is_err() {
                 return Ok(());
             }
@@ -125,12 +128,40 @@ impl Walk<'_> {
 }
 
 /// File or symlink.
-fn copy_leaf(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress) -> Result<()> {
-    if meta.is_symlink() {
+fn copy_leaf(
+    src: &Path,
+    dst: &Path,
+    meta: &fs::Metadata,
+    p: &Progress,
+    skip_special: bool,
+) -> Result<()> {
+    if is_special(meta) {
+        if !skip_special {
+            return Err(Error::Special(src.to_owned()));
+        }
+        // shortcut: skipped silently, report a skip count if users miss them
+        p.files.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    } else if meta.is_symlink() {
         let link = fs::read_link(src).map_err(io_err(src))?;
         platform::symlink(&link, dst, src).map_err(io_err(dst))
     } else {
         copy_file(src, dst, meta, p, false)
+    }
+}
+
+/// Socket, FIFO or device: opening one fails or blocks forever, its content is not a file.
+pub(crate) fn is_special(meta: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let t = meta.file_type();
+        t.is_socket() || t.is_fifo() || t.is_block_device() || t.is_char_device()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
     }
 }
 

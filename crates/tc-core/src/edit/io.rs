@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,7 +16,7 @@ const BINARY_PROBE: usize = 8 * 1024;
 impl Editor {
     /// Streams the file into a rope; `progress` gets bytes read, `cancel` aborts.
     pub fn open(path: &Path, progress: &AtomicU64, cancel: &AtomicBool) -> Result<Self> {
-        let mut file = File::open(path).map_err(io_err(path))?;
+        let mut file = crate::ops::open_regular(path).map_err(io_err(path))?;
         let mut head = vec![0; CHUNK];
         let n = read_full(&mut file, &mut head).map_err(io_err(path))?;
         head.truncate(n);

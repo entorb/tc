@@ -32,6 +32,8 @@ pub enum Error {
     Exists(PathBuf),
     #[error("{}: file and directory cannot replace each other", .0.display())]
     TypeMismatch(PathBuf),
+    #[error("{}: socket, pipe or device: its content cannot be copied", .0.display())]
+    Special(PathBuf),
     #[error("{}: cannot copy or move a directory into itself", .0.display())]
     IntoItself(PathBuf),
     #[error("invalid name: {0}")]

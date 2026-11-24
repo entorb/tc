@@ -30,7 +30,7 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let file = File::open(path)?;
+        let file = crate::ops::open_regular(path)?;
         let len = file.metadata()?.len();
         // shortcut: guesses from the first chunk only, upgrade if later text differs
         let mut head = Vec::with_capacity(CHUNK);
