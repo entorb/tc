@@ -246,7 +246,6 @@ jobs:
 
           ```sh
           xattr -d com.apple.quarantine ./tc
-          ./tc
           ```
 
           ### Running the Windows build
@@ -255,7 +254,6 @@ jobs:
 
           ```powershell
           Unblock-File .\tc.exe
-          .\tc.exe
           ```
           EOF
           gh release create "$TAG" --target "$GITHUB_SHA" --title "${TAG#v}${TITLE:+ $TITLE}" \
