@@ -1356,14 +1356,7 @@ impl App {
                 let error = result.err().filter(|e| !matches!(e, Error::Cancelled));
                 self.finish(error.map(|e| e.to_string()));
             }
-            Done::Saved(_, Ok(())) if exit => self.leave_editor(),
-            Done::Saved(editor, result) => {
-                let error = result.err().filter(|e| !matches!(e, Error::Cancelled));
-                self.mode = Mode::Edit {
-                    editor,
-                    error: error.map(|e| e.to_string()),
-                };
-            }
+            Done::Saved(editor, result) => self.saved(editor, result, exit),
         }
     }
 }

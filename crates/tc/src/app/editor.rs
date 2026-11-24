@@ -3,6 +3,7 @@
 use super::{App, Done, FormRow, Mode, edit_key};
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::thread;
 use tc_core::cmdline::{self, LineEdit};
 use tc_core::edit::{self, Editor, Eol, SizeCheck};
@@ -671,6 +672,13 @@ impl App {
             .edit_remote
             .as_ref()
             .map(|(r, p, _)| (r.clone(), p.clone()));
+        // a worker hides the editor until it is done: the panels flash for a moment
+        // shortcut: saved inline up to 4 MiB on disk, bigger or remote files keep the worker
+        let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= 4 << 20);
+        if upload.is_none() && small {
+            let result = editor.save(to_utf8, to_lf, &AtomicU64::new(0), &AtomicBool::new(false));
+            return self.saved(editor, result, exit);
+        }
         self.spawn("Saving", path, total, exit, move |progress, cancel| {
             let mut result = editor.save(to_utf8, to_lf, progress, cancel);
             if let (Ok(()), Some((r, target))) = (&result, upload) {
@@ -682,6 +690,18 @@ impl App {
             }
             Done::Saved(editor, result)
         });
+    }
+
+    /// Back in the editor after a save (with its error), or out of it when saved on exit.
+    pub(super) fn saved(&mut self, editor: Editor, result: tc_core::Result<()>, exit: bool) {
+        if result.is_ok() && exit {
+            return self.leave_editor();
+        }
+        let error = result.err().filter(|e| !matches!(e, Error::Cancelled));
+        self.mode = Mode::Edit {
+            editor,
+            error: error.map(|e| e.to_string()),
+        };
     }
 
     /// Ask about encoding, then line ends, only where the file differs from UTF-8/LF.
@@ -770,6 +790,11 @@ mod tests {
         wait(&mut app);
         assert!(matches!(app.mode, Mode::Edit { .. }));
         key(&mut app, KeyCode::Char('x'));
+        key(&mut app, KeyCode::F(2));
+        key(&mut app, KeyCode::Char('n')); // keep CRLF
+        // small local file: saved inline, no worker frame that would show the panels
+        assert!(matches!(app.mode, Mode::Edit { error: None, .. }));
+        key(&mut app, KeyCode::Char('x'));
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::AskExit(_)));
         key(&mut app, KeyCode::Char('y'));
@@ -784,7 +809,7 @@ mod tests {
         wait(&mut app);
         assert!(matches!(app.mode, Mode::Normal));
         let text = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
-        assert_eq!(text, "xhi\n");
+        assert_eq!(text, "xxhi\n");
     }
 
     #[test]

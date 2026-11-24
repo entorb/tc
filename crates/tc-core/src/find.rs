@@ -2,7 +2,6 @@
 //! extension filters, optional content regex. Local parallel walk, or one `find` on a server.
 
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -333,12 +332,13 @@ fn scan(
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomicBool, Content, File, Hit, Path, Query, Timestamp, find, parse_date, parse_exts,
-        parse_list, parse_size,
+        AtomicBool, Content, Hit, Path, Query, Timestamp, find, parse_date, parse_exts, parse_list,
+        parse_size,
     };
     use jiff::SignedDuration;
     use regex::Regex;
     use std::fs;
+    use std::fs::File;
     use std::path::PathBuf;
     use std::sync::Mutex;
 

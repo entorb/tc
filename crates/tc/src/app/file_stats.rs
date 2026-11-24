@@ -922,7 +922,7 @@ mod tests {
         key(&mut app, KeyCode::Char('y'));
         wait(&mut app);
         app.tick();
-        assert_eq!(mem.get("/d/f").unwrap(), b"xxyz");
+        assert_eq!(mem.get("/d/f").unwrap(), b"xxyz\n");
         assert!(matches!(app.mode, Mode::Stats(_)) && app.edit_remote.is_none());
         key(&mut app, KeyCode::Char(':'));
         type_keys(&mut app, "ls");

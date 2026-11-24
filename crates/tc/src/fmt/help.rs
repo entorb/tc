@@ -510,7 +510,8 @@ Esc / q / F10   close
 F3              close";
 pub const HELP_EDIT: &str = "\
 == File ==
-F2 / Ctrl+S     save; Markdown first gets blank lines around
+F2 / Ctrl+S     save: trailing blanks trimmed, final line break
+                added; Markdown first gets blank lines around
                 headings, lists and ``` blocks
 F5              Markdown: add those blank lines now (undo:
                 Ctrl+Z)

@@ -77,7 +77,7 @@ impl Editor {
         })
     }
 
-    /// Trimmed trailing blanks, atomic replace of the (symlink-resolved) target.
+    /// Trimmed trailing blanks, a final line break added, atomic replace of the (symlink-resolved) target.
     /// On error the original is intact and the buffer stays dirty.
     pub fn save(
         &mut self,
@@ -113,6 +113,8 @@ impl Editor {
             sink.w.write_all(bom_bytes(encoding)).map_err(&err)?;
         }
         let mut line = String::new();
+        // last written line lacks its line break (Git and GitHub want one at the end)
+        let mut open_line = false;
         for (i, l) in self.rope.lines().enumerate() {
             // shortcut: one line is copied whole, a multi-GB single line doubles memory
             line.clear();
@@ -126,11 +128,15 @@ impl Editor {
             if has_nl {
                 line.push_str(eol);
             }
+            open_line = !has_nl && (open_line || !line.is_empty());
             sink.put(&line, &err)?;
             progress.store(i as u64, Ordering::Relaxed);
             if cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
             }
+        }
+        if open_line {
+            sink.put(eol, &err)?;
         }
         sink.finish(&err)?;
         drop(sink);
@@ -289,7 +295,7 @@ mod tests {
     #[test]
     fn roundtrip_encodings() {
         for bytes in [
-            &b"h\xc3\xa9llo\nworld"[..],
+            &b"h\xc3\xa9llo\nworld\n"[..],
             b"\xef\xbb\xbfh\xc3\xa9llo\n",
             b"\xff\xfeh\0i\0\n\0",
             b"\xfe\xff\0h\0i\0\n",
@@ -300,8 +306,11 @@ mod tests {
     }
 
     #[test]
-    fn trims_and_keeps_missing_final_newline() {
-        assert_eq!(roundtrip(b"a  \n\tb \t\nc  ", false, false), b"a\n\tb\nc");
+    fn trims_and_adds_final_newline() {
+        assert_eq!(roundtrip(b"a  \n\tb \t\nc  ", false, false), b"a\n\tb\nc\n");
+        assert_eq!(roundtrip(b"a\r\nb", false, false), b"a\r\nb\r\n");
+        assert_eq!(roundtrip(b"a\n  ", false, false), b"a\n"); // blank last line: trimmed away
+        assert_eq!(roundtrip(b"", false, false), b"");
     }
 
     #[test]
