@@ -660,14 +660,14 @@ mod tests {
     }
 
     #[test]
-    fn stats_scan_remote_tree_skips_links() {
+    fn ncdu_scan_remote_tree_skips_links() {
         let m = Mem::new();
         m.dir("/d");
         m.dir("/d/sub");
         m.put("/d/sub/a", b"abc");
         m.put("/d/b", b"de");
         m.link("/d/loop", "/d");
-        let root = crate::stats::scan_remote(m.as_ref(), Path::new("/d"), &Progress::default());
+        let root = crate::ncdu::scan_remote(m.as_ref(), Path::new("/d"), &Progress::default());
         assert_eq!(
             (root.name.to_str(), root.size, root.files),
             (Some("d"), 5, 3)

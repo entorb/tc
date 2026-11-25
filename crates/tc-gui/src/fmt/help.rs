@@ -155,7 +155,7 @@ Delete config files
 
 == Quit ==
 F10             quit";
-pub const HELP_STATS: &str = "\
+pub const HELP_NCDU: &str = "\
 == About ==
 Scan runs in up to 8 threads; a popup shows files and
 scanned / discovered directories.
@@ -480,7 +480,7 @@ s               skip it: the rest goes on; a move keeps
                 its source, a delete its directory
 S               skip all further failed files
 Esc / c         cancel the whole operation";
-pub const HELP_PROCS: &str = "\
+pub const HELP_TOP: &str = "\
 == About ==
 CPU% is the average over the interval, per core (can
 exceed 100). Load = average number of busy processes
@@ -649,8 +649,8 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
     match mode {
         Mode::View { .. } => ("Help: viewer", HELP_VIEW),
         Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
-        Mode::Stats(_) => ("Help: dir size (ncdu)", HELP_STATS),
-        Mode::Procs(_) => ("Help: processes (top)", HELP_PROCS),
+        Mode::Ncdu(_) => ("Help: dir size (ncdu)", HELP_NCDU),
+        Mode::Top(_) => ("Help: processes (top)", HELP_TOP),
         Mode::Sync(_) => ("Help: synchronize directories", HELP_SYNC),
         Mode::FindForm(_) => ("Help: find files", HELP_FIND_FORM),
         Mode::Settings(_) => ("Help: settings", HELP_SETTINGS),

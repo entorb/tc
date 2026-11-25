@@ -42,17 +42,17 @@ pub use bookmark_edit::{BmClick, BookmarkForm, BookmarkRow};
 pub use connect::Connecting;
 pub use editor::{Ask, Input, SearchForm, Step};
 pub use menu::{
-    ENTRY_MENU, FOOTER, MENUS, MenuItem, PROCS_FOOTER, STATS_FOOTER, TOOLBAR, ToolItem,
-    help_action, zoom_step,
+    ENTRY_MENU, FOOTER, MENUS, MenuItem, NCDU_FOOTER, TOOLBAR, TOP_FOOTER, ToolItem, help_action,
+    zoom_step,
 };
 pub use panel_filter::FilterForm;
 pub use props::PropsForm;
 pub use tools::find::{FindForm, Found, FoundSort};
-pub use tools::ncdu::Stats;
+pub use tools::ncdu::Ncdu;
 pub use tools::rename::RenameForm;
 use tools::rename::{RenameBatch, rename_rows};
 pub use tools::sync::{Sync, SyncForm};
-pub use tools::top::Procs;
+pub use tools::top::Top;
 pub use update::{RELEASES, SettingsForm, VERSION};
 pub use widgets::{Filter, FormRow, ListRow, list_rows};
 use widgets::{
@@ -119,9 +119,9 @@ pub enum Mode {
     /// Sync Dirs (Ctrl+E): options and compare result, filled by a worker thread.
     Sync(Box<Sync>),
     /// Dir Size (ncdu-style) tree, scanned by a worker thread.
-    Stats(Stats),
+    Ncdu(Ncdu),
     /// Process monitor, refreshed by a worker thread.
-    Procs(Box<Procs>),
+    Top(Box<Top>),
     View {
         title: String,
         view: Viewer,
@@ -283,7 +283,7 @@ pub struct App {
     /// Entry extracted from an archive for the viewer; removed once the viewer is closed.
     view_tmp: Option<TempDir>,
     /// Dir Size left for a viewer or editor; back once the mode is `Normal` again.
-    pub stats: Option<Stats>,
+    pub ncdu: Option<Ncdu>,
     /// Saved connection URLs (Ctrl+N) and the file they are saved to.
     pub connections: Vec<PathBuf>,
     pub connections_file: Option<PathBuf>,
@@ -358,7 +358,7 @@ impl App {
             history_file: None,
             run: None,
             view_tmp: None,
-            stats: None,
+            ncdu: None,
             connections: Vec::new(),
             connections_file: None,
             edit_remote: None,
@@ -377,8 +377,8 @@ impl App {
     /// The screen takes F1 and footer clicks: no prompt, dialog or running scan.
     pub fn idle(&self) -> bool {
         let screen = matches!(self.mode, Mode::Normal | Mode::View { .. })
-            || matches!(&self.mode, Mode::Stats(st) if !st.scanning() && st.confirm.is_none())
-            || matches!(&self.mode, Mode::Procs(p) if p.idle())
+            || matches!(&self.mode, Mode::Ncdu(st) if !st.scanning() && st.confirm.is_none())
+            || matches!(&self.mode, Mode::Top(p) if p.idle())
             || matches!(&self.mode, Mode::Sync(s) if s.idle())
             || matches!(self.mode, Mode::Edit { error: None, .. });
         screen && self.input.is_none()
@@ -466,10 +466,10 @@ impl App {
             Mode::FindForm(form) => self.find_form_key(key, form),
             Mode::MultiRename(form) => self.multi_rename_key(key, form),
             Mode::Sync(s) => self.sync_key(key, s),
-            Mode::Stats(st) => self.stats_mode_key(st, key),
-            Mode::Procs(mut p) => {
+            Mode::Ncdu(st) => self.ncdu_mode_key(st, key),
+            Mode::Top(mut p) => {
                 if p.key(key, self.page) {
-                    self.mode = Mode::Procs(p);
+                    self.mode = Mode::Top(p);
                 }
             }
             Mode::Message(_) => {}
@@ -713,10 +713,10 @@ impl App {
             KeyCode::Char('b') => self.open_list(Mode::Bookmarks(0)),
             KeyCode::Char('z') => self.popular_open(),
             KeyCode::Char('k') => self.toggle_browse_sync(),
-            KeyCode::Char(' ') => self.spawn_stats(),
+            KeyCode::Char(' ') => self.spawn_ncdu(),
             KeyCode::Char('p') => {
                 let r = self.panels[self.active].remote().cloned();
-                self.mode = Mode::Procs(Box::new(Procs::new(r)));
+                self.mode = Mode::Top(Box::new(Top::new(r)));
             }
             KeyCode::Char('y') => self.compare_open(),
             KeyCode::Char('a') => self.panels[self.active].select_all(),
@@ -817,7 +817,7 @@ impl App {
         if cmd.is_empty() {
             return;
         }
-        if self.stats.is_none() && self.panels[self.active].archive().is_some() {
+        if self.ncdu.is_none() && self.panels[self.active].archive().is_some() {
             self.mode = Mode::Message("No commands inside an archive.".into());
             return;
         }
@@ -827,7 +827,7 @@ impl App {
         {
             self.mode = Mode::Message(e.to_string());
         }
-        let remote = match &self.stats {
+        let remote = match &self.ncdu {
             Some(st) => st.remote.as_ref(),
             None => self.panels[self.active].remote(),
         };
@@ -840,9 +840,9 @@ impl App {
 
     /// Where the command line runs: the browsed Dir Size directory, else the active panel.
     pub fn cmd_dir(&self) -> PathBuf {
-        self.stats
+        self.ncdu
             .as_ref()
-            .map_or_else(|| self.panels[self.active].path().to_owned(), Stats::path)
+            .map_or_else(|| self.panels[self.active].path().to_owned(), Ncdu::path)
     }
 
     /// After a command ran: files may have changed in both panels.
@@ -1225,8 +1225,8 @@ impl App {
     }
 
     /// Join a finished Dir Size scan; true when one was handled.
-    fn stats_job_tick(&mut self) -> bool {
-        let Mode::Stats(st) = &mut self.mode else {
+    fn ncdu_job_tick(&mut self) -> bool {
+        let Mode::Ncdu(st) = &mut self.mode else {
             return false;
         };
         if !st
@@ -1244,11 +1244,11 @@ impl App {
             // a failed rescan keeps the old tree
             Err(_) if st.splice.is_some() => {
                 st.splice = None;
-                if let Mode::Stats(st) = mem::replace(
+                if let Mode::Ncdu(st) = mem::replace(
                     &mut self.mode,
                     Mode::Message("Dir Size scan failed.".into()),
                 ) {
-                    self.stats = Some(st);
+                    self.ncdu = Some(st);
                 }
             }
             Err(_) => self.mode = Mode::Message("Dir Size scan failed.".into()),
@@ -1269,9 +1269,9 @@ impl App {
             }
         }
         if matches!(self.mode, Mode::Normal)
-            && let Some(st) = self.stats.take()
+            && let Some(st) = self.ncdu.take()
         {
-            self.mode = Mode::Stats(st);
+            self.mode = Mode::Ncdu(st);
         }
         if matches!(self.mode, Mode::Normal)
             && let Some(f) = self.found.take()
@@ -1293,7 +1293,7 @@ impl App {
             self.view_tmp = None;
         }
         // Dir Size comes back right after the editor closes, so it ends the remote edit too
-        if self.edit_remote.is_some() && matches!(self.mode, Mode::Normal | Mode::Stats(_)) {
+        if self.edit_remote.is_some() && matches!(self.mode, Mode::Normal | Mode::Ncdu(_)) {
             self.edit_remote = None;
         }
         if matches!(self.mode, Mode::Connecting(_)) {
@@ -1302,13 +1302,13 @@ impl App {
         if let Mode::Found(f) = &mut self.mode {
             return f.pump();
         }
-        if let Mode::Procs(p) = &mut self.mode
+        if let Mode::Top(p) = &mut self.mode
             && let Some(e) = p.tick()
         {
             self.mode = Mode::Message(format!("Processes: {e}"));
             return;
         }
-        if self.stats_job_tick() {
+        if self.ncdu_job_tick() {
             return;
         }
         if matches!(self.mode, Mode::Xfer(_)) {

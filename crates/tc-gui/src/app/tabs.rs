@@ -172,11 +172,11 @@ impl App {
                 error: None,
             } => editor.move_v(lines),
             Mode::MultiRename(f) => f.scroll_preview(lines),
-            Mode::Procs(p) if p.idle() => {
+            Mode::Top(p) if p.idle() => {
                 let last = p.rows.len().saturating_sub(1);
                 p.sel = p.sel.saturating_add_signed(lines).min(last);
             }
-            Mode::Stats(st) if st.confirm.is_none() => {
+            Mode::Ncdu(st) if st.confirm.is_none() => {
                 let last = st.view.len().saturating_sub(1);
                 st.sel = st.sel.saturating_add_signed(lines).min(last);
             }

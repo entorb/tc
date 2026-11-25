@@ -9,7 +9,7 @@ mod panel;
 mod sim;
 use self::panel::draw_panel;
 mod lists;
-use self::lists::{draw_found, draw_procs, draw_stats, draw_sync, status_line};
+use self::lists::{draw_found, draw_ncdu, draw_sync, draw_top, status_line};
 mod dialogs;
 mod help;
 use self::dialogs::overlays;
@@ -90,10 +90,10 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         egui::CentralPanel::default().show(ui, |ui| match &app.mode {
             Mode::Found(_) => draw_found(ui, app),
             Mode::Sync(_) => draw_sync(ui, app),
-            Mode::Procs(_) => draw_procs(ui, app),
+            Mode::Top(_) => draw_top(ui, app),
             Mode::MultiRename(_) => draw_multi_rename(ui, app),
             Mode::FindForm(_) => draw_find_form(ui, app),
-            _ => draw_stats(ui, app),
+            _ => draw_ncdu(ui, app),
         });
     } else {
         egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, app));

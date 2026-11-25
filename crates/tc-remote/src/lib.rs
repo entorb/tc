@@ -281,7 +281,7 @@ mod tests {
             let remote = l.base.join("tc-live");
             put(&l, &src, &remote, false).unwrap();
             let p = tc_core::ops::Progress::default();
-            let tree = tc_core::stats::scan_remote(l.r.as_ref(), &remote, &p);
+            let tree = tc_core::ncdu::scan_remote(l.r.as_ref(), &remote, &p);
             assert_eq!((tree.size, tree.files), (5, 1));
             if l.var == "TC_TEST_SFTP" {
                 let out = ssh_command(&l.url, "cat a", &tc_core::vfs::rpath(&remote))
@@ -354,7 +354,7 @@ mod tests {
             want.sort();
             assert_eq!(got, want, "{}", l.var);
             let p = tc_core::ops::Progress::default();
-            let tree = tc_core::stats::scan_remote(l.r.as_ref(), &remote, &p);
+            let tree = tc_core::ncdu::scan_remote(l.r.as_ref(), &remote, &p);
             let bytes = NAMES.iter().map(|n| n.len() as u64).sum::<u64>();
             assert_eq!((tree.size, tree.files), (bytes, 5), "{}", l.var);
             let back = tmp.path().join("back");
@@ -424,7 +424,7 @@ mod tests {
             symlink(".", tree.join("loop")).unwrap();
             symlink("real", tree.join("lnk")).unwrap();
             let p = tc_core::ops::Progress::default();
-            let node = tc_core::stats::scan_remote(l.r.as_ref(), &tree, &p);
+            let node = tc_core::ncdu::scan_remote(l.r.as_ref(), &tree, &p);
             assert!(node.files >= 1, "{}", l.var);
 
             let tmp = tempfile::tempdir().unwrap();

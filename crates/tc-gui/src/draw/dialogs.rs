@@ -8,8 +8,8 @@ use eframe::egui::{
 use tc_gui::app::{
     App, BmClick, BookmarkForm, BookmarkRow, FilterForm, FormRow, Mode, PropsForm, SettingsForm,
 };
-use tc_gui::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
-use tc_gui::fmt::{ProcInfo, procs_confirm, procs_info};
+use tc_gui::fmt::{self, Dialog, dialog, input_dialog, ncdu_progress};
+use tc_gui::fmt::{ProcInfo, top_confirm, top_info};
 use tc_gui::{KeyCode, KeyEvent, KeyModifiers};
 
 /// What a mouse did in a form; applied through the app like the matching keys.
@@ -52,7 +52,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         (None, Mode::Props(form)) => show_props(ctx, form),
         (None, Mode::BookmarkEdit(form)) => show_bookmark_edit(ctx, form),
         (None, Mode::Filter(form)) => show_filter(ctx, form),
-        (None, Mode::Procs(p)) => match (&p.draft, procs_info(p)) {
+        (None, Mode::Top(p)) => match (&p.draft, top_info(p)) {
             (Some(d), _) => show_form(
                 ctx,
                 ("proc-filter", "Process filter"),
@@ -73,32 +73,32 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         };
         pressed = pressed.or(show_dialog(ctx, ("sync-confirm", false), &d));
     }
-    if let Mode::Stats(st) = &app.mode
+    if let Mode::Ncdu(st) = &app.mode
         && let Some(text) = &st.confirm
     {
         let d = Dialog::Text {
             title: "Delete",
             text: text.clone(),
         };
-        pressed = pressed.or(show_dialog(ctx, ("stats-confirm", false), &d));
+        pressed = pressed.or(show_dialog(ctx, ("ncdu-confirm", false), &d));
     }
-    if let Mode::Stats(st) = &app.mode
-        && let Some(text) = stats_progress(st)
+    if let Mode::Ncdu(st) = &app.mode
+        && let Some(text) = ncdu_progress(st)
     {
         let d = Dialog::Text {
             title: "Scanning",
             text,
         };
-        pressed = pressed.or(show_dialog(ctx, ("stats-progress", true), &d));
+        pressed = pressed.or(show_dialog(ctx, ("ncdu-progress", true), &d));
     }
-    if let Mode::Procs(p) = &app.mode
+    if let Mode::Top(p) = &app.mode
         && let Some((pid, name)) = &p.confirm
     {
         let d = Dialog::Text {
             title: "Kill",
-            text: procs_confirm(*pid, name),
+            text: top_confirm(*pid, name),
         };
-        pressed = pressed.or(show_dialog(ctx, ("procs-confirm", false), &d));
+        pressed = pressed.or(show_dialog(ctx, ("top-confirm", false), &d));
     }
     if let Some(input) = &app.input {
         pressed = pressed.or(show_dialog(ctx, ("input", false), &input_dialog(input)));

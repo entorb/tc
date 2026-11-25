@@ -81,7 +81,7 @@ fn tables_and_dialogs_draw() {
 
 #[test]
 /// The process monitor gets keys through the egui event path; its footer replaces the main one.
-fn procs_keys_in_gui() {
+fn top_keys_in_gui() {
     let tmp = tempfile::tempdir().unwrap();
     let open = || Panel::open(tmp.path()).unwrap();
     let mut app = App::new(open(), open());
@@ -93,7 +93,7 @@ fn procs_keys_in_gui() {
         vec![press(Key::P, Modifiers::CTRL)],
     );
     // first snapshot takes ~0.2 s (CPU % needs two samples)
-    while matches!(&app.mode, Mode::Procs(p) if p.rows.is_empty()) {
+    while matches!(&app.mode, Mode::Top(p) if p.rows.is_empty()) {
         frame(&ctx, &mut app, &mut look, vec![]);
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -104,7 +104,7 @@ fn procs_keys_in_gui() {
         vec![Event::Text("s".into()), press(Key::S, Modifiers::NONE)],
     );
     assert!(
-        matches!(&app.mode, Mode::Procs(p) if p.every_edit.is_some()),
+        matches!(&app.mode, Mode::Top(p) if p.every_edit.is_some()),
         "s"
     );
     // the prompt and the monitor's own buttons are on screen, not clipped below the rows

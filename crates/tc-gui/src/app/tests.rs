@@ -136,8 +136,8 @@ fn footer_keys_are_documented_in_their_help() {
         (&FIND_FORM_FOOTER, &[fmt::HELP_FIND_FORM]),
         (&FORM_FOOTER, &[fmt::HELP_RENAME, fmt::HELP_PROPS]),
         (&SETTINGS_FOOTER, &[fmt::HELP_SETTINGS]),
-        (&STATS_FOOTER, &[fmt::HELP_STATS]),
-        (&PROCS_FOOTER, &[fmt::HELP_PROCS]),
+        (&NCDU_FOOTER, &[fmt::HELP_NCDU]),
+        (&TOP_FOOTER, &[fmt::HELP_TOP]),
     ];
     for (footer, helps) in screens {
         // every screen: F1 help first, F10 close last (tool screens like sync: F9), F-keys only up to F12
@@ -145,7 +145,7 @@ fn footer_keys_are_documented_in_their_help() {
         assert_eq!(footer.last().map(|f| f.1), Some(KeyCode::F(10)));
         assert!(footer.iter().all(|f| !matches!(f.1, KeyCode::F(13..))));
         let shift = [&SHIFT_FOOTER[..]].into_iter().filter(|_| {
-            std::ptr::eq(footer, &FOOTER[..]) || std::ptr::eq(footer, &STATS_FOOTER[..])
+            std::ptr::eq(footer, &FOOTER[..]) || std::ptr::eq(footer, &NCDU_FOOTER[..])
         });
         for &(label, ..) in footer.iter().chain(shift.flatten()) {
             // F1 opens the help itself

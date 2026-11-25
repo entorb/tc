@@ -86,7 +86,7 @@ impl Mode {
             Mode::MultiRename(f) => Some((&f.rows, &mut f.focus)),
             Mode::Settings(f) => Some((&f.rows, &mut f.focus)),
             Mode::Props(f) => Some((&f.rows, &mut f.focus)),
-            Mode::Procs(p) => p.draft.as_mut().map(|d| (d.rows.as_slice(), &mut d.focus)),
+            Mode::Top(p) => p.draft.as_mut().map(|d| (d.rows.as_slice(), &mut d.focus)),
             Mode::Filter(f) => Some((&f.rows, &mut f.focus)),
             _ => None,
         }
@@ -124,7 +124,7 @@ impl Mode {
             Mode::Props(f) => text_row(&mut f.rows, f.focus),
             Mode::BookmarkEdit(f) => f.line_mut(),
             Mode::Filter(f) => text_row(&mut f.rows, f.focus),
-            Mode::Procs(p) => p
+            Mode::Top(p) => p
                 .draft
                 .as_mut()
                 .and_then(|d| text_row(&mut d.rows, d.focus)),

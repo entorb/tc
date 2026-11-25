@@ -251,7 +251,7 @@ pub fn help_action(line: &str) -> Option<(KeyCode, KeyModifiers)> {
 }
 
 /// F-key bar of Dir Size (labels and the keys they send).
-pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
+pub const NCDU_FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
     ("F4 Edit", KeyCode::F(4), KeyModifiers::NONE),
@@ -264,7 +264,7 @@ pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
 ];
 
 /// F-key bar of the process monitor.
-pub const PROCS_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
+pub const TOP_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("Tab Sort", KeyCode::Tab, KeyModifiers::NONE),
     ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
@@ -323,14 +323,14 @@ impl App {
     /// Screens that own the window (no menu bar, toolbar or panels): results, sync, Dir Size,
     /// processes, multi-rename.
     pub fn sub_screen(&self) -> bool {
-        self.stats.is_some()
+        self.ncdu.is_some()
             || matches!(
                 self.mode,
                 Mode::Found(_)
                     | Mode::FindForm(_)
                     | Mode::Sync(_)
-                    | Mode::Stats(_)
-                    | Mode::Procs(_)
+                    | Mode::Ncdu(_)
+                    | Mode::Top(_)
                     | Mode::MultiRename(_)
             )
     }
@@ -346,9 +346,9 @@ impl App {
             Mode::MultiRename(_) => &RENAME_FOOTER,
             Mode::Props(_) => &FORM_FOOTER,
             Mode::Settings(_) => &SETTINGS_FOOTER,
-            Mode::Stats(_) => &STATS_FOOTER,
-            Mode::Cmd(_) if self.stats.is_some() => &STATS_FOOTER,
-            Mode::Procs(_) => &PROCS_FOOTER,
+            Mode::Ncdu(_) => &NCDU_FOOTER,
+            Mode::Cmd(_) if self.ncdu.is_some() => &NCDU_FOOTER,
+            Mode::Top(_) => &TOP_FOOTER,
             _ => &FOOTER,
         }
     }
@@ -360,7 +360,7 @@ impl App {
     ) -> (&'static str, KeyCode, KeyModifiers) {
         let keys = self.footer_keys();
         let alts: &Footer =
-            if std::ptr::eq(keys, &FOOTER[..]) || std::ptr::eq(keys, &STATS_FOOTER[..]) {
+            if std::ptr::eq(keys, &FOOTER[..]) || std::ptr::eq(keys, &NCDU_FOOTER[..]) {
                 &SHIFT_FOOTER
             } else {
                 &[]

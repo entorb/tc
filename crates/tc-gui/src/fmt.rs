@@ -11,23 +11,23 @@ use regex::Regex;
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::{Editor, Eol, human};
 use tc_core::find::{Hit, MAX_RESULTS};
+use tc_core::ncdu::treemap::Kind as TileKind;
+use tc_core::ncdu::{self, Node};
 use tc_core::panel::{CompareKind, Entry, SortKey};
-use tc_core::stats::treemap::Kind as TileKind;
-use tc_core::stats::{self, Node};
 use tc_core::syntax::{self, Kind, Lang};
 use tc_remote::Prompt;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, Filter, FormRow, Found, Input, ListRow, Mode, Procs, Stats, Step, Sync, Xfer, list_rows,
+    App, Filter, FormRow, Found, Input, ListRow, Mode, Ncdu, Step, Sync, Top, Xfer, list_rows,
 };
-use tc_core::procs::{Criteria, Proc, ProcSort};
 use tc_core::sync::{Item, Status};
+use tc_core::top::{Criteria, Proc, ProcSort};
 
 pub use help::{
-    HELP_CONFLICT, HELP_EDIT, HELP_FIND_FORM, HELP_FOUND, HELP_LISTS, HELP_MAIN, HELP_PROCS,
-    HELP_PROPS, HELP_RENAME, HELP_SEARCH, HELP_SETTINGS, HELP_STATS, HELP_SYNC, HELP_VIEW,
-    HelpLine, help, help_filter, help_line, key_help,
+    HELP_CONFLICT, HELP_EDIT, HELP_FIND_FORM, HELP_FOUND, HELP_LISTS, HELP_MAIN, HELP_NCDU,
+    HELP_PROPS, HELP_RENAME, HELP_SEARCH, HELP_SETTINGS, HELP_SYNC, HELP_TOP, HELP_VIEW, HelpLine,
+    help, help_filter, help_line, key_help,
 };
 
 /// `1234567` as `1,234,567`.
@@ -231,7 +231,7 @@ fn text<'a>(title: &'a str, text: String) -> Option<Dialog<'a>> {
     Some(Dialog::Text { title, text })
 }
 
-/// Popup of `app.mode`; `None` for modes without one (Found and Stats draw full screen).
+/// Popup of `app.mode`; `None` for modes without one (Found and Ncdu draw full screen).
 pub fn dialog(app: &App) -> Option<Dialog<'_>> {
     match &app.mode {
         Mode::Confirm(op, _, t) => text(op.verb(), t.clone()),
@@ -746,7 +746,7 @@ pub fn kind_rgb(k: TileKind, shade: u8) -> (u8, u8, u8) {
 }
 
 /// Dir Size row cells.
-pub struct StatsCols {
+pub struct NcduCols {
     pub marked: bool,
     pub value: String,
     /// Share of the browsed directory, 0..=1.
@@ -754,11 +754,11 @@ pub struct StatsCols {
     pub name: String,
 }
 
-pub fn stats_cols(st: &Stats, n: &Node) -> StatsCols {
+pub fn ncdu_cols(st: &Ncdu, n: &Node) -> NcduCols {
     let value = |n: &Node| if st.by_files { n.files } else { n.size };
     let total = value(st.current()).max(1);
     let slash = if n.is_dir { "/" } else { "" };
-    StatsCols {
+    NcduCols {
         marked: st.is_marked(n),
         value: if st.by_files {
             thousands(value(n))
@@ -771,11 +771,11 @@ pub fn stats_cols(st: &Stats, n: &Node) -> StatsCols {
 }
 
 /// Dir Size info popup text; `modified` only when known without a network round trip.
-pub fn stats_info(path: &Path, n: &Node, modified: Option<SystemTime>) -> String {
+pub fn ncdu_info(path: &Path, n: &Node, modified: Option<SystemTime>) -> String {
     let (kind, dirs) = if n.is_dir {
         (
             "directory",
-            format!("\nDirectories: {}", thousands(stats::dirs(n))),
+            format!("\nDirectories: {}", thousands(ncdu::dirs(n))),
         )
     } else {
         ("file", String::new())
@@ -795,7 +795,7 @@ pub fn stats_info(path: &Path, n: &Node, modified: Option<SystemTime>) -> String
 }
 
 /// Dir Size treemap tooltip: path below the browsed directory, size, files of a directory.
-pub fn stats_tip(rel: &Path, n: &Node) -> String {
+pub fn ncdu_tip(rel: &Path, n: &Node) -> String {
     let size = format!("Size:  {}", human(n.size));
     if n.is_dir {
         format!("{}/\n{size}\nFiles: {}", rel.display(), thousands(n.files))
@@ -805,14 +805,14 @@ pub fn stats_tip(rel: &Path, n: &Node) -> String {
 }
 
 /// Dir Size title: directory, sort and filter.
-pub fn stats_title(st: &Stats) -> String {
+pub fn ncdu_title(st: &Ncdu) -> String {
     let key = if st.by_files { "count" } else { "size" };
     format!("{} [{key}]{}", st.path().display(), st.filter.tag())
 }
 
 /// Dir Size footer: scan progress, else totals and keys.
 /// Scan progress shown centered while Dir Size reads the tree.
-pub fn stats_progress(st: &Stats) -> Option<String> {
+pub fn ncdu_progress(st: &Ncdu) -> Option<String> {
     st.scanning().then(|| {
         format!(
             "{} files\n{} / {} dirs\n\n[Esc] Cancel",
@@ -823,7 +823,7 @@ pub fn stats_progress(st: &Stats) -> Option<String> {
     })
 }
 
-pub fn stats_footer(st: &Stats) -> String {
+pub fn ncdu_footer(st: &Ncdu) -> String {
     if st.scanning() {
         return "scanning...  [Esc] Cancel".to_owned();
     }
@@ -832,7 +832,7 @@ pub fn stats_footer(st: &Stats) -> String {
 }
 
 /// Process monitor title: source, sort and filter.
-pub fn procs_title(p: &Procs) -> String {
+pub fn top_title(p: &Top) -> String {
     let src = p.remote.as_ref().map_or("local", |r| r.url());
     let key = match p.sort {
         ProcSort::Cpu => "cpu",
@@ -844,7 +844,7 @@ pub fn procs_title(p: &Procs) -> String {
 }
 
 /// Summary line: CPU, memory, swap, load and process count; `-` = unknown.
-pub fn procs_header(p: &Procs) -> String {
+pub fn top_header(p: &Top) -> String {
     let s = &p.snap;
     let mem = |used, total| match total {
         0 => "-".to_owned(),
@@ -882,7 +882,7 @@ pub fn proc_col_key(col: usize) -> Option<char> {
 }
 
 /// Open prompt of the process monitor: label and text being typed.
-pub fn procs_prompt(p: &Procs) -> Option<(&'static str, &LineEdit)> {
+pub fn top_prompt(p: &Top) -> Option<(&'static str, &LineEdit)> {
     p.every_edit
         .as_ref()
         .map(|l| ("update every (seconds)> ", l))
@@ -927,7 +927,7 @@ pub fn proc_row(p: &Proc) -> String {
 }
 
 /// Footer: kill result or keys; `loading` before the first snapshot.
-pub fn procs_footer(p: &Procs) -> String {
+pub fn top_footer(p: &Top) -> String {
     if !p.status.is_empty() {
         return p.status.clone();
     }
@@ -944,7 +944,7 @@ pub struct ProcInfo {
 }
 
 /// Info popup rows of the process under the info cursor; `None` while the popup is closed.
-pub fn procs_info(p: &Procs) -> Option<ProcInfo> {
+pub fn top_info(p: &Top) -> Option<ProcInfo> {
     let pid = p.info?;
     let title = format!(" Process {pid} ");
     let Some(q) = p.snap.procs.iter().find(|q| q.pid == pid) else {
@@ -1004,7 +1004,7 @@ fn clock(secs: u64) -> String {
 }
 
 /// Kill question for the process monitor.
-pub fn procs_confirm(pid: u32, name: &str) -> String {
+pub fn top_confirm(pid: u32, name: &str) -> String {
     format!("Kill {pid} {name}?\n\n[t] Terminate (SIGTERM)   [k] Kill (SIGKILL)   [Esc] Cancel")
 }
 

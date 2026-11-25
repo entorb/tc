@@ -11,15 +11,15 @@ use egui_extras::{Column, TableBuilder, TableRow};
 use std::sync::Arc;
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
-use tc_core::procs::ProcSort;
-use tc_core::stats::treemap::Tile;
+use tc_core::ncdu::treemap::Tile;
 use tc_core::sync::Status;
-use tc_gui::app::{App, Mode, Stats};
+use tc_core::top::ProcSort;
+use tc_gui::app::{App, Mode, Ncdu};
 use tc_gui::fmt::{
-    self, StatsCols, found_cols, found_title, stats_cols, stats_footer, stats_title, sync_comment,
+    self, NcduCols, found_cols, found_title, ncdu_cols, ncdu_footer, ncdu_title, sync_comment,
     sync_footer, sync_title,
 };
-use tc_gui::fmt::{procs_footer, procs_header, procs_prompt, procs_title};
+use tc_gui::fmt::{top_footer, top_header, top_prompt, top_title};
 use tc_gui::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     let Mode::Found(f) = &mut app.mode else {
@@ -111,15 +111,15 @@ fn sync_cells(row: &mut TableRow, (name, st, comment): &(String, Status, String)
 
 /// Status line of Dir Size (totals or its `:` prompt) and processes (footer or prompt).
 pub(super) fn status_line(ui: &mut Ui, app: &App) {
-    match (&app.mode, &app.stats) {
-        (Mode::Procs(p), _) => match procs_prompt(p) {
+    match (&app.mode, &app.ncdu) {
+        (Mode::Top(p), _) => match top_prompt(p) {
             Some((label, l)) => prompt(ui, label, l),
             None => {
-                ui.label(RichText::new(procs_footer(p)).color(MUTED));
+                ui.label(RichText::new(top_footer(p)).color(MUTED));
             }
         },
-        (Mode::Stats(st), _) => {
-            ui.label(RichText::new(stats_footer(st)).color(MUTED));
+        (Mode::Ncdu(st), _) => {
+            ui.label(RichText::new(ncdu_footer(st)).color(MUTED));
         }
         (Mode::Sync(s), _) => {
             ui.label(RichText::new(sync_footer(s)).color(MUTED));
@@ -141,7 +141,7 @@ pub(super) fn prompt(ui: &mut Ui, label: &str, l: &LineEdit) {
 const MAP_MIN_WIDTH: f32 = 700.0;
 
 /// Treemap of the browsed directory; `Some((row, double))` when a tile was clicked.
-fn stats_chart(ui: &mut Ui, st: &mut Stats) -> Option<(usize, bool)> {
+fn ncdu_chart(ui: &mut Ui, st: &mut Ncdu) -> Option<(usize, bool)> {
     let size = vec2(ui.available_width(), ui.available_height().max(50.0));
     let (resp, painter) = ui.allocate_painter(size, Sense::click());
     let rect = resp.rect;
@@ -178,7 +178,7 @@ fn stats_chart(ui: &mut Ui, st: &mut Stats) -> Option<(usize, bool)> {
     let tip = resp
         .hover_pos()
         .and_then(|p| st.map_node(p.x - rect.min.x, p.y - rect.min.y))
-        .map(|(rel, n)| fmt::stats_tip(&rel, n));
+        .map(|(rel, n)| fmt::ncdu_tip(&rel, n));
     if let Some(tip) = tip {
         resp.clone().on_hover_text_at_pointer(tip);
     }
@@ -189,7 +189,7 @@ fn stats_chart(ui: &mut Ui, st: &mut Stats) -> Option<(usize, bool)> {
 /// the area changed: re-tessellating thousands of stroked rects every frame costs a CPU core.
 fn tiles_mesh(ctx: &egui::Context, rect: Rect, tiles: &[Tile]) -> Arc<Mesh> {
     type Cached = (Rect, Vec<Tile>, Arc<Mesh>);
-    let id = egui::Id::unique("stats-treemap-mesh");
+    let id = egui::Id::unique("ncdu-treemap-mesh");
     if let Some(mesh) = ctx.data(|d| {
         d.get_temp::<Cached>(id)
             .filter(|(r, t, _)| *r == rect && t.as_slice() == tiles)
@@ -215,20 +215,20 @@ fn tiles_mesh(ctx: &egui::Context, rect: Rect, tiles: &[Tile]) -> Arc<Mesh> {
     mesh
 }
 
-pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
-    let (st, cmd): (&mut Stats, Option<&LineEdit>) = match (&mut app.mode, &mut app.stats) {
-        (Mode::Stats(st), _) => (st, None),
+pub(super) fn draw_ncdu(ui: &mut Ui, app: &mut App) {
+    let (st, cmd): (&mut Ncdu, Option<&LineEdit>) = match (&mut app.mode, &mut app.ncdu) {
+        (Mode::Ncdu(st), _) => (st, None),
         (Mode::Cmd(l), Some(st)) => (st, Some(&*l)),
         _ => return,
     };
-    panel_head(ui, "Dir Size", Some(stats_title(st)));
+    panel_head(ui, "Dir Size", Some(ncdu_title(st)));
     let (row_h, h) = page_rows(ui);
     let start = st.sel / h * h;
-    let rows: Vec<StatsCols> = st
+    let rows: Vec<NcduCols> = st
         .shown()
         .skip(start)
         .take(h)
-        .map(|n| stats_cols(st, n))
+        .map(|n| ncdu_cols(st, n))
         .collect();
     let sel = st.sel;
     let size = if st.by_files { "Files" } else { "Size" };
@@ -252,7 +252,7 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
             &titles,
             &[1, 2],
             (row_h, start, rows.len(), sel),
-            |row, i| stats_cells(row, &rows[i - start]),
+            |row, i| ncdu_cells(row, &rows[i - start]),
         )
     };
     let width = ui.available_width();
@@ -265,7 +265,7 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
                     list(ui)
                 })
                 .inner;
-            left.or(stats_chart(ui, st))
+            left.or(ncdu_chart(ui, st))
         })
         .inner
     } else {
@@ -283,7 +283,7 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
     }
 }
 
-fn stats_cells(row: &mut TableRow, c: &StatsCols) {
+fn ncdu_cells(row: &mut TableRow, c: &NcduCols) {
     row.col(|ui| {
         if c.marked {
             ui.label(RichText::new("*").color(MARK));
@@ -302,12 +302,12 @@ fn stats_cells(row: &mut TableRow, c: &StatsCols) {
 }
 
 /// Process monitor: title, summary, column titles (click sorts), page of rows (click selects).
-pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
-    let Mode::Procs(p) = &mut app.mode else {
+pub(super) fn draw_top(ui: &mut Ui, app: &mut App) {
+    let Mode::Top(p) = &mut app.mode else {
         return;
     };
-    panel_head(ui, "Processes", Some(procs_title(p)));
-    ui.label(RichText::new(procs_header(p)).color(TEXT));
+    panel_head(ui, "Processes", Some(top_title(p)));
+    ui.label(RichText::new(top_header(p)).color(TEXT));
     let (row_h, h) = page_rows(ui);
     let start = p.sel / h * h;
     let shown = p.rows.len().saturating_sub(start).min(h);

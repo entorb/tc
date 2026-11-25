@@ -251,7 +251,7 @@ pub fn kind(name: &OsStr, is_dir: bool) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::{Kind, Tile, kind, layout};
-    use crate::stats::Node;
+    use crate::ncdu::Node;
     use std::ffi::OsStr;
 
     fn file(name: &str, size: u64) -> Node {

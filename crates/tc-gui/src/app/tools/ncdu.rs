@@ -11,14 +11,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use tc_core::cmdline::{self, LineEdit};
+use tc_core::ncdu::treemap::{self, Tile};
+use tc_core::ncdu::{self, Node};
 use tc_core::ops;
 use tc_core::panel::Entry;
-use tc_core::stats::treemap::{self, Tile};
-use tc_core::stats::{self, Node};
 use tc_core::vfs::{self, Remote, Side};
 
 /// Dir Size: the scanned tree and the directory being browsed.
-pub struct Stats {
+pub struct Ncdu {
     pub dir: PathBuf,
     pub root: Node,
     /// Child indices from `root` down to the browsed directory.
@@ -48,7 +48,7 @@ pub struct Stats {
     pub(in crate::app) map: Option<((u32, u32), Vec<Tile>)>,
 }
 
-impl Stats {
+impl Ncdu {
     pub fn scanning(&self) -> bool {
         self.job.is_some()
     }
@@ -126,7 +126,7 @@ impl Stats {
     pub(in crate::app) fn drop_names(&mut self, names: &[OsString]) {
         for name in names {
             if let Some(i) = self.current().children.iter().position(|n| &n.name == name) {
-                stats::remove(&mut self.root, &self.path, i);
+                ncdu::remove(&mut self.root, &self.path, i);
             }
         }
         self.marked.retain(|m| !names.contains(m));
@@ -268,7 +268,7 @@ impl Stats {
         };
         // the cursor row indexes the old children, so read its name before they are replaced
         let name = self.selected().map(|n| n.name.clone());
-        stats::replace(&mut self.root, &path, node);
+        ncdu::replace(&mut self.root, &path, node);
         self.resort();
         self.select_name(name);
     }
@@ -297,11 +297,11 @@ impl Stats {
     /// Sorts the browsed directory and puts the cursor on its first shown entry.
     pub(in crate::app) fn resort(&mut self) {
         let order = if self.by_files {
-            stats::Order::Count
+            ncdu::Order::Count
         } else {
-            stats::Order::Size
+            ncdu::Order::Size
         };
-        stats::sort(&mut self.current_mut().children, order);
+        ncdu::sort(&mut self.current_mut().children, order);
         self.sel = 0;
         self.rebuild();
     }
@@ -314,27 +314,27 @@ pub(in crate::app) fn spawn_scan(
     p: Arc<ops::Progress>,
 ) -> thread::JoinHandle<Node> {
     thread::spawn(move || match remote {
-        Some(r) => stats::scan_remote(r.as_ref(), &dir, &p),
-        None => stats::scan(&dir, &p),
+        Some(r) => ncdu::scan_remote(r.as_ref(), &dir, &p),
+        None => ncdu::scan(&dir, &p),
     })
 }
 
 impl App {
     /// Ctrl+Space: Dir Size of the active panel's directory.
-    pub(in crate::app) fn spawn_stats(&mut self) {
+    pub(in crate::app) fn spawn_ncdu(&mut self) {
         let panel = &self.panels[self.active];
         if panel.archive().is_some() {
             self.mode = Mode::Message("Dir Size does not work in archives.".into());
             return;
         }
-        self.scan_stats(panel.path().to_owned(), panel.remote().cloned());
+        self.scan_ncdu(panel.path().to_owned(), panel.remote().cloned());
     }
 
     /// Scan `dir` in a worker and show its Dir Size.
-    pub(in crate::app) fn scan_stats(&mut self, dir: PathBuf, remote: Option<Arc<dyn Remote>>) {
+    pub(in crate::app) fn scan_ncdu(&mut self, dir: PathBuf, remote: Option<Arc<dyn Remote>>) {
         let progress = Arc::new(ops::Progress::default());
         let job = spawn_scan(dir.clone(), remote.clone(), progress.clone());
-        self.mode = Mode::Stats(Stats {
+        self.mode = Mode::Ncdu(Ncdu {
             remote,
             deleting: None,
             marked: HashSet::new(),
@@ -354,13 +354,13 @@ impl App {
     }
 
     /// Keys in Dir Size; only Esc/q/F10 (cancel) work while scanning.
-    pub(in crate::app) fn stats_mode_key(&mut self, mut st: Stats, key: KeyEvent) {
+    pub(in crate::app) fn ncdu_mode_key(&mut self, mut st: Ncdu, key: KeyEvent) {
         if st.confirm.is_some() {
-            return self.stats_confirm_key(st, key.code);
+            return self.ncdu_confirm_key(st, key.code);
         }
         if !st.scanning() && st.filter.key(key) {
             st.rebuild();
-            self.mode = Mode::Stats(st);
+            self.mode = Mode::Ncdu(st);
             return;
         }
         match key.code {
@@ -369,34 +369,34 @@ impl App {
                 // a cancelled rescan keeps the old tree; the first scan closes the screen
                 if st.splice.take().is_some() {
                     st.job = None;
-                    self.mode = Mode::Stats(st);
+                    self.mode = Mode::Ncdu(st);
                 }
                 return;
             }
             _ if st.scanning() => {}
-            KeyCode::F(3 | 4) => return self.stats_open(st, key),
+            KeyCode::F(3 | 4) => return self.ncdu_open(st, key),
             KeyCode::F(5) => st.rescan(),
             KeyCode::F(8) | KeyCode::Delete | KeyCode::Char('d') => {
                 st.delete_ask();
             }
-            // Ctrl+Space opened the stats, it does not mark
+            // Ctrl+Space opened Dir Size, it does not mark
             KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
             KeyCode::Char(':') => {
-                self.stats = Some(st);
+                self.ncdu = Some(st);
                 self.mode = Mode::Cmd(LineEdit::default());
                 return;
             }
-            KeyCode::Char('i') => return self.stats_info(st),
-            KeyCode::Char('p') => return self.stats_panelize(st),
+            KeyCode::Char('i') => return self.ncdu_info(st),
+            KeyCode::Char('p') => return self.ncdu_panelize(st),
             code => st.key(code, self.page),
         }
-        self.mode = Mode::Stats(st);
+        self.mode = Mode::Ncdu(st);
     }
 
-    /// `i`: message popup for the selected entry, the stats come back when it closes.
-    pub(in crate::app) fn stats_info(&mut self, st: Stats) {
+    /// `i`: message popup for the selected entry, Dir Size comes back when it closes.
+    pub(in crate::app) fn ncdu_info(&mut self, st: Ncdu) {
         let Some(n) = st.selected() else {
-            self.mode = Mode::Stats(st);
+            self.mode = Mode::Ncdu(st);
             return;
         };
         let path = st.path().join(&n.name);
@@ -405,16 +405,16 @@ impl App {
             Some(_) => None,
             None => fs::symlink_metadata(&path).and_then(|m| m.modified()).ok(),
         };
-        let text = fmt::stats_info(&path, n, modified);
-        self.stats = Some(st);
+        let text = fmt::ncdu_info(&path, n, modified);
+        self.ncdu = Some(st);
         self.mode = Mode::Message(text);
     }
 
     /// `p`: the marked entries, else all shown ones, become a virtual panel in the active panel.
-    pub(in crate::app) fn stats_panelize(&mut self, st: Stats) {
+    pub(in crate::app) fn ncdu_panelize(&mut self, st: Ncdu) {
         if st.remote.is_some() {
             // the list's re-stat is local only
-            self.stats = Some(st);
+            self.ncdu = Some(st);
             self.mode = Mode::Message(REMOTE.into());
             return;
         }
@@ -443,18 +443,18 @@ impl App {
     }
 
     /// Answer to the Dir Size delete question: the entry leaves the tree without a rescan.
-    pub(in crate::app) fn stats_confirm_key(&mut self, mut st: Stats, code: KeyCode) {
+    pub(in crate::app) fn ncdu_confirm_key(&mut self, mut st: Ncdu, code: KeyCode) {
         let to_trash = match code {
             // no trash on remote panels
             KeyCode::Char('y' | 'Y') | KeyCode::Enter if st.remote.is_none() => true,
             KeyCode::Char('p' | 'P') => false,
             KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 st.confirm = None;
-                self.mode = Mode::Stats(st);
+                self.mode = Mode::Ncdu(st);
                 return;
             }
             _ => {
-                self.mode = Mode::Stats(st);
+                self.mode = Mode::Ncdu(st);
                 return;
             }
         };
@@ -466,7 +466,7 @@ impl App {
         let count = Arc::new(AtomicUsize::new(0));
         st.deleting = Some((names.clone(), count.clone()));
         let side = st.remote.clone().map_or(Side::Local, Side::Remote);
-        self.stats = Some(st);
+        self.ncdu = Some(st);
         let paths: Vec<PathBuf> = names.iter().map(|n| dir.join(n)).collect();
         self.spawn_xfer("Delete", (side.clone(), side.clone()), move |p, _| {
             vfs::delete_all(&side, &paths, to_trash, p, || {
@@ -476,25 +476,25 @@ impl App {
     }
 
     /// F3 view, F4 edit, Shift+F4 external editor on the selected file of Dir Size.
-    pub(in crate::app) fn stats_open(&mut self, st: Stats, key: KeyEvent) {
+    pub(in crate::app) fn ncdu_open(&mut self, st: Ncdu, key: KeyEvent) {
         let Some(path) = st
             .selected()
             .filter(|n| !n.is_dir)
             .map(|n| (st.path().join(&n.name), n.size))
         else {
-            self.mode = Mode::Stats(st);
+            self.mode = Mode::Ncdu(st);
             return;
         };
         let (path, size) = path;
         if let Some(r) = st.remote.clone() {
-            self.stats = Some(st);
+            self.ncdu = Some(st);
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 self.mode = Mode::Message(REMOTE.into());
                 return;
             }
             return self.fetch(r, path, size, key.code == KeyCode::F(4));
         }
-        self.stats = Some(st);
+        self.ncdu = Some(st);
         match key.code {
             KeyCode::F(3) if cmdline::opens_externally(&path) => self.open_preview(path),
             KeyCode::F(4)
@@ -526,14 +526,14 @@ mod tests {
     use crate::app::tests::{key, settle, two_panels, type_keys, type_text, wait, with};
 
     #[test]
-    fn stats_deletes_without_rescan_and_runs_cmd_in_dir() {
+    fn ncdu_deletes_without_rescan_and_runs_cmd_in_dir() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("many")).unwrap();
         std::fs::write(tmp.path().join("many").join("a"), "x").unwrap();
         std::fs::write(tmp.path().join("big"), "x".repeat(100)).unwrap();
         let mut app = two_panels(tmp.path(), tmp.path());
         with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
         key(&mut app, KeyCode::F(8));
@@ -545,11 +545,11 @@ mod tests {
         app.tick();
         assert!(!tmp.path().join("big").exists());
         match &app.mode {
-            Mode::Stats(st) => {
+            Mode::Ncdu(st) => {
                 assert_eq!((st.root.size, st.root.files), (1, 1));
                 assert_eq!(st.current().children[0].name, "many");
             }
-            _ => panic!("not in stats"),
+            _ => panic!("not in ncdu"),
         }
         key(&mut app, KeyCode::Enter);
         key(&mut app, KeyCode::Char(':'));
@@ -557,27 +557,27 @@ mod tests {
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.run, Some(("ls".into(), tmp.path().join("many"), None)));
         app.tick();
-        assert!(matches!(app.mode, Mode::Stats(_)));
+        assert!(matches!(app.mode, Mode::Ncdu(_)));
     }
 
-    fn stats_app(dir: &Path) -> App {
+    fn ncdu_app(dir: &Path) -> App {
         let mut app = two_panels(dir, dir);
         with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
         app
     }
 
     #[test]
-    fn stats_treemap_cache_and_hit_test() {
+    fn ncdu_treemap_cache_and_hit_test() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a"), "x".repeat(60)).unwrap();
         std::fs::write(tmp.path().join("b"), "x".repeat(30)).unwrap();
         std::fs::create_dir(tmp.path().join("d")).unwrap();
         std::fs::write(tmp.path().join("d").join("x"), "x".repeat(10)).unwrap();
-        let mut app = stats_app(tmp.path());
-        let Mode::Stats(st) = &mut app.mode else {
+        let mut app = ncdu_app(tmp.path());
+        let Mode::Ncdu(st) = &mut app.mode else {
             panic!()
         };
         let n = st.treemap(100.0, 50.0, 1, 0.0, 0.0).len();
@@ -616,18 +616,18 @@ mod tests {
     }
 
     #[test]
-    fn stats_treemap_follows_enter() {
+    fn ncdu_treemap_follows_enter() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("d")).unwrap();
         std::fs::write(tmp.path().join("d").join("x"), "x").unwrap();
         std::fs::write(tmp.path().join("d").join("y"), "x").unwrap();
-        let mut app = stats_app(tmp.path());
-        let Mode::Stats(st) = &mut app.mode else {
+        let mut app = ncdu_app(tmp.path());
+        let Mode::Ncdu(st) = &mut app.mode else {
             panic!()
         };
         assert_eq!(st.treemap(10.0, 10.0, 0, 0.0, 0.0).len(), 1);
         key(&mut app, KeyCode::Enter);
-        let Mode::Stats(st) = &mut app.mode else {
+        let Mode::Ncdu(st) = &mut app.mode else {
             panic!()
         };
         assert!(st.map.is_none());
@@ -635,19 +635,19 @@ mod tests {
     }
 
     #[test]
-    fn stats_treemap_tab_counts_dirs_two_levels() {
+    fn ncdu_treemap_tab_counts_dirs_two_levels() {
         let tmp = tempfile::tempdir().unwrap();
         let deep = tmp.path().join("d").join("e").join("f");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(deep.join("x"), "x").unwrap();
         std::fs::write(tmp.path().join("loose"), "x").unwrap();
-        let mut app = stats_app(tmp.path());
-        let Mode::Stats(st) = &mut app.mode else {
+        let mut app = ncdu_app(tmp.path());
+        let Mode::Ncdu(st) = &mut app.mode else {
             panic!()
         };
         assert_eq!(st.treemap(100.0, 100.0, u8::MAX, 0.0, 0.0).len(), 5);
         key(&mut app, KeyCode::Tab);
-        let Mode::Stats(st) = &mut app.mode else {
+        let Mode::Ncdu(st) = &mut app.mode else {
             panic!()
         };
         assert!(st.map.is_none());
@@ -657,12 +657,12 @@ mod tests {
         assert!(
             tiles
                 .iter()
-                .all(|t| t.kind == tc_core::stats::treemap::Kind::Dir && t.depth <= 1)
+                .all(|t| t.kind == tc_core::ncdu::treemap::Kind::Dir && t.depth <= 1)
         );
     }
 
     #[test]
-    fn stats_feeds_entries_to_panel() {
+    fn ncdu_feeds_entries_to_panel() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a"), "x".repeat(30)).unwrap();
         std::fs::write(tmp.path().join("b"), "x".repeat(20)).unwrap();
@@ -672,14 +672,14 @@ mod tests {
             assert!(p.is_virtual());
             p.entries().iter().map(|e| PathBuf::from(&e.name)).collect()
         };
-        let mut app = stats_app(tmp.path());
+        let mut app = ncdu_app(tmp.path());
         key(&mut app, KeyCode::Down);
         key(&mut app, KeyCode::Insert); // b
         key(&mut app, KeyCode::Char('p'));
         assert!(matches!(app.mode, Mode::Normal));
         settle(&mut app);
         assert_eq!(names(&app), [tmp.path().join("b")]);
-        let mut app = stats_app(tmp.path());
+        let mut app = ncdu_app(tmp.path());
         key(&mut app, KeyCode::Char('p'));
         settle(&mut app);
         let mut all = names(&app);
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn stats_marks_and_deletes_all_marked() {
+    fn ncdu_marks_and_deletes_all_marked() {
         let tmp = tempfile::tempdir().unwrap();
         for (n, size) in [("a", 30), ("b", 20), ("c", 10)] {
             std::fs::write(tmp.path().join(n), "x".repeat(size)).unwrap();
@@ -700,7 +700,7 @@ mod tests {
             std::fs::write(tmp.path().join(odd), "x").unwrap();
             odd
         };
-        let mut app = stats_app(tmp.path());
+        let mut app = ncdu_app(tmp.path());
         key(&mut app, KeyCode::Char(' ')); // a, moves down
         key(&mut app, KeyCode::Insert); // b
         key(&mut app, KeyCode::Up);
@@ -708,14 +708,14 @@ mod tests {
         key(&mut app, KeyCode::Up);
         key(&mut app, KeyCode::Insert); // b marked
         key(&mut app, KeyCode::F(8));
-        let Mode::Stats(st) = &app.mode else { panic!() };
+        let Mode::Ncdu(st) = &app.mode else { panic!() };
         assert!(st.confirm.as_ref().is_some_and(|t| t.contains("2 items (")));
         key(&mut app, KeyCode::Char('p'));
         wait(&mut app);
         app.tick();
         assert!(!tmp.path().join("a").exists() && !tmp.path().join("b").exists());
         assert!(tmp.path().join("c").exists());
-        let Mode::Stats(st) = &app.mode else { panic!() };
+        let Mode::Ncdu(st) = &app.mode else { panic!() };
         assert_eq!(
             st.root.size,
             if cfg!(target_os = "linux") { 11 } else { 10 }
@@ -730,7 +730,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stats_batch_error_asks_and_cancel_stops() {
+    fn ncdu_batch_error_asks_and_cancel_stops() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a"), "x".repeat(30)).unwrap();
@@ -742,7 +742,7 @@ mod tests {
         if std::fs::write(ro.join("probe"), "").is_ok() {
             return restore().unwrap(); // root ignores permissions
         }
-        let mut app = stats_app(tmp.path());
+        let mut app = ncdu_app(tmp.path());
         key(&mut app, KeyCode::Insert); // a
         key(&mut app, KeyCode::Insert); // ro
         key(&mut app, KeyCode::F(8));
@@ -752,7 +752,7 @@ mod tests {
         key(&mut app, KeyCode::Esc); // cancel
         wait(&mut app);
         app.tick();
-        let Mode::Stats(st) = &app.mode else { panic!() };
+        let Mode::Ncdu(st) = &app.mode else { panic!() };
         assert!(!tmp.path().join("a").exists() && ro.join("f").exists());
         let names: Vec<_> = st.root.children.iter().map(|n| n.name.clone()).collect();
         assert_eq!(names, ["ro"]);
@@ -761,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_stats_deletes_all_marked() {
+    fn remote_ncdu_deletes_all_marked() {
         let left = tempfile::tempdir().unwrap();
         let mem = tc_core::vfs::mem::Mem::new();
         for (n, size) in [("/a", 3), ("/b", 2), ("/c", 1)] {
@@ -772,7 +772,7 @@ mod tests {
         app.panels[1].open_remote(mem.clone(), "/".into()).unwrap();
         settle(&mut app);
         with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
         key(&mut app, KeyCode::Insert);
@@ -783,27 +783,27 @@ mod tests {
         app.tick();
         assert!(mem.get("/a").is_none() && mem.get("/b").is_none() && mem.get("/c").is_some());
         assert!(
-            matches!(&app.mode, Mode::Stats(st) if st.root.size == 1 && st.current().children.len() == 1)
+            matches!(&app.mode, Mode::Ncdu(st) if st.root.size == 1 && st.current().children.len() == 1)
         );
     }
 
     #[test]
-    fn slash_filters_stats_and_acts_on_shown_rows_only() {
+    fn slash_filters_ncdu_and_acts_on_shown_rows_only() {
         let tmp = tempfile::tempdir().unwrap();
         for (n, size) in [("Alpha", 30), ("beta", 20), ("gamma", 10)] {
             std::fs::write(tmp.path().join(n), "x".repeat(size)).unwrap();
         }
         let mut app = two_panels(tmp.path(), tmp.path());
         with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
         let shown = |app: &App| match &app.mode {
-            Mode::Stats(st) => st
+            Mode::Ncdu(st) => st
                 .shown()
                 .map(|n| n.name.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            _ => panic!("not in stats"),
+            _ => panic!("not in ncdu"),
         };
         key(&mut app, KeyCode::Char('/'));
         type_keys(&mut app, "AM");
@@ -823,12 +823,12 @@ mod tests {
     }
 
     #[test]
-    fn stats_info_popup_and_back() {
+    fn ncdu_info_popup_and_back() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("f"), "abc").unwrap();
         let mut app = two_panels(tmp.path(), tmp.path());
         with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
         key(&mut app, KeyCode::Char('i'));
@@ -841,11 +841,11 @@ mod tests {
         );
         key(&mut app, KeyCode::Char('x'));
         app.tick();
-        assert!(matches!(app.mode, Mode::Stats(_)));
+        assert!(matches!(app.mode, Mode::Ncdu(_)));
     }
 
     #[test]
-    fn stats_sorts_toggles_count_and_browses() {
+    fn ncdu_sorts_toggles_count_and_browses() {
         let tmp = tempfile::tempdir().unwrap();
         let many = tmp.path().join("many");
         std::fs::create_dir(&many).unwrap();
@@ -855,17 +855,17 @@ mod tests {
         std::fs::write(tmp.path().join("big"), "x".repeat(100)).unwrap();
         let mut app = two_panels(tmp.path(), tmp.path());
         with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
         let top = |app: &App| match &app.mode {
-            Mode::Stats(st) => st.current().children[st.sel].name.clone(),
-            _ => panic!("not in stats"),
+            Mode::Ncdu(st) => st.current().children[st.sel].name.clone(),
+            _ => panic!("not in ncdu"),
         };
         assert_eq!(top(&app), "big");
         key(&mut app, KeyCode::Tab); // count mode: sorted by file count, cursor stays on its entry
         assert_eq!(top(&app), "big");
-        let Mode::Stats(st) = &app.mode else { panic!() };
+        let Mode::Ncdu(st) = &app.mode else { panic!() };
         assert_eq!(st.current().children[0].name, "many");
         key(&mut app, KeyCode::Home);
         assert_eq!(top(&app), "many");
@@ -878,14 +878,14 @@ mod tests {
         assert!(matches!(app.mode, Mode::View { .. }));
         key(&mut app, KeyCode::Esc);
         app.tick();
-        assert_eq!(top(&app), "a"); // back in stats after the viewer
+        assert_eq!(top(&app), "a"); // back in Dir Size after the viewer
         key(&mut app, KeyCode::F(10));
         assert!(matches!(app.mode, Mode::Normal) && !app.quit);
     }
 
     /// Dir Size on a remote panel: scan, view, `:` over ssh and permanent delete.
     #[test]
-    fn remote_stats_view_cmd_and_delete() {
+    fn remote_ncdu_view_cmd_and_delete() {
         let left = tempfile::tempdir().unwrap();
         let mem = tc_core::vfs::mem::Mem::new();
         mem.dir("/d");
@@ -904,10 +904,10 @@ mod tests {
         );
         app.run = None;
         with(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
-        assert!(matches!(&app.mode, Mode::Stats(st) if (st.root.size, st.root.files) == (3, 1)));
+        assert!(matches!(&app.mode, Mode::Ncdu(st) if (st.root.size, st.root.files) == (3, 1)));
         key(&mut app, KeyCode::Enter); // into "d"
         key(&mut app, KeyCode::F(3));
         settle(&mut app);
@@ -924,7 +924,7 @@ mod tests {
         wait(&mut app);
         app.tick();
         assert_eq!(mem.get("/d/f").unwrap(), b"xxyz\n");
-        assert!(matches!(app.mode, Mode::Stats(_)) && app.edit_remote.is_none());
+        assert!(matches!(app.mode, Mode::Ncdu(_)) && app.edit_remote.is_none());
         key(&mut app, KeyCode::Char(':'));
         type_keys(&mut app, "ls");
         key(&mut app, KeyCode::Enter);
@@ -933,7 +933,7 @@ mod tests {
         app.tick();
         key(&mut app, KeyCode::F(8));
         assert!(
-            matches!(&app.mode, Mode::Stats(st) if st.confirm.as_ref().is_some_and(|t| t.contains("No trash")))
+            matches!(&app.mode, Mode::Ncdu(st) if st.confirm.as_ref().is_some_and(|t| t.contains("No trash")))
         );
         key(&mut app, KeyCode::Char('y')); // no trash: ignored
         key(&mut app, KeyCode::Char('p'));
@@ -941,51 +941,51 @@ mod tests {
         app.tick();
         assert!(mem.get("/d/f").is_none());
         assert!(
-            matches!(&app.mode, Mode::Stats(st) if st.root.size == 0 && st.current().children.is_empty())
+            matches!(&app.mode, Mode::Ncdu(st) if st.root.size == 0 && st.current().children.is_empty())
         );
         key(&mut app, KeyCode::Esc);
         app.tick();
     }
 
     #[test]
-    fn stats_ctrl_r_rescans_subtree_in_place() {
+    fn ncdu_ctrl_r_rescans_subtree_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         std::fs::write(tmp.path().join("sub/x"), "123").unwrap();
         std::fs::write(tmp.path().join("y"), "12345").unwrap();
-        let mut app = stats_app(tmp.path());
+        let mut app = ncdu_app(tmp.path());
         key(&mut app, KeyCode::Down); // sub (3 bytes) below y
         key(&mut app, KeyCode::Enter);
         std::fs::write(tmp.path().join("sub/z"), "x".repeat(10)).unwrap();
         // Esc cancels and keeps the old tree
         with(&mut app, KeyCode::F(5), KeyModifiers::NONE);
         key(&mut app, KeyCode::Esc);
-        assert!(matches!(&app.mode, Mode::Stats(st) if !st.scanning() && st.root.size == 8));
+        assert!(matches!(&app.mode, Mode::Ncdu(st) if !st.scanning() && st.root.size == 8));
         with(&mut app, KeyCode::F(5), KeyModifiers::NONE);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
-        let Mode::Stats(st) = &app.mode else { panic!() };
+        let Mode::Ncdu(st) = &app.mode else { panic!() };
         assert_eq!((st.current().files, st.current().size), (2, 13));
         assert_eq!((st.root.files, st.root.size), (3, 18));
         key(&mut app, KeyCode::Backspace);
-        let Mode::Stats(st) = &app.mode else { panic!() };
+        let Mode::Ncdu(st) = &app.mode else { panic!() };
         assert!(st.current().children.iter().any(|n| n.name == "y"));
     }
 
     #[test]
-    fn stats_ctrl_r_after_shrink_keeps_cursor_valid() {
+    fn ncdu_ctrl_r_after_shrink_keeps_cursor_valid() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a"), "1234567").unwrap();
         std::fs::write(tmp.path().join("b"), "12").unwrap();
-        let mut app = stats_app(tmp.path());
+        let mut app = ncdu_app(tmp.path());
         key(&mut app, KeyCode::Down); // b, the last row
         std::fs::remove_file(tmp.path().join("a")).unwrap();
         with(&mut app, KeyCode::F(5), KeyModifiers::NONE);
-        while matches!(&app.mode, Mode::Stats(st) if st.scanning()) {
+        while matches!(&app.mode, Mode::Ncdu(st) if st.scanning()) {
             app.tick();
         }
-        let Mode::Stats(st) = &app.mode else { panic!() };
+        let Mode::Ncdu(st) = &app.mode else { panic!() };
         assert_eq!((st.current().children.len(), st.root.size), (1, 2));
         assert_eq!(st.selected().map(|n| n.name.clone()), Some("b".into()));
     }

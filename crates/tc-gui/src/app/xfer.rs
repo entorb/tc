@@ -568,7 +568,7 @@ impl App {
                 if mem::take(&mut self.cut_pending) && error.is_none() {
                     self.file_clip = None;
                 }
-                if let Some(st) = &mut self.stats
+                if let Some(st) = &mut self.ncdu
                     && let Some((names, count)) = st.deleting.take()
                 {
                     // whatever the error: what was deleted leaves the tree

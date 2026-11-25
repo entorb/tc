@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tc_core::cmdline::LineEdit;
-use tc_core::procs::{self, Criteria, Proc, ProcSort, Sampler, Snapshot};
+use tc_core::top::{self, Criteria, Proc, ProcSort, Sampler, Snapshot};
 use tc_core::vfs::Remote;
 
 const F_TEXT: &str = "Find (id, command, name)";
@@ -49,7 +49,7 @@ pub struct Draft {
 }
 
 /// Process monitor (Ctrl+P): latest snapshot, sorted and filtered, refreshed by a worker.
-pub struct Procs {
+pub struct Top {
     /// Connection of the remote panel it was opened on; `None`: this computer.
     pub remote: Option<Arc<dyn Remote>>,
     pub(in crate::app) sampler: Sampler,
@@ -76,11 +76,11 @@ pub struct Procs {
     pub status: String,
 }
 
-impl Procs {
+impl Top {
     pub(in crate::app) fn new(remote: Option<Arc<dyn Remote>>) -> Self {
-        Procs {
-            sampler: procs::sample(remote.clone(), procs::INTERVAL),
-            every: procs::INTERVAL,
+        Top {
+            sampler: top::sample(remote.clone(), top::INTERVAL),
+            every: top::INTERVAL,
             every_edit: None,
             remote,
             snap: Snapshot::default(),
@@ -112,7 +112,7 @@ impl Procs {
 
     /// Re-sort and re-filter; the cursor keeps its row, so the list does not jump under it.
     pub(in crate::app) fn refresh(&mut self) {
-        procs::sort(&mut self.snap.procs, self.sort);
+        top::sort(&mut self.snap.procs, self.sort);
         self.rows = (0..self.snap.procs.len())
             .filter(|&i| self.crit.matches(&self.snap.procs[i]))
             .collect();
@@ -274,7 +274,7 @@ impl Procs {
             return;
         };
         let r = self.remote.clone();
-        self.kill = Some(thread::spawn(move || procs::kill(r.as_deref(), pid, force)));
+        self.kill = Some(thread::spawn(move || top::kill(r.as_deref(), pid, force)));
         self.status = format!(
             "sending SIG{} to {pid}",
             if force { "KILL" } else { "TERM" }
@@ -285,31 +285,31 @@ impl Procs {
 #[cfg(test)]
 mod tests {
 
-    use crate::app::menu::PROCS_FOOTER;
+    use crate::app::menu::TOP_FOOTER;
 
-    use super::Procs;
+    use super::Top;
 
     use crate::app::{App, Mode};
     use crate::fmt;
 
     use crate::{KeyCode, KeyModifiers};
 
-    use tc_core::procs::ProcSort;
+    use tc_core::top::ProcSort;
 
     use crate::app::tests::{key, settle, two_panels, type_keys, with};
 
-    fn procs(app: &App) -> &Procs {
+    fn top(app: &App) -> &Top {
         match &app.mode {
-            Mode::Procs(p) => p,
+            Mode::Top(p) => p,
             _ => panic!("not in the process monitor"),
         }
     }
 
     /// Tick until the next snapshot arrives.
-    fn procs_wait(app: &mut App) {
-        let before = procs(app).snap.clone();
+    fn top_wait(app: &mut App) {
+        let before = top(app).snap.clone();
         let t = std::time::Instant::now();
-        while procs(app).snap == before && t.elapsed() < std::time::Duration::from_secs(5) {
+        while top(app).snap == before && t.elapsed() < std::time::Duration::from_secs(5) {
             app.tick();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -321,57 +321,57 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = two_panels(dir.path(), dir.path());
         with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
-        while procs(&app).rows.is_empty() {
+        while top(&app).rows.is_empty() {
             app.tick();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let all = procs(&app).rows.len();
+        let all = top(&app).rows.len();
         assert!(app.idle());
-        assert_eq!(app.footer_keys(), &PROCS_FOOTER);
+        assert_eq!(app.footer_keys(), &TOP_FOOTER);
         key(&mut app, KeyCode::Tab);
-        let p = procs(&app);
+        let p = top(&app);
         assert_eq!(p.sort, ProcSort::Mem);
         let mems: Vec<u64> = p.rows.iter().map(|&i| p.snap.procs[i].mem).collect();
         assert!(mems.is_sorted_by(|a, b| a >= b));
         key(&mut app, KeyCode::Tab);
-        assert_eq!(procs(&app).sort, ProcSort::Run);
+        assert_eq!(top(&app).sort, ProcSort::Run);
         key(&mut app, KeyCode::Tab);
-        assert_eq!(procs(&app).sort, ProcSort::Cpu);
+        assert_eq!(top(&app).sort, ProcSort::Cpu);
         key(&mut app, KeyCode::Char('/'));
         type_keys(&mut app, &std::process::id().to_string());
-        let p = procs(&app);
+        let p = top(&app);
         assert!(p.draft.is_some() && p.rows.len() == all);
         key(&mut app, KeyCode::Enter);
-        let p = procs(&app);
+        let p = top(&app);
         assert!(p.draft.is_none() && p.rows.len() < all);
         assert_eq!(p.current().map(|c| c.pid), Some(std::process::id()));
         key(&mut app, KeyCode::Esc);
-        assert_eq!(procs(&app).rows.len(), all);
+        assert_eq!(top(&app).rows.len(), all);
         // the cursor keeps its row across refreshes
         key(&mut app, KeyCode::Down);
         // a new interval wakes the worker at once, no 2 s wait for the next snapshot
-        procs(&app)
+        top(&app)
             .sampler
             .set_interval(std::time::Duration::from_millis(50));
-        procs_wait(&mut app);
-        assert_eq!(procs(&app).sel, 1);
+        top_wait(&mut app);
+        assert_eq!(top(&app).sel, 1);
         key(&mut app, KeyCode::Char('s'));
-        assert_eq!(procs(&app).every_edit.as_ref().unwrap().text, "2");
+        assert_eq!(top(&app).every_edit.as_ref().unwrap().text, "2");
         with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
         type_keys(&mut app, "0,5");
         key(&mut app, KeyCode::Enter);
-        assert_eq!(procs(&app).every, std::time::Duration::from_millis(500));
+        assert_eq!(top(&app).every, std::time::Duration::from_millis(500));
         key(&mut app, KeyCode::Char('s'));
         with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
         type_keys(&mut app, "0");
         key(&mut app, KeyCode::Enter);
-        let p = procs(&app);
+        let p = top(&app);
         assert_eq!(p.every, std::time::Duration::from_millis(500));
         assert!(p.status.contains("0.5 to 3600"));
         key(&mut app, KeyCode::F(8));
-        assert!(procs(&app).confirm.is_some());
+        assert!(top(&app).confirm.is_some());
         key(&mut app, KeyCode::Char('n'));
-        assert!(procs(&app).confirm.is_none());
+        assert!(top(&app).confirm.is_none());
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));
     }
@@ -382,23 +382,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = two_panels(dir.path(), dir.path());
         with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
-        while procs(&app).rows.is_empty() {
+        while top(&app).rows.is_empty() {
             app.tick();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let pid = procs(&app).current().unwrap().pid;
+        let pid = top(&app).current().unwrap().pid;
         key(&mut app, KeyCode::Char('i'));
-        assert_eq!(procs(&app).info, Some(pid));
-        let info = fmt::procs_info(procs(&app)).unwrap();
+        assert_eq!(top(&app).info, Some(pid));
+        let info = fmt::top_info(top(&app)).unwrap();
         assert_eq!(info.rows[0], ("PID", pid.to_string()));
         key(&mut app, KeyCode::Down);
-        assert_eq!(procs(&app).info, Some(pid));
+        assert_eq!(top(&app).info, Some(pid));
         key(&mut app, KeyCode::F(10));
-        assert_eq!(procs(&app).info, None);
-        assert!(matches!(app.mode, Mode::Procs(_)));
+        assert_eq!(top(&app).info, None);
+        assert!(matches!(app.mode, Mode::Top(_)));
         key(&mut app, KeyCode::Char('i'));
         key(&mut app, KeyCode::Esc);
-        assert_eq!(procs(&app).info, None);
+        assert_eq!(top(&app).info, None);
     }
 
     /// `/` popup: a minimum that is not a number keeps the popup open with the error; Esc cancels.
@@ -412,10 +412,10 @@ mod tests {
         key(&mut app, KeyCode::Tab);
         type_keys(&mut app, "x");
         key(&mut app, KeyCode::Enter);
-        let d = procs(&app).draft.as_ref().unwrap();
+        let d = top(&app).draft.as_ref().unwrap();
         assert!(d.error.as_deref().is_some_and(|e| e.starts_with("Min CPU")));
         key(&mut app, KeyCode::Esc);
-        assert!(procs(&app).draft.is_none() && !procs(&app).crit.active());
+        assert!(top(&app).draft.is_none() && !top(&app).crit.active());
     }
 
     /// A connection that cannot run commands (FTP) reports it instead of an empty list.
@@ -428,7 +428,7 @@ mod tests {
             .unwrap();
         settle(&mut app);
         with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
-        while matches!(app.mode, Mode::Procs(_)) {
+        while matches!(app.mode, Mode::Top(_)) {
             app.tick();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }

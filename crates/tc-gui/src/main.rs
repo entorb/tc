@@ -93,7 +93,7 @@ impl eframe::App for Gui {
         if self.app.quit {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
-        // worker results (copy progress, find, stats, dir loads) show up without input
+        // worker results (copy progress, find, Dir Size, dir loads) show up without input
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
@@ -145,8 +145,8 @@ impl Gui {
             self.app.mode,
             Mode::View { .. }
                 | Mode::Edit { .. }
-                | Mode::Procs(_)
-                | Mode::Stats(_)
+                | Mode::Top(_)
+                | Mode::Ncdu(_)
                 | Mode::MultiRename(_)
         ) || self.app.rename_editor_focused()
         {
