@@ -376,7 +376,7 @@ impl App {
             _ if st.scanning() => {}
             KeyCode::F(3 | 4) => return self.stats_open(st, key),
             KeyCode::F(5) => st.rescan(),
-            KeyCode::F(8) | KeyCode::Char('d') => {
+            KeyCode::F(8) | KeyCode::Delete | KeyCode::Char('d') => {
                 st.delete_ask();
             }
             // Ctrl+Space opened the stats, it does not mark

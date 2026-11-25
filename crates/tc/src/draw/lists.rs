@@ -1,8 +1,8 @@
 use super::widgets::{cell, click_table, left, line_edit, page_rows, right};
 use super::{ACCENT, MARK, MUTED, TEXT};
 use eframe::egui::{
-    self, Align2, Color32, FontId, Label, Pos2, ProgressBar, Rect, RichText, Sense, Shape, Stroke,
-    StrokeKind, Ui, epaint::Mesh, vec2,
+    self, Align2, Color32, CornerRadius, FontId, Label, Pos2, ProgressBar, Rect, RichText, Sense,
+    Shape, Stroke, StrokeKind, Ui, epaint::Mesh, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 use std::sync::Arc;
@@ -129,7 +129,7 @@ pub(super) fn prompt(ui: &mut Ui, label: &str, l: &LineEdit) {
 }
 
 /// Window width from which File Stats shows the treemap beside the list.
-const MAP_MIN_WIDTH: f32 = 800.0;
+const MAP_MIN_WIDTH: f32 = 700.0;
 
 /// Treemap of the browsed directory; `Some((row, double))` when a tile was clicked.
 fn stats_chart(ui: &mut Ui, st: &mut Stats) -> Option<(usize, bool)> {
@@ -230,9 +230,9 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
     };
     let list = |ui: &mut Ui| {
         let cols = [
-            Column::exact(14.0),
-            Column::exact(90.0),
-            Column::exact(55.0),
+            Column::exact(10.0),
+            Column::exact(62.0),
+            Column::exact(50.0),
             Column::exact(100.0),
             Column::remainder().clip(true),
         ];
@@ -248,7 +248,7 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
     };
     let width = ui.available_width();
     let clicked = if width >= MAP_MIN_WIDTH {
-        let rows_w = width * 0.55;
+        let rows_w = width * 0.5;
         ui.horizontal_top(|ui| {
             let left = ui
                 .vertical(|ui| {
@@ -283,7 +283,11 @@ fn stats_cells(row: &mut TableRow, c: &StatsCols) {
     row.col(|ui| right(ui, c.value.as_str()));
     row.col(|ui| right(ui, format!("{:.1}%", c.share * 100.0)));
     row.col(|ui| {
-        ui.add(ProgressBar::new(c.share as f32).desired_width(ui.available_width()));
+        ui.add(
+            ProgressBar::new(c.share as f32)
+                .desired_width(ui.available_width())
+                .corner_radius(CornerRadius::ZERO),
+        );
     });
     row.col(|ui| left(ui, c.name.as_str()));
 }

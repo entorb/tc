@@ -159,7 +159,7 @@ pub const HELP_STATS: &str = "\
 == About ==
 Scan runs in up to 8 threads; a popup shows files and
 scanned / discovered directories.
-Wide windows show a treemap right of the list: tiles
+Windows from 700 px wide show a treemap right of the list: tiles
 sized by bytes, colored by file type; click selects,
 double-click opens a directory; hover shows path, size
 and file count of any tile.
@@ -186,7 +186,7 @@ Shift+F4        edit in external editor
 i               info: path, size, files, directories, date
 p               feed marked / shown entries to the panel
 Insert / Space  mark entry, move down
-F8              delete marked entries, else the selected one (also d),
+F8 / Del / d    delete marked entries, else the selected one,
                 tree updates without rescan:
                 y / Enter trash, p permanent, n / Esc cancel
 :               command line in this directory
