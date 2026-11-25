@@ -396,10 +396,12 @@ fn parse_etime(s: &str) -> Option<u64> {
     days.checked_mul(86_400)?.checked_add(hms)
 }
 
-/// Send SIGTERM (`force`: SIGKILL) to `pid`, locally or on the `remote` server.
-pub fn kill(remote: Option<&dyn Remote>, pid: u32, force: bool) -> Result<()> {
+/// Send SIGTERM (`force`: SIGKILL) to `pid`, locally or on the `remote` server. Locally the
+/// process must still be called `name` (the pid may have been reused since the snapshot).
+// shortcut: no name check on servers (`ps comm` is truncated), upgrade by comparing start times
+pub fn kill(remote: Option<&dyn Remote>, pid: u32, name: &str, force: bool) -> Result<()> {
     let Some(r) = remote else {
-        return kill_local(pid, force);
+        return kill_local(pid, name, force);
     };
     let sig = if force { "KILL" } else { "TERM" };
     // exec reports no exit status, so success is echoed
@@ -410,7 +412,7 @@ pub fn kill(remote: Option<&dyn Remote>, pid: u32, force: bool) -> Result<()> {
     }
 }
 
-fn kill_local(pid: u32, force: bool) -> Result<()> {
+fn kill_local(pid: u32, name: &str, force: bool) -> Result<()> {
     let id = Pid::from_u32(pid);
     let mut sys = System::new().map_err(|e| Error::Process(e.to_string()))?;
     sys.refresh_processes_specifics(
@@ -421,6 +423,10 @@ fn kill_local(pid: u32, force: bool) -> Result<()> {
     let p = sys
         .process(id)
         .ok_or_else(|| Error::Process(format!("process {pid} is gone")))?;
+    let now = p.name().to_string_lossy();
+    if now != name {
+        return Err(Error::Process(format!("process {pid} is now {now}")));
+    }
     let sig = if force { Signal::Kill } else { Signal::Term };
     // no SIGTERM on Windows: kill() terminates there
     if p.kill_with(sig).unwrap_or_else(|| p.kill()) {
@@ -612,12 +618,13 @@ MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 100 kB\nSwapFree: 100 kB\n4\
             .arg("30")
             .spawn()
             .unwrap();
-        kill(None, child.id(), false).unwrap();
+        assert!(kill(None, child.id(), "other", false).is_err());
+        kill(None, child.id(), "sleep", false).unwrap();
         assert!(!child.wait().unwrap().success());
     }
 
     #[test]
     fn kill_unknown_pid_fails() {
-        assert!(kill(None, u32::MAX - 1, true).is_err());
+        assert!(kill(None, u32::MAX - 1, "x", true).is_err());
     }
 }

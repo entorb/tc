@@ -270,11 +270,13 @@ impl Top {
             }
             _ => return,
         };
-        let Some((pid, _)) = self.confirm.take() else {
+        let Some((pid, name)) = self.confirm.take() else {
             return;
         };
         let r = self.remote.clone();
-        self.kill = Some(thread::spawn(move || top::kill(r.as_deref(), pid, force)));
+        self.kill = Some(thread::spawn(move || {
+            top::kill(r.as_deref(), pid, &name, force)
+        }));
         self.status = format!(
             "sending SIG{} to {pid}",
             if force { "KILL" } else { "TERM" }
