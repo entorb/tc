@@ -1,6 +1,6 @@
 //! Find files (Alt+F7 / Ctrl+F): form, streamed results, panelize.
 
-use crate::app::widgets::{step_focus, step_key, tab_key, tab_of, tab_range};
+use crate::app::widgets::{list_step, step_focus, step_key, tab_key, tab_of, tab_range};
 use crate::app::{
     App, Filter, FormRow, Mode, form_checked, form_text, paste_line, rows_from_line, rows_to_line,
 };
@@ -492,7 +492,6 @@ impl App {
 
     pub(in crate::app) fn found_key(&mut self, key: KeyEvent, mut f: Found) {
         let page = self.page;
-        let last = f.view.len().saturating_sub(1);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if f.filter.key(key) {
             f.rebuild();
@@ -551,13 +550,7 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Up => f.sel = f.sel.saturating_sub(1),
-            KeyCode::Down => f.sel = (f.sel + 1).min(last),
-            KeyCode::PageUp => f.sel = f.sel.saturating_sub(page),
-            KeyCode::PageDown => f.sel = (f.sel + page).min(last),
-            KeyCode::Home => f.sel = 0,
-            KeyCode::End => f.sel = last,
-            _ => {}
+            code => f.sel = list_step(code, f.sel, f.view.len(), page).unwrap_or(f.sel),
         }
         self.mode = Mode::Found(f);
     }

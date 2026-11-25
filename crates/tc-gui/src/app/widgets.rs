@@ -265,6 +265,21 @@ pub(super) fn step_key(code: KeyCode, focus: usize, len: usize) -> usize {
     step_focus(0..len, focus, delta, |_| false)
 }
 
+/// Up / Down / PgUp / PgDn / Home / End: the new row of a list of `len` rows, `None` for
+/// other keys.
+pub(super) fn list_step(code: KeyCode, sel: usize, len: usize, page: usize) -> Option<usize> {
+    let last = len.saturating_sub(1);
+    Some(match code {
+        KeyCode::Up => sel.saturating_sub(1),
+        KeyCode::Down => (sel + 1).min(last),
+        KeyCode::PageUp => sel.saturating_sub(page),
+        KeyCode::PageDown => sel.saturating_add(page).min(last),
+        KeyCode::Home => 0,
+        KeyCode::End => last,
+        _ => return None,
+    })
+}
+
 /// Focus `delta` rows on from `focus` inside `r`, skipping `hidden` rows (an end row stops it).
 pub(super) fn step_focus(
     r: std::ops::Range<usize>,
@@ -441,7 +456,18 @@ pub(super) fn list_nav(
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyCode, KeyEvent, KeyModifiers, step_focus, tab_key, tab_of, tab_range};
+    use super::{
+        KeyCode, KeyEvent, KeyModifiers, list_step, step_focus, tab_key, tab_of, tab_range,
+    };
+
+    #[test]
+    fn list_step_clamps() {
+        assert_eq!(list_step(KeyCode::End, 0, 0, 5), Some(0));
+        assert_eq!(list_step(KeyCode::PageDown, 3, 6, 5), Some(5));
+        assert_eq!(list_step(KeyCode::PageUp, 3, 6, 5), Some(0));
+        assert_eq!(list_step(KeyCode::Down, 5, 6, 5), Some(5));
+        assert_eq!(list_step(KeyCode::Enter, 2, 6, 5), None);
+    }
 
     #[test]
     fn tabs_split_rows_and_keys_pick_one() {

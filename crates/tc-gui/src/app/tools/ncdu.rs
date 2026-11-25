@@ -1,5 +1,6 @@
 //! Dir Size: directory size tree, marks, delete, panelize.
 
+use crate::app::widgets::list_step;
 use crate::app::{App, Filter, Mode, REMOTE, delete_question, delete_text};
 use crate::fmt;
 use crate::{KeyCode, KeyEvent, KeyModifiers};
@@ -207,13 +208,11 @@ impl Ncdu {
 
     pub(in crate::app) fn key(&mut self, code: KeyCode, page: usize) {
         let last = self.view.len().saturating_sub(1);
+        if let Some(s) = list_step(code, self.sel, self.view.len(), page) {
+            self.sel = s;
+            return;
+        }
         match code {
-            KeyCode::Up => self.sel = self.sel.saturating_sub(1),
-            KeyCode::Down => self.sel = (self.sel + 1).min(last),
-            KeyCode::PageUp => self.sel = self.sel.saturating_sub(page),
-            KeyCode::PageDown => self.sel = (self.sel + page).min(last),
-            KeyCode::Home => self.sel = 0,
-            KeyCode::End => self.sel = last,
             KeyCode::Enter | KeyCode::Right if self.selected().is_some_and(|n| n.is_dir) => {
                 self.marked.clear();
                 if let Some(i) = self.selected_index() {

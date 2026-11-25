@@ -11,7 +11,7 @@ use tc_core::sync::{Item, Plan, Status};
 use tc_core::vfs::Side;
 use tc_core::{Error, ops, sync};
 
-use crate::app::widgets::step_key;
+use crate::app::widgets::{list_step, step_key};
 use crate::app::{App, FormRow, Mode, form_checked, rows_from_line, rows_to_line};
 use tc_core::edit::human;
 
@@ -133,14 +133,13 @@ impl Sync {
     }
 
     fn scroll(&mut self, code: KeyCode, page: usize) {
-        let last = self.view.len().saturating_sub(1);
-        self.top = match code {
-            KeyCode::PageUp => self.top.saturating_sub(page),
-            KeyCode::PageDown => (self.top + page).min(last),
-            KeyCode::Home => 0,
-            KeyCode::End => last,
-            _ => self.top,
-        };
+        // Up / Down move the options focus
+        if matches!(
+            code,
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+        ) {
+            self.top = list_step(code, self.top, self.view.len(), page).unwrap_or(self.top);
+        }
     }
 }
 

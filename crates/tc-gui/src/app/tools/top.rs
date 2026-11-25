@@ -1,6 +1,6 @@
 //! Process monitor (Ctrl+P): sampling, sort, filter, kill.
 
-use crate::app::widgets::form_text;
+use crate::app::widgets::{form_text, list_step};
 use crate::app::{FormRow, edit_key};
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::Arc;
@@ -170,7 +170,10 @@ impl Top {
             }
             return true;
         }
-        let last = self.rows.len().saturating_sub(1);
+        if let Some(s) = list_step(key.code, self.sel, self.rows.len(), page) {
+            self.sel = s;
+            return true;
+        }
         match key.code {
             // sample now: the next snapshot comes right away
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -182,12 +185,6 @@ impl Top {
                 self.crit = Criteria::default();
             }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(10) => return false,
-            KeyCode::Up => self.sel = self.sel.saturating_sub(1),
-            KeyCode::Down => self.sel = (self.sel + 1).min(last),
-            KeyCode::PageUp => self.sel = self.sel.saturating_sub(page),
-            KeyCode::PageDown => self.sel = (self.sel + page).min(last),
-            KeyCode::Home => self.sel = 0,
-            KeyCode::End => self.sel = last,
             KeyCode::Tab => {
                 self.sort = match self.sort {
                     ProcSort::Cpu => ProcSort::Mem,
