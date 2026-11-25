@@ -225,11 +225,12 @@ Space           no action / restore the compare result
 Enter           synchronize the shown rows: y starts,
                 n / Esc goes back
 Ctrl+R          compare again
+Tab             to the options (Enter there compares again)
 Esc / q / F10   close (while comparing: cancel)";
 pub const HELP_SYNC_FORM: &str = "\
 == About ==
-Full screen: the options on the left, the two panel
-directories and what the result shows on the right.
+One screen: the options on top, the compare result below.
+Tab past the last option goes to the rows (once compared).
 
 == Fields ==
 Tab             next field
@@ -252,8 +253,9 @@ Asymmetric: the right side becomes a copy of the left
 (extra right files are deleted).
 
 == Run ==
-Enter / F10     compare the two panel directories
-Esc / F9        cancel (the form is kept for next time)";
+Enter           compare the two panel directories
+Ctrl+R          compare too
+Esc / F10       close (the options are kept for next time)";
 pub const HELP_SETTINGS: &str = "\
 == Fields ==
 Up/Down / Tab   previous / next field
@@ -684,8 +686,8 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
         Mode::Stats(_) => ("Help: file stats (ncdu)", HELP_STATS),
         Mode::Procs(_) => ("Help: processes (top)", HELP_PROCS),
+        Mode::Sync(s) if s.editing => ("Help: synchronize options", HELP_SYNC_FORM),
         Mode::Sync(_) => ("Help: synchronize directories", HELP_SYNC),
-        Mode::SyncForm(_) => ("Help: synchronize form", HELP_SYNC_FORM),
         Mode::FindForm(_) => ("Help: find files", HELP_FIND_FORM),
         Mode::Settings(_) => ("Help: settings", HELP_SETTINGS),
         Mode::Props(_) => ("Help: properties", HELP_PROPS),

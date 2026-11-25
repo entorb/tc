@@ -364,9 +364,9 @@ mod tests {
         a.remember("sync-forms", "File mask=*.rs\tSubdirectories=0");
         let alt = |a: &mut App, code| a.on_key(KeyEvent::new(code, KeyModifiers::ALT));
         let mask = |a: &App| match &a.mode {
-            Mode::SyncForm(f) => (
-                form_text(&f.rows, "File mask").to_owned(),
-                form_checked(&f.rows, "Subdirectories"),
+            Mode::Sync(s) => (
+                form_text(&s.form.rows, "File mask").to_owned(),
+                form_checked(&s.form.rows, "Subdirectories"),
             ),
             _ => panic!("no sync form"),
         };

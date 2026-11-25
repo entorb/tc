@@ -1,3 +1,5 @@
+use super::dialogs::apply;
+use super::tools::{sync_hints, sync_options};
 use super::widgets::{cell, click_table, left, line_edit, page_rows, right};
 use super::{ACCENT, MARK, MUTED, TEXT};
 use eframe::egui::{
@@ -47,13 +49,25 @@ pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     }
 }
 
-/// Synchronize directories: compared rows, click selects.
+/// Synchronize directories: the options on top, the compared rows below; a click on a row
+/// selects it and gives the rows the keyboard.
 pub(super) fn draw_sync(ui: &mut Ui, app: &mut App) {
     let Mode::Sync(s) = &mut app.mode else {
         return;
     };
-    let today = jiff::ZonedDateTime::now().date();
     ui.label(RichText::new(sync_title(s)).strong().color(ACCENT));
+    let act = sync_options(ui, s);
+    if s.editing && s.items.is_empty() && !s.comparing() {
+        sync_hints(ui);
+    } else {
+        app.page = sync_rows(ui, s);
+    }
+    apply(app, act);
+}
+
+/// The compared rows that fit, the selected one's page; returns the rows per page.
+fn sync_rows(ui: &mut Ui, s: &mut tc::app::Sync) -> usize {
+    let today = jiff::ZonedDateTime::now().date();
     let (row_h, h) = page_rows(ui);
     let start = s.sel / h * h;
     let rows: Vec<[String; 6]> = (s.shown().skip(start).take(h))
@@ -85,8 +99,9 @@ pub(super) fn draw_sync(ui: &mut Ui, app: &mut App) {
     );
     if let Some((k, _)) = clicked {
         s.sel = k;
+        s.editing = false;
     }
-    app.page = h;
+    h
 }
 
 fn sync_cells(row: &mut TableRow, c: &[String; 6]) {

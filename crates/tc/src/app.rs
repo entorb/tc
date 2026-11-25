@@ -120,9 +120,7 @@ pub enum Mode {
     Found(Found),
     /// Multi-rename form (Ctrl+M) with the preview.
     MultiRename(RenameForm),
-    /// Synchronize directories options (Ctrl+E).
-    SyncForm(SyncForm),
-    /// Synchronize directories compare result, filled by a worker thread.
+    /// Synchronize directories (Ctrl+E): options and compare result, filled by a worker thread.
     Sync(Box<Sync>),
     /// File Stats (ncdu-style) tree, scanned by a worker thread.
     Stats(Stats),
@@ -476,7 +474,6 @@ impl App {
             Mode::Found(f) => self.found_key(key, f),
             Mode::FindForm(form) => self.find_form_key(key, form),
             Mode::MultiRename(form) => self.multi_rename_key(key, form),
-            Mode::SyncForm(form) => self.sync_form_key(key, form),
             Mode::Sync(s) => self.sync_key(key, s),
             Mode::Stats(st) => self.stats_mode_key(st, key),
             Mode::Procs(mut p) => {
@@ -1163,7 +1160,7 @@ impl App {
             Mode::Editor(_, l) => paste_line(l, &text),
             Mode::FindForm(f) => f.paste(&text),
             Mode::MultiRename(f) => f.paste(&text),
-            Mode::SyncForm(f) => f.paste(&text),
+            Mode::Sync(s) if s.editing => s.form.paste(&text),
             Mode::Xfer(Xfer {
                 rename: Some(l), ..
             }) => paste_line(l, &text),

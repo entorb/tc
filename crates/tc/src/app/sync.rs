@@ -79,7 +79,7 @@ pub type SyncSetup = (SyncForm, [Side; 2], [PathBuf; 2]);
 
 type DiffJob = JoinHandle<tc_core::Result<Option<(u64, u64)>>>;
 
-/// Compare result screen.
+/// Synchronize screen: the options on top, the compare result below.
 pub struct Sync {
     pub sides: [Side; 2],
     pub roots: [PathBuf; 2],
@@ -98,6 +98,8 @@ pub struct Sync {
     pub progress: Arc<ops::Progress>,
     /// Sync question, shown while set.
     pub confirm: Option<String>,
+    /// The options have the keyboard (else the rows).
+    pub editing: bool,
 }
 
 /// Show-filter group of a compare result.
@@ -134,6 +136,25 @@ fn deletes(plan: &[Item], i: usize) -> usize {
 }
 
 impl Sync {
+    /// Not compared yet: the options have the keyboard.
+    fn new((form, sides, roots): SyncSetup) -> Box<Self> {
+        Box::new(Sync {
+            sides,
+            roots,
+            form,
+            items: Vec::new(),
+            view: Vec::new(),
+            show: [true; 4],
+            sel: 0,
+            filter: Filter::default(),
+            job: None,
+            diff: None,
+            progress: Arc::default(),
+            confirm: None,
+            editing: true,
+        })
+    }
+
     pub fn comparing(&self) -> bool {
         self.job.is_some()
     }
@@ -144,7 +165,7 @@ impl Sync {
     }
 
     /// A tree compare or a file compare runs.
-    fn busy(&self) -> bool {
+    pub(super) fn busy(&self) -> bool {
         self.comparing() || self.diff.is_some()
     }
 
@@ -294,7 +315,8 @@ impl Sync {
 }
 
 impl App {
-    /// Ctrl+E: options form for the two panel directories, opened with the last settings (also after a restart).
+    /// Ctrl+E: the sync screen for the two panel directories, the options focused and set as
+    /// last used (also after a restart).
     pub(super) fn sync_open(&mut self) {
         if self
             .panels
@@ -311,7 +333,9 @@ impl App {
             Some(f) => SyncForm { hist: len, ..f },
             None => self.sync_hist(len.saturating_sub(1)),
         };
-        self.mode = Mode::SyncForm(form);
+        let sides = [self.panels[0].side(), self.panels[1].side()];
+        let roots = [0, 1].map(|i| self.panels[i].path().to_owned());
+        self.mode = Mode::Sync(Sync::new((form, sides, roots)));
     }
 
     /// Sync form of history entry `i` (past the end: the defaults), positioned there.
@@ -323,69 +347,67 @@ impl App {
         SyncForm { hist: i, ..form }
     }
 
-    /// Sync form: Enter / F10 compares, Esc / F9 cancel.
-    pub(super) fn sync_form_key(&mut self, key: KeyEvent, mut form: SyncForm) {
-        let last = form.rows.len() - 1;
+    /// Enter in the options, Ctrl+R: remember the options, compare with them.
+    fn sync_compare(&mut self, s: Box<Sync>) {
+        self.note = self.remember("sync-forms", &rows_to_line(&s.form.rows, ""));
+        self.last_sync = Some(s.form.clone());
+        self.sync_spawn((s.form, s.sides, s.roots));
+    }
+
+    /// Keys while the options have the keyboard: Enter compares, Tab past the last field goes
+    /// to the rows, Esc / F10 close.
+    fn sync_options_key(&mut self, key: KeyEvent, mut s: Box<Sync>) {
+        let last = s.form.rows.len() - 1;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc | KeyCode::F(9) => {
-                self.last_sync = Some(form);
+            KeyCode::Esc | KeyCode::F(10) => {
+                self.last_sync = Some(s.form);
                 return;
             }
-            KeyCode::Enter | KeyCode::F(10) => {
-                self.note = self.remember("sync-forms", &rows_to_line(&form.rows, ""));
-                self.last_sync = Some(form.clone());
-                let sides = [self.panels[0].side(), self.panels[1].side()];
-                let roots = [0, 1].map(|i| self.panels[i].path().to_owned());
-                return self.sync_spawn((form, sides, roots));
-            }
+            KeyCode::Enter => return self.sync_compare(s),
+            KeyCode::Char('r') if ctrl => return self.sync_compare(s),
             KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
                 let i = match key.code {
-                    KeyCode::Up => form.hist.saturating_sub(1),
-                    _ => (form.hist + 1).min(self.syncs.len()),
+                    KeyCode::Up => s.form.hist.saturating_sub(1),
+                    _ => (s.form.hist + 1).min(self.syncs.len()),
                 };
-                let focus = form.focus;
-                form = SyncForm {
+                let focus = s.form.focus;
+                s.form = SyncForm {
                     focus,
                     ..self.sync_hist(i)
                 };
             }
-            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
-            KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
+            KeyCode::Tab if s.form.focus == last && !s.items.is_empty() => s.editing = false,
+            KeyCode::Tab | KeyCode::Down => s.form.focus = (s.form.focus + 1).min(last),
+            KeyCode::BackTab | KeyCode::Up => s.form.focus = s.form.focus.saturating_sub(1),
             _ => {
-                form.rows[form.focus].key(key);
+                let focus = s.form.focus;
+                s.form.rows[focus].key(key);
             }
         }
-        self.mode = Mode::SyncForm(form);
+        self.mode = Mode::Sync(s);
     }
 
-    /// Compare in a worker; the result screen shows progress until it is done.
-    pub(super) fn sync_spawn(&mut self, (form, sides, roots): SyncSetup) {
-        let progress = Arc::new(ops::Progress::default());
-        let (p, s, r, o) = (
-            progress.clone(),
-            sides.clone(),
-            roots.clone(),
-            form.options(),
+    /// Compare in a worker; the rows show progress until it is done.
+    pub(super) fn sync_spawn(&mut self, setup: SyncSetup) {
+        let mut s = Sync::new(setup);
+        let (p, sides, roots, o) = (
+            s.progress.clone(),
+            s.sides.clone(),
+            s.roots.clone(),
+            s.form.options(),
         );
-        self.mode = Mode::Sync(Box::new(Sync {
-            sides,
-            roots,
-            form,
-            items: Vec::new(),
-            view: Vec::new(),
-            show: [true; 4],
-            sel: 0,
-            filter: Filter::default(),
-            job: Some(thread::spawn(move || sync::compare(&s, &r, &o, &p))),
-            diff: None,
-            progress,
-            confirm: None,
-        }));
+        s.job = Some(thread::spawn(move || sync::compare(&sides, &roots, &o, &p)));
+        s.editing = false;
+        self.mode = Mode::Sync(s);
     }
 
     pub(super) fn sync_key(&mut self, key: KeyEvent, mut s: Box<Sync>) {
         if s.confirm.is_some() {
             return self.sync_confirm_key(s, key.code);
+        }
+        if s.editing && !s.busy() {
+            return self.sync_options_key(key, s);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -399,8 +421,12 @@ impl App {
                 s.progress.cancel.store(true, Ordering::Relaxed)
             }
             _ if s.busy() => {}
-            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => return,
-            KeyCode::Char('r') if ctrl => return self.sync_spawn((s.form, s.sides, s.roots)),
+            KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => {
+                self.last_sync = Some(s.form);
+                return;
+            }
+            KeyCode::Tab | KeyCode::BackTab => s.editing = true,
+            KeyCode::Char('r') if ctrl => return self.sync_compare(s),
             KeyCode::F(3 | 4) => return self.sync_row_open(s, key.code == KeyCode::F(4)),
             KeyCode::Enter => s.confirm = Some(s.confirm_text()),
             KeyCode::Left | KeyCode::Right => s.set_action(key.code),
@@ -470,7 +496,8 @@ impl App {
                 s.items = items;
                 s.rebuild();
             }
-            Ok(Err(Error::Cancelled)) => self.mode = Mode::Normal,
+            // back to the options, nothing compared
+            Ok(Err(Error::Cancelled)) => s.editing = true,
             Ok(Err(e)) => self.mode = Mode::Message(format!("Synchronize: {e}")),
             Err(_) => self.mode = Mode::Message("Synchronize: compare failed.".into()),
         }
@@ -589,7 +616,7 @@ mod tests {
         fs::write(r.join("b.txt"), "b").unwrap();
         let mut app = App::new(Panel::open(&l).unwrap(), Panel::open(&r).unwrap());
         key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
-        assert!(matches!(app.mode, Mode::SyncForm(_)));
+        assert!(matches!(&app.mode, Mode::Sync(s) if s.editing && s.items.is_empty()));
         key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
             compared(&mut app),
@@ -611,6 +638,13 @@ mod tests {
         assert_eq!(fs::read_to_string(r.join("a.txt")).unwrap(), "a");
         assert!(!l.join("b.txt").exists() && !r.join("skip.txt").exists());
         assert_eq!(after[0], ("a.txt".into(), Action::Equal));
+        // Tab: the options; Tab past the last one: the rows again
+        key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        for _ in 0..5 {
+            assert!(matches!(&app.mode, Mode::Sync(s) if s.editing));
+            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        }
+        assert!(matches!(&app.mode, Mode::Sync(s) if !s.editing));
         key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(app.mode, Mode::Normal));
     }

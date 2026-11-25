@@ -14,7 +14,7 @@ mod dialogs;
 mod help;
 use self::dialogs::overlays;
 mod tools;
-use self::tools::{draw_find_form, draw_multi_rename, draw_sync_form};
+use self::tools::{draw_find_form, draw_multi_rename};
 mod chrome;
 mod widgets;
 use self::chrome::{cmdline, footer, menu_bar, toolbar};
@@ -79,7 +79,7 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         // sub-screens own the window: F-key bar, their status line, no menu or toolbar
         if !matches!(
             app.mode,
-            Mode::Found(_) | Mode::MultiRename(_) | Mode::FindForm(_) | Mode::SyncForm(_)
+            Mode::Found(_) | Mode::MultiRename(_) | Mode::FindForm(_)
         ) {
             egui::Panel::bottom("status").show(ui, |ui| status_line(ui, app));
         }
@@ -89,7 +89,6 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
             Mode::Procs(_) => draw_procs(ui, app),
             Mode::MultiRename(_) => draw_multi_rename(ui, app),
             Mode::FindForm(_) => draw_find_form(ui, app),
-            Mode::SyncForm(_) => draw_sync_form(ui, app),
             _ => draw_stats(ui, app),
         });
     } else {

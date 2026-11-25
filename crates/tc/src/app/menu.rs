@@ -44,12 +44,14 @@ pub(super) const FOUND_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
     CLOSE,
 ];
 
-pub(super) const SYNC_FOOTER: [(&str, KeyCode, KeyModifiers); 6] = [
+/// Synchronize, the rows focused.
+pub(super) const SYNC_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
     HELP,
     ("Enter Sync", KeyCode::Enter, KeyModifiers::NONE),
     ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
     ("Ctrl+R Compare", KeyCode::Char('r'), KeyModifiers::CONTROL),
     ("Space Skip", KeyCode::Char(' '), KeyModifiers::NONE),
+    ("Tab Options", KeyCode::Tab, KeyModifiers::NONE),
     CLOSE,
 ];
 
@@ -64,9 +66,12 @@ pub(super) const FIND_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
     f("F10 Search", 10),
 ];
 
-/// Synchronize form: F10 compares, F9 cancels.
-pub(super) const SYNC_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] =
-    [HELP, f("F9 Cancel", 9), f("F10 Compare", 10)];
+/// Synchronize, the options focused.
+pub(super) const SYNC_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
+    HELP,
+    ("Enter Compare", KeyCode::Enter, KeyModifiers::NONE),
+    CLOSE,
+];
 
 pub(super) const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
     HELP,
@@ -324,7 +329,6 @@ impl App {
                     Mode::Found(_)
                         | Mode::FindForm(_)
                         | Mode::MultiRename(_)
-                        | Mode::SyncForm(_)
                         | Mode::Settings(_)
                         | Mode::Props(_)
                 ))
@@ -338,7 +342,6 @@ impl App {
                 self.mode,
                 Mode::Found(_)
                     | Mode::FindForm(_)
-                    | Mode::SyncForm(_)
                     | Mode::Sync(_)
                     | Mode::Stats(_)
                     | Mode::Procs(_)
@@ -352,10 +355,10 @@ impl App {
             Mode::View { .. } => &VIEW_FOOTER,
             Mode::Edit { .. } | Mode::AskSave { .. } | Mode::AskExit(_) => &EDIT_FOOTER,
             Mode::Found(_) => &FOUND_FOOTER,
+            Mode::Sync(s) if s.editing => &SYNC_FORM_FOOTER,
             Mode::Sync(_) => &SYNC_FOOTER,
             Mode::FindForm(_) => &FIND_FORM_FOOTER,
             Mode::MultiRename(_) => &RENAME_FOOTER,
-            Mode::SyncForm(_) => &SYNC_FORM_FOOTER,
             Mode::Props(_) => &FORM_FOOTER,
             Mode::Settings(_) => &SETTINGS_FOOTER,
             Mode::Stats(_) => &STATS_FOOTER,
