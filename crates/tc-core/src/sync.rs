@@ -339,6 +339,26 @@ mod tests {
         assert_eq!(mr.paths(), ["/", "/a"]);
     }
 
+    /// A symlinked directory counts as a directory: never listed, so never copied as a tree
+    /// nor deleted as an extra (its target least of all).
+    #[cfg(unix)]
+    #[test]
+    fn dir_symlinks_are_left_out_on_both_sides() {
+        let t = tempfile::tempdir().unwrap();
+        let (l, r, out) = (t.path().join("l"), t.path().join("r"), t.path().join("out"));
+        put(&out.join("big"), "x", 100);
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&r).unwrap();
+        std::os::unix::fs::symlink(&out, l.join("link")).unwrap();
+        std::os::unix::fs::symlink(&out, r.join("link2")).unwrap();
+        let roots = [l, r];
+        let items = compare(&[Side::Local, Side::Local], &roots, &Progress::default()).unwrap();
+        assert!(items.is_empty());
+        for from in [0, 1] {
+            assert_eq!(plan(&items, from, false, true), Plan::default());
+        }
+    }
+
     #[test]
     fn run_refuses_to_delete_a_name_that_became_a_dir() {
         let (ml, mr) = (Mem::new(), Mem::new());

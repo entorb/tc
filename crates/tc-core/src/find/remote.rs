@@ -201,6 +201,85 @@ mod tests {
         assert!(remote_command("/", &after).contains("-newermt @99.999999999"));
     }
 
+    /// Stdout of `cmd` run by `sh` in `dir` (sh stands in for the server's shell).
+    #[cfg(unix)]
+    fn sh(dir: &std::path::Path, cmd: &str) -> Vec<u8> {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{cmd}: {out:?}");
+        out.stdout
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sh_quote_survives_a_real_shell() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hostile = [
+            "",
+            "a b",
+            "it's",
+            "''",
+            "$(touch pwned)",
+            "`touch pwned`",
+            "a\nb",
+            r"\'",
+            "-n",
+            "*",
+            "; touch pwned",
+        ];
+        for s in hostile {
+            let out = sh(tmp.path(), &format!("printf %s {}", sh_quote(s)));
+            assert_eq!(String::from_utf8_lossy(&out), s);
+        }
+        assert!(!tmp.path().join("pwned").exists());
+    }
+
+    /// The server command as built runs: hostile file names and query texts stay data.
+    // GNU find (-printf, -newermt) is on Linux only
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn remote_command_runs_in_a_real_shell() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("r o'ot $x");
+        fs::create_dir_all(root.join("sk'ip")).unwrap();
+        for n in [
+            "a'b.txt",
+            "$(touch pwned).txt",
+            "`touch pwned`.log",
+            "sk'ip/in.txt",
+        ] {
+            fs::write(root.join(n), "needle it's\n").unwrap();
+        }
+        fs::write(root.join("x'y.txt"), "other\n").unwrap();
+        let q = Query {
+            mask: "*'*, $(touch*".into(),
+            exclude: vec!["sk'ip".into()],
+            content: Some(Content::new("it's", true, false, false).unwrap()),
+            ..Query::default()
+        };
+        let root_s = root.to_str().unwrap();
+        let out = sh(tmp.path(), &remote_command(root_s, &q));
+        let mut names: Vec<String> = (out.split(|&b| b == 0))
+            .filter(|r| !r.is_empty())
+            .filter_map(|r| parse_record(root_s, &String::from_utf8_lossy(r)))
+            .map(|e| e.name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                format!("{root_s}/$(touch pwned).txt"),
+                format!("{root_s}/a'b.txt")
+            ]
+        );
+        assert!(!tmp.path().join("pwned").exists() && !root.join("pwned").exists());
+    }
+
     #[test]
     fn remote_records_parse() {
         let e = parse_record("/srv/", "f 12 1700000000.5000000000 a b.txt").unwrap();

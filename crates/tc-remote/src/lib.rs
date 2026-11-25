@@ -358,6 +358,116 @@ mod tests {
         }
     }
 
+    /// Remote find: hostile file names and query texts stay data in the server's shell
+    /// (no injected command runs); FTP cannot run commands and says so.
+    #[test]
+    #[ignore = "needs a server"]
+    fn live_find_remote_quoting() {
+        use std::sync::atomic::AtomicBool;
+        use tc_core::find::{Content, Query, find_remote};
+        for l in live("find") {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("s");
+            std::fs::create_dir_all(src.join("sk'ip")).unwrap();
+            for n in [
+                "a'b.txt",
+                "$(touch pwned).txt",
+                "`touch pwned`.log",
+                "sk'ip/in.txt",
+            ] {
+                std::fs::write(src.join(n), "needle it's\n").unwrap();
+            }
+            let remote = l.base.join("f'ind $x");
+            put(&l, &src, &remote, false).unwrap();
+            let q = Query {
+                mask: "*'*, $(touch*".into(),
+                exclude: vec!["sk'ip".into()],
+                content: Some(Content::new("it's", true, false, false).unwrap()),
+                ..Query::default()
+            };
+            let root = tc_core::vfs::rpath(&remote);
+            let mut names = Vec::new();
+            let res = find_remote(l.r.as_ref(), &root, &q, &AtomicBool::new(false), |e| {
+                names.push(e.name.to_string_lossy().into_owned());
+            });
+            if l.var == "TC_TEST_FTP" {
+                assert!(res.is_err());
+            } else {
+                res.unwrap();
+                names.sort();
+                let want = ["$(touch pwned).txt", "a'b.txt"].map(|n| format!("{root}/{n}"));
+                assert_eq!(names, want);
+                assert!(gone(&l, &remote.join("pwned")));
+            }
+            tc_core::vfs::Side::Remote(l.r.clone())
+                .delete(&remote)
+                .unwrap();
+        }
+    }
+
+    /// Remote multi-rename: a swap goes via temp names, an existing target is refused before
+    /// anything moves, undo restores; no temp file is left behind.
+    #[test]
+    #[ignore = "needs a server"]
+    fn live_rename_swap_refuse_undo() {
+        use tc_core::{ops::Progress, rename, vfs::Side};
+        for l in live("rename") {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("s");
+            std::fs::create_dir(&src).unwrap();
+            for n in ["a", "b", "c"] {
+                std::fs::write(src.join(n), n).unwrap();
+            }
+            let remote = l.base.join("ren");
+            put(&l, &src, &remote, false).unwrap();
+            let side = Side::Remote(l.r.clone());
+            let pair = |o: &str, n: &str| (o.to_owned(), n.to_owned());
+            let p = Progress::default();
+            let swap = [pair("a", "b"), pair("b", "a")];
+            rename::apply(&side, &remote, &swap, &p).unwrap();
+            let refused = rename::apply(&side, &remote, &[pair("c", "a")], &p);
+            assert!(refused.is_err(), "{}", l.var);
+            rename::undo(&side, &remote, &swap, &p).unwrap();
+            let back = tmp.path().join("back");
+            get(&l, &remote, &back, true).unwrap();
+            let mut names: Vec<_> = std::fs::read_dir(&back)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["a", "b", "c"], "{}", l.var);
+            for n in ["a", "b", "c"] {
+                assert_eq!(std::fs::read_to_string(back.join(n)).unwrap(), n);
+            }
+        }
+    }
+
+    /// Remote process monitor over SSH: a snapshot lists processes and kill ends one (the
+    /// server is this machine); FTP cannot run commands and reports an error.
+    // `sleep` is a POSIX tool
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "needs a server"]
+    fn live_top_sample_and_kill() {
+        use tc_core::top;
+        for l in live("top") {
+            let sampler = top::sample(Some(l.r.clone()), top::INTERVAL);
+            let snap = sampler.rx.recv().unwrap();
+            if l.var == "TC_TEST_FTP" {
+                assert!(snap.is_err());
+                continue;
+            }
+            assert!(!snap.unwrap().procs.is_empty());
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            top::kill(Some(l.r.as_ref()), child.id(), "sleep", false).unwrap();
+            assert!(!child.wait().unwrap().success());
+            assert!(top::kill(Some(l.r.as_ref()), u32::MAX - 1, "x", false).is_err());
+        }
+    }
+
     /// Spaces, quotes, `$`, backticks, unicode and a leading dash survive upload, listing,
     /// the server-side `find` scan (shell quoting) and download.
     #[test]

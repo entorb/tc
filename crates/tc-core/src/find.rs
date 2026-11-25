@@ -620,6 +620,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn content_search_skips_fifos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.txt");
+        fs::write(&a, "needle\n").unwrap();
+        // rustix has no mknodat on macOS; the POSIX tool works everywhere
+        let made = std::process::Command::new("mkfifo")
+            .arg(tmp.path().join("pipe"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // opening the FIFO would block the walker forever
+        let q = Query {
+            content: text("needle"),
+            ..Query::default()
+        };
+        assert_eq!(run(tmp.path(), &q), std::slice::from_ref(&a));
+        let not = Content {
+            negate: true,
+            ..Content::new("x", false, false, false).unwrap()
+        };
+        let q = Query {
+            content: Some(not),
+            ..Query::default()
+        };
+        assert_eq!(run(tmp.path(), &q), [a]);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn follow_links_enters_linked_dirs_without_loops() {
         let tmp = tempfile::tempdir().unwrap();
         let t = tmp.path();
