@@ -53,6 +53,7 @@ fifos
 filemanager
 fkey
 flate
+fokus
 frecency
 gitignoreed
 harminisations
@@ -117,12 +118,14 @@ publickey
 q'uote
 qlmanage
 qube
+quicksearch
 ratatui
 rdonly
 rects
 reflinks
 removedir
 renameat
+replacen
 rescan
 rescans
 respecrive
@@ -177,6 +180,7 @@ vsftpd
 webpki
 wijk
 windowfocus
+windowsize
 winit
 winresource
 wirks
@@ -192,7 +196,6 @@ xfer
 xffrs
 xkbcomp
 xtest
-xtst
 xtst
 xtwo
 xxhi

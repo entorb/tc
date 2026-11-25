@@ -4,7 +4,7 @@ Core logic shared by all front ends and backends. Root rules in [../../AGENTS.md
 
 ## Layering
 
-- No UI or terminal deps (no ratatui, crossterm, egui). Front ends call in, core never calls out.
+- No UI deps (no egui). Front ends call in, core never calls out.
 - Typed errors (`thiserror`); no `anyhow` here.
 
 ## Performance
