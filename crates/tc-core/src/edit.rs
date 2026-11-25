@@ -608,7 +608,8 @@ impl Editor {
         count
     }
 
-    /// Markdown files: blank lines around headings, lists and ``` blocks, as one undo step.
+    /// Markdown files: blank lines around headings, lists and ``` blocks, runs of blank lines
+    /// shrunk to one, as one undo step.
     /// False when the file is not Markdown or nothing changed.
     pub fn format_markdown(&mut self) -> bool {
         if !syntax::lang(&self.path).is_some_and(|l| l.markdown) {
@@ -616,16 +617,29 @@ impl Editor {
         }
         let text: Vec<String> = (0..self.line_count()).map(|l| self.line_text(l)).collect();
         let lines: Vec<&str> = text.iter().map(String::as_str).collect();
-        let at = syntax::md_blank_lines(&lines);
+        // the last row is the empty one after the final line break: nothing to delete there
+        let last = self.line_count() - 1;
+        let gone: Vec<usize> = syntax::md_extra_blanks(&lines)
+            .into_iter()
+            .filter(|&l| l < last)
+            .collect();
         // bottom up, so earlier char indices stay valid; the rope holds `\n`, save restores CRLF
-        let step: Vec<Change> = (at.iter().rev())
+        let mut step: Vec<Change> = (gone.iter().rev())
             .map(|&l| {
                 let idx = self.rope.line_to_char(l);
-                self.splice(idx, 0, "\n")
+                self.splice(idx, text[l].chars().count() + 1, "")
             })
             .collect();
+        let text: Vec<String> = (0..self.line_count()).map(|l| self.line_text(l)).collect();
+        let lines: Vec<&str> = text.iter().map(String::as_str).collect();
+        let at = syntax::md_blank_lines(&lines);
+        step.extend(at.iter().rev().map(|&l| {
+            let idx = self.rope.line_to_char(l);
+            self.splice(idx, 0, "\n")
+        }));
         let changed = !step.is_empty();
-        self.cursor.0 += at.iter().filter(|&&l| l <= self.cursor.0).count();
+        let cur = self.cursor.0 - gone.iter().filter(|&&l| l < self.cursor.0).count();
+        self.cursor.0 = cur + at.iter().filter(|&&l| l <= cur).count();
         self.record_step(step);
         self.sel = None;
         self.move_v(0);
@@ -798,6 +812,13 @@ mod tests {
         let txt = dir.path().join("a.txt");
         fs::write(&txt, "# T\ntext\n").unwrap();
         assert!(!open(&txt).unwrap().format_markdown());
+        let multi = dir.path().join("b.md");
+        fs::write(&multi, "a\n\n\n\nb\n").unwrap();
+        let mut e = open(&multi).unwrap();
+        assert!(e.format_markdown());
+        assert_eq!(text(&e), "a||b|");
+        e.undo();
+        assert_eq!(text(&e), "a||||b|");
     }
 
     #[test]

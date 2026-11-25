@@ -557,8 +557,8 @@ fn show_props(ctx: &Context, form: &PropsForm) -> Option<FormAct> {
     }))
 }
 
-/// Multi-rename: the options on the left half (Rename / Cancel at the bottom, the editor above
-/// them on the Editor tab), the preview on the right half. Keys go through the app.
+/// Multi-rename: the options on the left half, the preview on the right half; the F-key bar
+/// runs it. Keys go through the app.
 pub(super) fn draw_multi_rename(ui: &mut Ui, app: &mut App) {
     let Mode::MultiRename(form) = &mut app.mode else {
         return;
@@ -566,13 +566,13 @@ pub(super) fn draw_multi_rename(ui: &mut Ui, app: &mut App) {
     form.editor_focused = false;
     let mut act = None;
     ui.columns(2, |cols| {
-        act = rename_options(&mut cols[0], form).or(rename_preview(&mut cols[1], form));
+        act = rename_options(&mut cols[0], form);
+        rename_preview(&mut cols[1], form);
     });
     apply(app, act);
 }
 
-/// The options: tabs and fields scroll; the Rename / Cancel buttons and the Editor's text box
-/// stay at the bottom.
+/// The options: tabs and fields scroll; the Editor's text box fills the height.
 fn rename_options(ui: &mut Ui, form: &mut RenameForm) -> Option<FormAct> {
     let mut body = None;
     ui.vertical(|ui| {
@@ -598,6 +598,9 @@ fn rename_options(ui: &mut Ui, form: &mut RenameForm) -> Option<FormAct> {
 fn names_editor(ui: &mut Ui, form: &mut RenameForm) -> Option<FormAct> {
     ui.label(RichText::new("New names, one per line").strong());
     names_info(ui);
+    if let Some(e) = &form.error {
+        ui.label(RichText::new(e).color(Color32::LIGHT_RED));
+    }
     let size = egui::vec2(ui.available_width(), ui.available_height());
     let out = egui::TextEdit::multiline(&mut form.editor)
         .font(egui::FontId::monospace(14.0))
@@ -640,7 +643,9 @@ fn rename_fields(ui: &mut Ui, form: &RenameForm) -> Option<FormAct> {
         .spacing(vec2(12.0, 6.0))
         .show(ui, |ui| {
             for i in form.shown_rows().filter(|&i| !form.hidden(i)) {
-                if let Some(a) = form_row(ui, i, &form.rows[i], i == form.focus) {
+                let row = &form.rows[i];
+                let shown = fmt::rename_shown(row.label());
+                if let Some(a) = form_row(ui, i, row, i == form.focus, shown) {
                     act = Some(a);
                 }
                 ui.end_row();
@@ -697,8 +702,10 @@ fn placeholder_examples(ui: &mut Ui) {
 fn names_info(ui: &mut Ui) {
     ui.label("The Editor starts from the result of the other tabs.");
     ui.label(
-        RichText::new("Edit the names in the box. A setting above starts the Editor over.")
-            .color(MUTED),
+        RichText::new(
+            "Edit the names in the box. A setting above starts the Editor over (F7 restores).",
+        )
+        .color(MUTED),
     );
 }
 
@@ -717,16 +724,7 @@ fn panel_head(ui: &mut Ui, title: &str, note: Option<String>) {
 }
 
 /// Count of changes, then the old -> new table of the items that fit.
-fn rename_preview(ui: &mut Ui, form: &RenameForm) -> Option<FormAct> {
-    // the buttons sit at the bottom of this half: Cancel, then Rename on the right (the default)
-    let mut buttons = None;
-    egui::Panel::bottom("rename-buttons")
-        .frame(egui::Frame::NONE)
-        .show_separator_line(false)
-        .show(ui, |ui| {
-            ui.add_space(4.0);
-            buttons = rename_buttons(ui);
-        });
+fn rename_preview(ui: &mut Ui, form: &mut RenameForm) {
     panel_head(
         ui,
         "Preview",
@@ -734,6 +732,7 @@ fn rename_preview(ui: &mut Ui, form: &RenameForm) -> Option<FormAct> {
     );
     let row_h = ui.text_style_height(&TextStyle::Body) + ui.spacing().item_spacing.y;
     let fit = (ui.available_height() / row_h).max(1.0) as usize;
+    form.page = fit; // the PgUp / PgDn step
     egui::Grid::new("rename-preview")
         .num_columns(3)
         .spacing(vec2(8.0, 2.0))
@@ -743,22 +742,6 @@ fn rename_preview(ui: &mut Ui, form: &RenameForm) -> Option<FormAct> {
                 ui.end_row();
             }
         });
-    buttons
-}
-
-/// Rename (Enter, the default, rightmost) and Cancel (Esc), right-aligned.
-fn rename_buttons(ui: &mut Ui) -> Option<FormAct> {
-    let button = |ui: &mut Ui, t: &str| ui.add(Button::new(t).sense(Sense::CLICK)).clicked();
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if button(ui, "Rename") {
-            Some(FormAct::Key(KeyCode::Enter))
-        } else if button(ui, "Cancel") {
-            Some(FormAct::Key(KeyCode::Esc))
-        } else {
-            None
-        }
-    })
-    .inner
 }
 
 /// One preview row: old name, arrow (`=` unchanged, `!` a problem), new name.
@@ -785,7 +768,7 @@ fn form_rows(ui: &mut Ui, rows: &[FormRow], focus: usize, error: Option<&str>) -
         .spacing(vec2(12.0, 6.0))
         .show(ui, |ui| {
             for (i, row) in rows.iter().enumerate() {
-                if let Some(a) = form_row(ui, i, row, i == focus) {
+                if let Some(a) = form_row(ui, i, row, i == focus, row.label()) {
                     act = Some(a);
                 }
                 ui.end_row();
@@ -797,26 +780,27 @@ fn form_rows(ui: &mut Ui, rows: &[FormRow], focus: usize, error: Option<&str>) -
     act
 }
 
-/// One grid row: a text field, checkbox or dropdown drawn by egui, its state owned by the app.
-fn form_row(ui: &mut Ui, i: usize, row: &FormRow, focused: bool) -> Option<FormAct> {
+/// One grid row: a text field, checkbox or dropdown drawn by egui, its state owned by the app;
+/// `shown` is the label text (the row's key is `row.label()`).
+fn form_row(ui: &mut Ui, i: usize, row: &FormRow, focused: bool, shown: &str) -> Option<FormAct> {
     let color = if focused { ACCENT } else { TEXT };
     let label = |t: &str| RichText::new(t.to_owned()).color(color);
     let click = |ui: &mut Ui, t: RichText| ui.add(Label::new(t).sense(Sense::click())).clicked();
     let hit = match row {
         FormRow::Text(name, l) => {
-            let name_label = ui.add(Label::new(label(name).strong()).sense(Sense::click()));
+            let name_label = ui.add(Label::new(label(shown).strong()).sense(Sense::click()));
             let hit = with_tip(name_label, name).clicked();
             text_box(ui, l, focused).clicked() || hit
         }
         FormRow::Check(name, on) => {
             ui.label("");
             let mut on = *on; // a copy: the app toggles the real one on the click
-            let r = with_tip(ui.checkbox(&mut on, label(name)), name);
+            let r = with_tip(ui.checkbox(&mut on, label(shown)), name);
             unfocus(&r);
             r.clicked()
         }
         FormRow::Choice(name, opts, k) => {
-            let hit = click(ui, label(name).strong());
+            let hit = click(ui, label(shown).strong());
             let mut pick = *k;
             let r = ComboBox::from_id_salt(("form-choice", i)).show_index(
                 ui,

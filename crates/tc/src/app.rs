@@ -1,4 +1,4 @@
-//! App state and key handling, independent of the terminal.
+//! App state and key handling, independent of the drawing.
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
@@ -265,7 +265,6 @@ pub struct App {
     found: Option<Found>,
     /// Sync rows while a file is open in the viewer or editor; shown again after it.
     sync_back: Option<Box<Sync>>,
-    /// Multi-rename form while its new names are edited in the editor, and the temp file's dir.
     /// The batch being renamed, and the last one that finished completely (undo, until quit).
     rename_running: Option<RenameBatch>,
     rename_undo: Option<RenameBatch>,
@@ -291,7 +290,7 @@ pub struct App {
     /// Command history (oldest first) and the file it is saved to.
     pub history: Vec<String>,
     pub history_file: Option<PathBuf>,
-    /// Command and directory for the main loop to run on the real terminal.
+    /// Command and directory for the main loop to run (`:` command line).
     /// The `url` of a remote connection runs it there over `ssh`.
     pub run: Option<(String, PathBuf, Option<String>)>,
     /// Entry extracted from an archive for the viewer; removed once the viewer is closed.
@@ -689,8 +688,8 @@ impl App {
                     self.mode = Mode::Message(e.to_string());
                 }
             }
-            // type-to-search: a-z and 0-9 start quick search, other keys keep their meaning
-            KeyCode::Char(c) if !alt && c.is_ascii_alphanumeric() => {
+            // type-to-search: letters and digits start quick search, other keys keep their meaning
+            KeyCode::Char(c) if !alt && c.is_alphanumeric() => {
                 self.panels[self.active].search(&c.to_string(), 0);
                 self.mode = Mode::Search(c.to_string());
             }
@@ -799,7 +798,8 @@ impl App {
         }
     }
 
-    /// Quick search: a-z and 0-9 extend the text, Up/Down jump to the previous/next match.
+    /// Quick search: letters, digits and `. _ -` extend the text, Up/Down jump to the
+    /// previous/next match.
     /// Esc ends it; any other key ends it too and acts on the cursor file as in normal mode.
     fn search_key(&mut self, mut text: String, key: KeyEvent) {
         let panel = &mut self.panels[self.active];
@@ -816,7 +816,7 @@ impl App {
                 panel.search(&text, 0);
             }
             KeyCode::Char(c)
-                if c.is_ascii_alphanumeric()
+                if (c.is_alphanumeric() || "._-".contains(c))
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -1133,7 +1133,7 @@ impl App {
         self.external_edit(path, "code".into());
     }
 
-    /// Text pasted by the terminal (bracketed paste): into the editor or the open prompt.
+    /// Pasted text: into the editor or the open prompt.
     pub fn on_paste(&mut self, text: String) {
         if let Some(input) = &mut self.input {
             return paste_line(&mut input.text, &text);

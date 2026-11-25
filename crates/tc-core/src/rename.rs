@@ -60,6 +60,8 @@ pub struct Spec {
     pub collapse: bool,
     pub space_caps: bool,
     pub dots: bool,
+    /// Trim the ends and the spaces just inside brackets.
+    pub trim: bool,
     /// Added to the first number of the name; 0 is off.
     pub add: i64,
 }
@@ -83,6 +85,7 @@ impl Default for Spec {
             collapse: false,
             space_caps: false,
             dots: false,
+            trim: false,
             add: 0,
         }
     }
@@ -147,7 +150,8 @@ fn build(pattern: &str, insensitive: bool, field: &str) -> std::result::Result<R
 }
 
 /// Find pattern and replace template for `%a` placeholders: each `%x` in Find is a group
-/// (`%n` digits, else any text); each `%x` in Replace is that group, unknown letters are empty.
+/// (`%n` digits, else any text); each `%x` in Replace is that group, unknown ones stay as typed;
+/// `%%` is a literal `%`.
 fn placeholders(find: &str, replace: &str) -> (String, String) {
     let mut pattern = String::new();
     let mut letters: Vec<char> = Vec::new();
@@ -156,6 +160,10 @@ fn placeholders(find: &str, replace: &str) -> (String, String) {
         pattern += &regex::escape(&rest[..i]);
         let mut cs = rest[i + 1..].chars();
         match cs.next() {
+            Some('%') => {
+                pattern += "%";
+                rest = cs.as_str();
+            }
             Some(l) if l.is_ascii_alphanumeric() => {
                 pattern += if l == 'n' { r"(\d+)" } else { "(.+?)" };
                 letters.push(l);
@@ -180,9 +188,14 @@ fn placeholders(find: &str, replace: &str) -> (String, String) {
         template += &rest[..i].replace('$', "$$");
         let mut cs = rest[i + 1..].chars();
         match cs.next() {
+            Some('%') => {
+                template += "%";
+                rest = cs.as_str();
+            }
             Some(l) if l.is_ascii_alphanumeric() => {
-                if let Some(g) = letters.iter().position(|&x| x == l) {
-                    template += &format!("${{{}}}", g + 1);
+                match letters.iter().position(|&x| x == l) {
+                    Some(g) => template += &format!("${{{}}}", g + 1),
+                    None => template.extend(['%', l]),
                 }
                 rest = cs.as_str();
             }
@@ -231,10 +244,13 @@ impl Rule {
                 .into_owned();
         }
         if let Some((re, t)) = &self.ph {
-            new_stem = re.replace_all(&new_stem, t.as_str()).into_owned();
+            // once: a placeholder before a literal stops at its first occurrence
+            new_stem = re.replacen(&new_stem, 1, t.as_str()).into_owned();
         }
         new_stem = clean(new_stem, &self.spec, &self.titles)?;
-        new_stem = trim_brackets(&new_stem);
+        if self.spec.trim {
+            new_stem = trim_brackets(&new_stem);
+        }
         match self.spec.case {
             Case::Keep => {}
             Case::Lower => (new_stem, new_ext) = (new_stem.to_lowercase(), new_ext.to_lowercase()),
@@ -302,8 +318,7 @@ fn clean(mut s: String, spec: &Spec, titles: &Regex) -> std::result::Result<Stri
     Ok(s)
 }
 
-/// `A.B.C.` -> `ABC`: drop the dot after a capital when a capital, `]`, `)`, the end or a
-/// later `.x` follows.
+/// `A.B.C.` -> `ABC`: drop the dot after a capital when a capital, `]`, `)` or the end follows.
 fn drop_initial_dots(s: &str) -> String {
     let cs: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
@@ -322,10 +337,7 @@ fn drop_initial_dots(s: &str) -> String {
 fn dot_is_initial(rest: &[char]) -> bool {
     match rest.first() {
         None => true,
-        Some(c) if c.is_uppercase() || matches!(c, ']' | ')') => true,
-        _ => rest
-            .windows(2)
-            .any(|w| w[0] == '.' && w[1].is_alphanumeric()),
+        Some(c) => c.is_uppercase() || matches!(c, ']' | ')'),
     }
 }
 
@@ -344,7 +356,9 @@ fn space_before_caps(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     let mut prev: Option<char> = None;
     for c in s.chars() {
-        if c.is_uppercase() && prev.is_some_and(|p| !p.is_uppercase() && !p.is_whitespace()) {
+        if c.is_uppercase()
+            && prev.is_some_and(|p| !p.is_uppercase() && !p.is_whitespace() && p != '_')
+        {
             out.push(' ');
         }
         out.push(c);
@@ -376,7 +390,8 @@ fn add_to_first_number(s: &str, add: i64) -> std::result::Result<String, String>
         .parse()
         .map_err(|_| "number too large".to_owned())?;
     let sum = num.checked_add(add).ok_or("number too large")?;
-    Ok(format!("{}{sum}{}", &s[..start], &s[start + len..]))
+    // keep the zero padding: `007` + 1 -> `008`
+    Ok(format!("{}{sum:0len$}{}", &s[..start], &s[start + len..]))
 }
 
 /// Trim the ends, and spaces just inside `( [ {` and `) ] }`.
@@ -396,7 +411,9 @@ fn trim_brackets(s: &str) -> String {
     out
 }
 
-const SMALL_WORDS: [&str; 7] = ["a", "an", "at", "in", "of", "the", "and"];
+const SMALL_WORDS: [&str; 13] = [
+    "a", "an", "and", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with",
+];
 
 /// Every word capitalized, except small words (not the first) and words that keep their own
 /// capitals (`ABC`, `McX`).
@@ -788,9 +805,15 @@ mod tests {
         let r = rule(|s| s.add = 10);
         assert_eq!(n(&r, "Picture 1.jpg"), "Picture 11.jpg");
         assert_eq!(n(&r, "no digits.jpg"), "no digits.jpg");
+        assert_eq!(n(&rule(|s| s.add = 1), "IMG_007.jpg"), "IMG_008.jpg");
         assert!(name(&rule(|s| s.add = i64::MAX), "a1", 0).is_err());
-        // trims ends and spaces inside brackets, always
-        assert_eq!(n(&rule(|_| {}), "( a ) .txt"), "(a).txt");
+        // trims ends and spaces inside brackets only when asked
+        assert_eq!(n(&rule(|_| {}), "( a ) .txt"), "( a ) .txt");
+        assert_eq!(n(&rule(|s| s.trim = true), "( a ) .txt"), "(a).txt");
+        let r = rule(|s| (s.underscore, s.space_caps) = (true, true));
+        assert_eq!(n(&r, "my_File.txt"), "my File.txt");
+        let r = rule(|s| s.dots = true);
+        assert_eq!(n(&r, "Section A.intro.v2.txt"), "Section A.intro.v2.txt");
         let r = rule(|s| s.case = Case::WordsSmall);
         assert_eq!(n(&r, "the end of a dream.txt"), "The End of a Dream.txt");
         assert_eq!(n(&r, "ABC road.txt"), "ABC Road.txt");
@@ -817,7 +840,14 @@ mod tests {
             "four-three-two-one"
         );
         // %n takes digits only
-        assert!(name(&ph("IMG_%n", "x"), "IMG_ab", 0).unwrap() == "IMG_ab");
+        assert_eq!(name(&ph("IMG_%n", "x"), "IMG_ab", 0).unwrap(), "IMG_ab");
+        // once only; unknown letters and %% stay literal
+        assert_eq!(
+            name(&ph("%a_", "%a-"), "chk_rs_asd", 0).unwrap(),
+            "chk-rs_asd"
+        );
+        assert_eq!(name(&ph("%a", "%a 50%off"), "x", 0).unwrap(), "x 50%off");
+        assert_eq!(name(&ph("%%a%n", "%n%%a"), "%a1", 0).unwrap(), "1%a");
     }
 
     #[test]

@@ -214,7 +214,6 @@ impl App {
             KeyCode::End => editor.end(),
             KeyCode::Enter => editor.newline(),
             KeyCode::BackTab => editor.unindent(),
-            KeyCode::Tab if shift => editor.unindent(),
             KeyCode::Tab => editor.insert_char('\t'),
             KeyCode::Backspace if ctrl || alt => editor.delete_word(false),
             KeyCode::Delete if ctrl || alt => editor.delete_word(true),
@@ -318,10 +317,6 @@ impl App {
             KeyCode::End => view.end(self.page),
             KeyCode::Left | KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
                 return self.view_step(title, view, key.code == KeyCode::Right);
-            }
-            // macOS terminals send Option+Left/Right as ESC b / ESC f
-            KeyCode::Char('b' | 'f') if key.modifiers.contains(KeyModifiers::ALT) => {
-                return self.view_step(title, view, key.code == KeyCode::Char('f'));
             }
             KeyCode::Left | KeyCode::Right => {
                 view.scroll_h(if key.code == KeyCode::Left { -8 } else { 8 });
@@ -1287,11 +1282,7 @@ mod tests {
         alt(&mut app, KeyCode::Left);
         assert_eq!(app.note, "no previous file");
 
-        alt(&mut app, KeyCode::Char('b'));
-        assert!(title(&app).0.ends_with("a.txt"));
-        alt(&mut app, KeyCode::Char('f'));
-        assert!(title(&app).0.ends_with("c.txt"));
-        // Ctrl+H (some terminals' Backspace) is not the hex toggle
+        // Ctrl+H is not the hex toggle
         with(&mut app, KeyCode::Char('h'), KeyModifiers::CONTROL);
         assert!(title(&app).1);
 

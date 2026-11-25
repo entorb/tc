@@ -1,7 +1,6 @@
 //! Multi-rename (Ctrl+M) form, names from the editor, undo; F2 / Shift+F6 rename.
 
 use super::{App, FormRow, Mode, Op, READ_ONLY, form_checked, form_text, paste_line, rows_to_line};
-use crate::fmt;
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -17,6 +16,7 @@ pub(super) const R_EXT: &str = "Extension mask";
 
 pub(super) const R_FIND: &str = "Find";
 
+// row keys (form lookup, history); shown as "Search" / "Replace" (`fmt::rename_shown`)
 pub(super) const R_REPLACE: &str = "Replace with";
 
 pub(super) const R_PH_FIND: &str = "Search";
@@ -35,13 +35,18 @@ pub(super) const R_SPACE_CAPS: &str = "Space before capitals";
 
 pub(super) const R_DOTS: &str = "Remove dots";
 
+pub(super) const R_TRIM: &str = "Trim spaces";
+
+/// Shown when a setting replaced names typed in the Editor or pasted as a list.
+pub(super) const LOST_NOTE: &str = "The settings replaced your edited names: F8 restores them.";
+
 pub(super) const R_ADD: &str = "Add to first number";
 
 pub(super) const R_CASE: &str = "Case";
 
-/// Rows per tab (titles in `fmt::RENAME_TABS`): the rows of all tabs in this order, then the
-/// preset row.
-pub(super) const TAB_ROWS: [usize; 5] = [5, 4, 2, 6, 0];
+/// Rows per tab (titles in `fmt::RENAME_TABS`): the rows of all tabs in this order; the Editor
+/// tab has none.
+pub(super) const TAB_ROWS: [usize; 5] = [5, 4, 2, 7, 0];
 
 const _: () = assert!(TAB_ROWS.len() == crate::fmt::RENAME_TABS.len());
 
@@ -92,6 +97,7 @@ pub(super) fn rename_rows() -> Vec<FormRow> {
         FormRow::Check(R_COLLAPSE, false),
         FormRow::Check(R_SPACE_CAPS, false),
         FormRow::Check(R_DOTS, false),
+        FormRow::Check(R_TRIM, false),
         text(R_ADD, ""),
         FormRow::Choice(R_CASE, &CASE_NAMES, 0),
     ]
@@ -137,6 +143,10 @@ pub struct RenameForm {
     pub changed: [bool; TAB_ROWS.len()],
     /// Items that get a new name.
     pub count: usize,
+    /// Preview rows that fit (set by the drawing): the PgUp / PgDn step.
+    pub page: usize,
+    /// Edited names a setting replaced (Editor text), until F8 restores them.
+    pub(super) lost: Option<String>,
 }
 
 impl RenameForm {
@@ -183,6 +193,7 @@ impl RenameForm {
             collapse: form_checked(rows, R_COLLAPSE),
             space_caps: form_checked(rows, R_SPACE_CAPS),
             dots: form_checked(rows, R_DOTS),
+            trim: form_checked(rows, R_TRIM),
             add,
         })
     }
@@ -248,14 +259,22 @@ impl RenameForm {
     /// Show tab `t` and focus its first row.
     pub(super) fn goto_tab(&mut self, t: usize) {
         self.tab = t.min(TAB_ROWS.len() - 1);
+        // keys after the switch go to the form until the drawing focuses the editor again
+        self.editor_focused = false;
         self.focus = tab_range(self.tab).start;
     }
 
-    /// Focus moved (Tab, click): the tab follows it, the preset row keeps the tab.
+    /// Focus moved (Tab, click): the tab follows it.
     pub(super) fn follow_focus(&mut self) {
         if let Some(t) = (0..TAB_ROWS.len()).find(|&t| tab_range(t).contains(&self.focus)) {
             self.tab = t;
         }
+    }
+
+    /// Scroll the preview by `rows`, keeping the last page full.
+    pub(super) fn scroll_preview(&mut self, rows: isize) {
+        let end = self.preview.len().saturating_sub(self.page.max(1));
+        self.scroll = self.scroll.saturating_add_signed(rows).min(end);
     }
 
     /// Up / Down: move inside the shown tab, over the rows that are shown.
@@ -294,6 +313,12 @@ impl RenameForm {
 
     /// Renames to run, or why not.
     pub(super) fn pairs(&self) -> Result<Vec<(String, String)>, String> {
+        // a wrong count shifts names onto the wrong files
+        if let Some(n) = &self.names
+            && n.len() != self.items.len()
+        {
+            return Err(format!("{} names for {} files.", n.len(), self.items.len()));
+        }
         let mut old = Vec::new();
         let mut new = Vec::new();
         for (o, n) in &self.preview {
@@ -313,11 +338,30 @@ impl RenameForm {
             let lines = text.lines().take(self.items.len() + 1);
             return self.set_names(lines.map(str::to_owned).collect());
         }
-        if let FormRow::Text(_, l) = &mut self.rows[self.focus] {
+        // the Editor tab has no field
+        if let Some(FormRow::Text(_, l)) = self.rows.get_mut(self.focus) {
             paste_line(l, text);
+            self.settings_changed();
         }
-        self.names = None;
+    }
+
+    /// A setting changed: the masks make the names again; hand-made names are kept for F8.
+    pub(super) fn settings_changed(&mut self) {
+        let lost = self.names.take().map(|_| std::mem::take(&mut self.editor));
         self.refresh();
+        if lost.is_some() {
+            self.lost = lost;
+            self.error.get_or_insert_with(|| LOST_NOTE.into());
+        }
+    }
+
+    /// F8: back to the edited names a setting replaced.
+    pub(super) fn restore_lost(&mut self) {
+        if let Some(text) = self.lost.take() {
+            self.editor = text;
+            self.goto_tab(TAB_ROWS.len() - 1);
+            self.sync_editor();
+        }
     }
 
     /// The editor text changed: its lines are the new names (a final line break adds none).
@@ -333,6 +377,7 @@ impl RenameForm {
     /// Use `lines` as the new names, one per item; a wrong count is an error and changes nothing.
     pub(super) fn set_names(&mut self, lines: Vec<String>) {
         if lines.len() == self.items.len() {
+            self.lost = None;
             self.editor = lines.join("\n");
             self.names = Some(lines);
             self.refresh();
@@ -395,6 +440,8 @@ impl App {
             tab: 0,
             changed: [false; TAB_ROWS.len()],
             count: 0,
+            page: 1,
+            lost: None,
         };
         form.refresh();
         self.mode = Mode::MultiRename(form);
@@ -404,8 +451,9 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc | KeyCode::F(10) => return,
-            KeyCode::Enter => return self.multi_rename_run(form),
+            KeyCode::Esc | KeyCode::F(9) => return,
+            // F10 renames and closes (the form stays open on a problem)
+            KeyCode::Enter | KeyCode::F(10) => return self.multi_rename_run(form),
             KeyCode::Char(d @ '1'..='5') if alt => form.goto_tab(d as usize - '1' as usize),
             KeyCode::PageDown if ctrl => form.goto_tab(form.tab + 1),
             KeyCode::PageUp if ctrl => form.goto_tab(form.tab.saturating_sub(1)),
@@ -416,10 +464,10 @@ impl App {
                     _ => (form.hist + 1).min(len),
                 };
                 form.rows = self.rename_hist(form.hist);
-                form.names = None;
-                form.refresh();
+                form.settings_changed();
             }
-            KeyCode::F(4) => form.goto_tab(TAB_ROWS.len() - 1),
+            KeyCode::F(n @ 2..=6) => form.goto_tab(n as usize - 2),
+            KeyCode::F(7) => form.restore_lost(),
             KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.rename_undo_run(form);
             }
@@ -433,15 +481,14 @@ impl App {
             }
             KeyCode::Down => form.step_in_tab(1),
             KeyCode::Up => form.step_in_tab(-1),
-            KeyCode::PageUp => form.scroll = form.scroll.saturating_sub(fmt::RENAME_PREVIEW_ROWS),
-            KeyCode::PageDown => {
-                let end = form.preview.len().saturating_sub(fmt::RENAME_PREVIEW_ROWS);
-                form.scroll = (form.scroll + fmt::RENAME_PREVIEW_ROWS).min(end);
-            }
+            KeyCode::PageUp => form.scroll_preview(-(form.page.max(1) as isize)),
+            KeyCode::PageDown => form.scroll_preview(form.page.max(1) as isize),
             _ => {
-                form.rows[form.focus].key(key);
-                form.names = None;
-                form.refresh();
+                // the Editor tab has no row: its keys go to the editor
+                if let Some(row) = form.rows.get_mut(form.focus) {
+                    row.key(key);
+                    form.settings_changed();
+                }
             }
         }
         self.mode = Mode::MultiRename(form);
@@ -677,7 +724,7 @@ mod tests {
         key(&mut app, KeyCode::Insert);
         key(&mut app, KeyCode::Insert);
         with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
-        key(&mut app, KeyCode::F(4)); // the Editor tab
+        key(&mut app, KeyCode::F(6)); // the Editor tab
         let Mode::MultiRename(f) = &app.mode else {
             panic!("no form");
         };
@@ -767,6 +814,8 @@ mod tests {
             tab: 0,
             changed: [false; super::TAB_ROWS.len()],
             count: 0,
+            page: 1,
+            lost: None,
         };
         f.refresh();
         f
@@ -778,7 +827,7 @@ mod tests {
         assert_eq!((f.tab, f.count, f.changed), (0, 0, [false; 5]));
         // tab 3 holds the clean-up options; Tab moves focus, the shown tab follows it
         f.goto_tab(3);
-        assert_eq!(f.shown_rows(), 11..17);
+        assert_eq!(f.shown_rows(), 11..18);
         f.focus = 11;
         if let FormRow::Check(_, on) = &mut f.rows[11] {
             *on = true; // underscore to space
@@ -820,5 +869,41 @@ mod tests {
         f.paste("[N]");
         // the caret starts at the end of the field
         assert_eq!(form_text(&f.rows, super::R_EXT), "[E][N]");
+    }
+
+    #[test]
+    fn editor_tab_without_focus_ignores_keys_and_paste() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), "a").unwrap();
+        let mut app = two_panels(dir.path(), dir.path());
+        key(&mut app, KeyCode::Down); // skip ".."
+        with(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::F(6)); // the Editor tab has no row to type into
+        type_keys(&mut app, "x ");
+        app.on_paste("y".into());
+        assert!(matches!(&app.mode, Mode::MultiRename(f) if f.editor == "a"));
+    }
+
+    #[test]
+    fn wrong_name_count_never_renames() {
+        let mut f = form_for("a.txt");
+        f.editor = "x\ny".into();
+        f.sync_editor();
+        assert_eq!(f.preview[0].1.as_deref(), Ok("x"));
+        assert!(f.pairs().unwrap_err().contains("2 names for 1 files"));
+    }
+
+    #[test]
+    fn f8_restores_names_a_setting_replaced() {
+        let mut f = form_for("a.txt");
+        f.editor = "mine.txt".into();
+        f.sync_editor();
+        f.focus = 0;
+        f.paste("x"); // a setting: the masks win again
+        assert_eq!((f.names.is_none(), f.editor.as_str()), (true, "ax.txt"));
+        assert_eq!(f.error.as_deref(), Some(super::LOST_NOTE));
+        f.restore_lost();
+        assert_eq!((f.tab, f.editor.as_str()), (4, "mine.txt"));
+        assert_eq!(f.preview[0].1.as_deref(), Ok("mine.txt"));
     }
 }

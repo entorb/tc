@@ -171,6 +171,7 @@ impl App {
                 editor,
                 error: None,
             } => editor.move_v(lines),
+            Mode::MultiRename(f) => f.scroll_preview(lines),
             Mode::Procs(p) if p.idle() => {
                 let last = p.rows.len().saturating_sub(1);
                 p.sel = p.sel.saturating_add_signed(lines).min(last);

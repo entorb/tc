@@ -3,7 +3,7 @@
 use crate::app::Mode;
 
 pub const HELP_MAIN: &str = "\
-Type to filter this help, Enter runs the key.
+Type to filter this help, Up/Down select, Enter runs the key.
 
 == Highlights ==
 F9              menu with all features (when keys are eaten)
@@ -18,8 +18,16 @@ Ctrl+P          PROCESSES (like btop / task manager), of the
                 SSH server on an SFTP panel
 
 == Navigation ==
+Tab             switch panel
 Enter           open directory, archive or file
 Backspace       parent directory
+Left            parent directory
+Right           open directory or archive
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last entry
+Alt+Left        history back
+Alt+Right       history forward
 Alt+Down        directory history of the panel (also the 🕓 button
                 top right of the panel; ★ next to it: bookmarks)
 Ctrl+K          sync browsing on / off: entering a directory or
@@ -40,6 +48,9 @@ Ctrl+W          close tab
 Ctrl+Shift+T    reopen the last closed tab (local, last 10)
 Ctrl+Shift+O    move the tab to the other panel (not the last one)
 Ctrl+=/Ctrl+-   font size (saved)
+Ctrl+PgDn       next tab
+Ctrl+Tab        next tab
+Ctrl+PgUp       previous tab
 Alt+=           other panel to this directory
 Ctrl+Left       right panel: cursor directory into the left panel
 Ctrl+Right      left panel: cursor directory into the right panel
@@ -91,19 +102,20 @@ Ctrl+Y          compare with the other panel and select, per
                 different (size or date); Enter repeats the last
 
 == Search ==
-a..z, 0..9      type a name to start quick search, more letters narrow it
+a..z, 0..9      type a name to start quick search (any letter
+                or digit); more letters, digits and . _ - narrow it
 Up / Down       quick search: previous / next match
                 Esc stops searching; other keys stop it and act on the
                 cursor file (F-keys, Enter opens)
 /               filter popup: name part, min / max size (10k, 5M),
                 newer / older than (30m, 12h, 7d), file types of
                 this directory (checkboxes; none = all; types and
-                sizes hide directories).
+                sizes hide directories). Tab / Up / Down move,
                 Space toggles a type, Enter applies, Esc cancels.
                 The filter ends on leaving the directory; Esc clears it
 Ctrl+F          find files
 Ctrl+E          synchronize directories (left / right panel)
-:               command line
+:               command line (Up/Down: earlier commands)
 Ctrl+O          open a terminal in this directory (local panels only)
 
 == Files ==
@@ -153,8 +165,13 @@ double-click opens a directory; hover shows path, size
 and file count of any tile.
 
 == Move ==
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last entry
 Enter           open directory
+Right           open directory
 Backspace       parent directory
+Left            parent directory
 Tab             show and sort by size / file count (count
                 mode treemap: dirs only by file count, 2 levels)
 F5              rescan the browsed directory, totals above update
@@ -188,6 +205,9 @@ Hidden and filtered-out rows are not synchronized. Local
 deletes go to the trash, remote ones are permanent.
 
 == Move ==
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last row
 F3 / F4         view / edit the left file (the right one when
                 only it has the file); local only
 
@@ -208,9 +228,16 @@ Ctrl+R          compare again
 Esc / q / F10   close (while comparing: cancel)";
 pub const HELP_SYNC_FORM: &str = "\
 == Fields ==
+Tab             next field
+Shift+Tab       previous field
+Up/Down         previous / next field
 Space           toggle checkbox
 Click           focus a field; toggles a checkbox, cycles a choice
+Left/Right      move in text
+Ctrl+Left/Right word left / right (Alt too: Mac Option)
 Ctrl+Bksp/Del   delete word left / right (Alt too)
+Alt+Up/Down     previous / next used settings (saved in
+                tc/sync-forms)
 
 == Options ==
 File mask: names to compare, `*` and `?`, comma or space
@@ -225,13 +252,14 @@ Enter           compare the two panel directories
 Esc / F10       close";
 pub const HELP_SETTINGS: &str = "\
 == Fields ==
+Up/Down / Tab   previous / next field
 Space           toggle checkbox
 Click           focus a field; toggles a checkbox, cycles a choice
 
 == Options ==
 Check for updates daily: release builds ask GitHub for a
 newer release on the first start of a day and show it.
-Font size: Space changes it; also Ctrl+=
+Font size: Left/Right/Space change it; also Ctrl+=
 and Ctrl+-.
 
 == Run ==
@@ -239,8 +267,11 @@ Every change is saved at once.
 Esc / F10       close";
 pub const HELP_PROPS: &str = "\
 == Fields ==
+Up/Down / Tab   previous / next field
 Space           toggle checkbox
 Click           focus a field; toggles a checkbox, cycles a choice
+Left/Right      move in text
+Ctrl+Left/Right word left / right (Alt too: Mac Option)
 Ctrl+Bksp/Del   delete word left / right (Alt too)
 
 == Options ==
@@ -263,9 +294,15 @@ Enter           apply; stops at the first error, what was done
 Esc / F10       close";
 pub const HELP_FIND_FORM: &str = "\
 == Fields ==
+Tab             next field
+Shift+Tab       previous field
+Up/Down         previous / next field
 Space           toggle checkbox
 Click           focus a field; toggles a checkbox, cycles a choice
+Left/Right      move in text
+Ctrl+Left/Right word left / right (Alt too: Mac Option)
 Ctrl+Bksp/Del   delete word left / right (Alt too)
+Alt+Up/Down     earlier / later searches (history)
 
 == Name ==
 Name (masks): `*` any run, `?` one character, several
@@ -302,6 +339,9 @@ Enter           start the search
 Esc / F10       close (the form is kept for next time)";
 pub const HELP_FOUND: &str = "\
 == Move ==
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last result
 /               filter the results by path: Enter keeps,
                 Esc clears
 
@@ -318,13 +358,22 @@ Ctrl+G          go to the file's directory (local only)
 Esc / q / F10   stop a running search, then close";
 pub const HELP_RENAME: &str = "\
 == Tabs ==
-Alt+1 .. Alt+5   show tab 1 to 5 (Name, Replace, Placeholder, Clean up, Editor)
-Click            a tab title, or a field or button of the tab
+F2 F3 F4 F5 F6 show tab 1 to 5 (Name, Replace,
+                Placeholder, Clean up, Editor; Alt+1 .. Alt+5 too)
+Ctrl+PgUp/PgDn  previous / next tab
+Click           a tab title, or a field or button of the tab
 A tab title with a dot has options set away from the defaults.
 
 == Fields ==
-Space            toggle checkbox, cycle choice
-Ctrl+Bksp/Del    delete word left / right (Alt too)
+Tab             next field (the tab follows)
+Shift+Tab       previous field
+Up/Down         previous / next field of the shown tab
+Space           toggle checkbox, cycle choice
+Left/Right      move in text, cycle choice
+Ctrl+Left/Right word left / right (Alt too: Mac Option)
+Ctrl+Bksp/Del   delete word left / right (Alt too)
+Alt+Up/Down     earlier / later settings (history)
+PgUp/PgDn       scroll the preview (mouse wheel too)
 
 == Name tab ==
 Text stays as typed; [..] placeholders are replaced:
@@ -335,38 +384,48 @@ Text stays as typed; [..] placeholders are replaced:
   [Y] [M] [D] year, month, day of the modified date
   [h] [n] [s] hour, minute, second
   [[] a literal [
-The buttons [N] [E] [C] [Y] [M] [D] insert into the focused field.
+The buttons [N] [E] [C] [Y] [M] [D] insert into the
+focused field.
 
 == Replace tab ==
-Plain: the text is found as typed. Find case-sensitive applies to Plain only.
-Regex: $1 or ${1} in Replace is the first group. Use (?-i) for case-sensitive.
+Search and Replace: Plain finds the text as typed;
+Case-sensitive applies to Plain only.
+Regex: $1 or ${1} in Replace is the first group. Use
+(?-i) for case-sensitive.
 
 == Placeholder tab ==
-Search and Replace use placeholders, applied after the Replace tab's find.
-%a matches any text, %n matches only digits. Each %letter in Search is a group;
-in Replace, %letter puts that group back. %a before a literal stops at its
-first occurrence: %a_ matches chk_ in chk_rs_asd. A placeholder at the end of
-Search takes the rest of the name.
-Examples (Search -> Replace, name in -> name out):
-%a_%b_%c_%d      ->  %d-%c-%b-%a  one_two_three_four -> four-three-two-one
-IMG_%n           ->  Photo %n     IMG_12 -> Photo 12
+Search and Replace use placeholders, applied once after
+the Replace tab's find. %a matches any text, %n only
+digits. Each %letter in Search is a group; in Replace,
+%letter puts that group back (other %letters stay as
+typed, %% is a %). %a before a literal stops at its
+first occurrence: %a_ matches chk_ in chk_rs_asd. A
+placeholder at the end of Search takes the rest.
+Examples (Search -> Replace: name in -> name out):
+  %a_%b_%c_%d -> %d-%c-%b-%a: one_two_three_four ->
+  four-three-two-one
+  IMG_%n -> Photo %n: IMG_12 -> Photo 12
 
 == Clean up tab ==
 Underscore to space     'two_words' -> 'two words'
 Remove multiple spaces  'long    space' -> 'long space'
 Space before capitals   'OneLongWord' -> 'One Long Word'
 Remove dots             'A.B.C.' -> 'ABC', 'Mr.' -> 'Mr'
-Add to first number     'Picture 1' with 10 -> 'Picture 11'
-The ends and the spaces inside ( [ { ) ] } are always trimmed.
-
-Case: unchanged, lower, UPPER, First letter, Every Word, Every Word with small words kept.
-Small kept: 'the end of a dream' -> 'The End of a Dream'.
+Trim spaces             '( a ) ' -> '(a)': the ends and
+                        inside ( [ { ) ] }
+Add to first number     'Picture 1' with 10 -> 'Picture 11',
+                        'IMG_007' with 1 -> 'IMG_008'
+Case: unchanged, lower, UPPER, First letter, Every Word,
+Every Word with small words kept ('the end of a dream' ->
+'The End of a Dream').
 
 == Editor tab ==
-F4              show the Editor tab (the new names, one per line)
-The Editor starts from the other tabs' result; edit it freely.
-Enter adds a line, Ctrl+Z undoes, Rename applies the names in the Editor.
-A setting in another tab starts the Editor over. The line count must match the files.
+F6              show the Editor tab (the new names, one per line)
+The Editor starts from the other tabs' result; edit it
+freely: Enter adds a line, Ctrl+Z undoes. Rename applies
+the names in the Editor; the line count must match the
+files. A setting in another tab starts the Editor over.
+F7              restore the edited names a setting replaced
 
 == Names from a list ==
 Paste (several lines)  new names, one per line
@@ -376,10 +435,12 @@ Paste (several lines)  new names, one per line
 Ctrl+Z         undo the last multi-rename (this session)
 
 == Run ==
-Enter           rename (the preview shows every new name)
-Esc / F10       close";
+Enter / F10     rename and close (the preview shows every new
+                name; the form stays open on a problem)
+Esc / F9        cancel";
 pub const HELP_LISTS: &str = "\
 == Bookmarks (Ctrl+B) ==
+Up/Down         move
 Enter / Click   go to the directory in the active panel
 Insert / a      add the active panel's directory (✚; greyed
                 while it is in the list)
@@ -390,6 +451,8 @@ Delete/Bksp     remove the selected bookmark (➖)
 Esc / q / F10   close (also a click beside the list)
 
 == Edit bookmarks (F4 in the bookmarks) ==
+Tab             next field: alias, path, next row (Shift+Tab back)
+Up/Down         previous / next row
 Ctrl+Up/Down    move the row (⏶ ⏷; also Shift+Up/Down)
 Insert          add the active panel's directory (✚)
 F8              delete the row (➖; also Ctrl+Delete)
@@ -397,12 +460,14 @@ Enter           save all (Save; empty alias shows the path)
 Esc / F10       discard changes, back to the list (Cancel)
 
 == Popular directories (Ctrl+Z) ==
+Up/Down         move, best ranked (visits, recent first) on top
 Enter           go to the directory in the active panel
 Delete/Bksp     forget the directory
 /               filter: Enter keeps, Esc clears
 Esc / q / F10   close
 
 == Connections (Ctrl+N) ==
+Up/Down         move
 Enter           connect
 Insert / a      add a connection
 F4 / e          edit the connection
@@ -411,14 +476,17 @@ Delete/Bksp     remove the connection
 Esc / q / F10   close
 
 == Compare (Ctrl+Y) ==
+Up/Down         move
 Enter           select by the row, both panels
 Esc / q / F10   close
 
 == Drives (Alt+F1 / Alt+F2) ==
+Up/Down         move
 Enter           go to the mount point
 Esc / q / F10   close
 
 == Directory history (Alt+Down) ==
+Up/Down         move, newest on top
 Enter / Click   go there (a history step: back / forward stay)
 Esc / q / F10   close";
 pub const HELP_CONFLICT: &str = "\
@@ -449,6 +517,9 @@ server's /proc and ps. RUN is the time since the
 process started, in minutes.
 
 == Move ==
+Up/Down         move cursor
+PgUp/PgDn       page up / down
+Home/End        first / last process
 Mouse wheel     scroll
 Click header    sort by CPU or memory (GUI)
 
@@ -460,7 +531,7 @@ c / m / r       sort by CPU / memory / runtime
                 Find: id, command or name, * wildcard
                   (fire*, *--x*, 42*; no * = substring)
                 Min MEM (MB), Min CPU (%), Min runtime (min)
-                Enter applies,
+                Tab / Up / Down move, Enter applies,
                 Esc cancels; Esc with no popup clears
 Ctrl+R / F5     sample now
 s               update interval in seconds (default 2):
@@ -471,11 +542,15 @@ F8 / k          kill: t / Enter SIGTERM, k SIGKILL, n / Esc cancel
 Esc / q / F10   close";
 pub const HELP_VIEW: &str = "\
 == Move ==
+Up/Down         scroll
+PgUp/PgDn       page up / down
+Home/End        start / end of file
+Left/Right      scroll sideways
 Mouse wheel     scroll
 g / Ctrl+G      go to line or N% (hex: offset 0x.. / decimal)
 
 == Search ==
-/ f F7 Ctrl+F   search dialog (Space
+/ f F7 Ctrl+F   search dialog (Tab / Up / Down move, Space
                 checks, Enter runs, F1 regex syntax)
 n / Shift+F7    next match
 N               previous match
@@ -484,6 +559,7 @@ Alt+C           case sensitive / smart case
 
 == View ==
 h / Alt+H       hex view (offset | bytes | ASCII)
+Alt+Left/Right  previous / next file of the panel (skips dirs and media)
 w / Alt+W       wrap long lines
 l / Alt+L       line numbers
 F4              edit this file at the top line (local files)
@@ -495,23 +571,30 @@ pub const HELP_EDIT: &str = "\
 == File ==
 F2 / Ctrl+S     save: trailing blanks trimmed, final line break
                 added; Markdown first gets blank lines around
-                headings, lists and ``` blocks
-F5              Markdown: add those blank lines now (undo:
-                Ctrl+Z)
+                headings, lists and ``` blocks, and runs of
+                blank lines shrink to one
+F5              Markdown: do that now (undo: Ctrl+Z)
 Esc / F10       exit (asks if unsaved: y / Enter saves)
                 changed on disk (checked each second, and on
                 save): no edits: read again; else asks:
                 y overwrite, r reload (drops edits), n keep
 
 == Move ==
+Up/Down         line up / down
+PgUp/PgDn       page up / down
+Left/Right      character left / right
+Home/End        start / end of line (Mac also Cmd+Left/Right)
+Ctrl+Left       word left (also Alt+Left: Mac Option+Left)
+Ctrl+Right      word right (also Alt+Right)
+Ctrl+Home/End   start / end of file
 Ctrl+G          go to line
 Mouse wheel     scroll
 Mouse           click, drag, Shift+click select
 
 == Search ==
-F3 / F7 Ctrl+F  search and replace dialog (Space checks,
-                Enter runs, F1 regex
-                syntax)
+F3 / F7 Ctrl+F  search and replace dialog (Tab / Up / Down
+                move, Space checks, Enter runs, F1 regex
+                syntax, Alt+Up/Down earlier patterns)
 Shift+F7        next match
 Shift+F3        previous match
 Ctrl+R          dialog with Replace on
@@ -550,7 +633,7 @@ Alt+L           line numbers on / off";
 pub const HELP_SEARCH: &str = "\
 == Fields ==
 Find            text to search for; empty repeats the last
-                search
+                search; Alt+Up/Down earlier patterns
 Replace with    text put in place of each match (Replace on)
 
 == Options ==

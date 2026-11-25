@@ -2,6 +2,7 @@
 //! Check here before writing a new helper; shared ones go here.
 
 use super::{MUTED, mono};
+use crate::keys;
 use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{
     self, Align, Button, Context, Event, Id, Label, Layout, RichText, Sense, TextEdit, TextStyle,
@@ -15,49 +16,68 @@ pub(super) fn line_edit(ui: &mut Ui, l: &LineEdit) {
     text_box(ui, l, true);
 }
 
-/// `l` as a native egui text field. The app owns every key (typing, paste, IME commit, Enter,
-/// Esc, Tab, history): keyboard events are hidden from the field, so it only takes the mouse
-/// (caret placement, drag selection, copy of the selection) and shows the caret where `l` has it.
+/// `l` as a native egui text field. A focused field edits itself (typing, IME, selection,
+/// clipboard, caret and delete keys); the app gets text and caret back through `apply_field`
+/// and runs its per-key side effects. Enter, Esc, Tab, arrows up/down and F-keys stay with the
+/// app: they are hidden from the field. The field takes keys one frame after it appeared
+/// (`field_active`), so the key that opened a prompt is not typed into it.
 /// `focused`: the field has egui focus (caret, IME window); else a click on it reports `clicked`.
 pub(super) fn text_box(ui: &mut Ui, l: &LineEdit, focused: bool) -> egui::Response {
+    let ctx = ui.ctx().clone();
     let id = ui.next_auto_id();
+    let own = focused && !l.secret;
+    let active = own && field_active(&ctx);
+    if own {
+        let now = ctx.cumulative_pass_nr();
+        let flag = field_flag_id(&ctx);
+        ctx.data_mut(|d| d.insert_temp(flag, now));
+    }
     let caret = l.text[..l.cur].chars().count();
-    let mut state = TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-    // keep a mouse selection while its moving end is still the app's caret
-    if state.cursor.char_range().map(|r| r.primary.index.0) != Some(caret) {
+    // the app changed the text (history, Ctrl+U): its caret wins; else egui keeps its selection
+    let seen_id = id.with("seen");
+    let seen: Option<String> = ctx.data(|d| d.get_temp(seen_id));
+    if seen.as_deref() != Some(l.text.as_str()) {
+        let mut state = TextEdit::load_state(&ctx, id).unwrap_or_default();
         let one = CCursorRange::one(CCursor::new(caret));
         state.cursor.set_char_range(Some(one));
-        TextEdit::store_state(ui.ctx(), id, state);
+        TextEdit::store_state(&ctx, id, state);
     }
     if focused {
-        ui.ctx().memory_mut(|m| m.request_focus(id));
+        ctx.memory_mut(|m| m.request_focus(id));
     }
     let mut text = l.text.clone();
     let edit = TextEdit::singleline(&mut text)
         .id(id)
         .font(mono())
         .desired_width(f32::INFINITY);
-    let out = without_keys(ui, |ui| edit.show(ui));
+    let out = filter_events(ui, active, |ui| edit.show(ui));
     let r = out.response.response;
+    ctx.data_mut(|d| d.insert_temp(seen_id, text.clone()));
     if !focused && r.has_focus() {
         r.surrender_focus();
     }
-    // without keys, only the mouse moves egui's caret: hand it to the app (see `apply_caret`)
-    // `out.state`, not `out.cursor_range`: egui handles the mouse after computing the latter
+    // hand typing and mouse caret to the app (see `apply_field`)
     if focused
         && let Some(c) = out.state.cursor.char_range()
-        && c.primary.index.0 != caret
+        && (text != l.text || c.primary.index.0 != caret)
     {
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(caret_id(), c.primary.index.0));
+        let edited = (text, c.primary.index.0);
+        let slot = field_edit_id(&ctx);
+        ctx.data_mut(|d| d.insert_temp(slot, edited));
     }
     r
 }
 
-/// Runs `f` with this frame's keyboard events hidden (they went to `App::on_key` already).
-fn without_keys<R>(ui: &mut Ui, f: impl FnOnce(&mut Ui) -> R) -> R {
-    let all = ui.ctx().input_mut(|i| std::mem::take(&mut i.events));
-    let rest = all.iter().filter(|e| !is_key_input(e)).cloned().collect();
+/// Runs `f` with this frame's keyboard events hidden (they went to `App::on_key` already);
+/// `keep`: the ones a text field handles itself stay.
+fn filter_events<R>(ui: &mut Ui, keep: bool, f: impl FnOnce(&mut Ui) -> R) -> R {
+    let (all, alt) = ui
+        .ctx()
+        .input(|i| (i.events.clone(), i.modifiers.alt && !i.modifiers.ctrl));
+    let rest = (all.iter())
+        .filter(|e| !is_key_input(e) || (keep && keys::field_event(e, alt)))
+        .cloned()
+        .collect();
     ui.ctx().input_mut(|i| i.events = rest);
     let out = f(ui);
     ui.ctx().input_mut(|i| i.events = all);
@@ -67,20 +87,41 @@ fn without_keys<R>(ui: &mut Ui, f: impl FnOnce(&mut Ui) -> R) -> R {
 fn is_key_input(e: &Event) -> bool {
     matches!(
         e,
-        Event::Text(_) | Event::Key { .. } | Event::Paste(_) | Event::Cut | Event::Ime(_)
+        Event::Text(_)
+            | Event::Key { .. }
+            | Event::Paste(_)
+            | Event::Cut
+            | Event::Copy
+            | Event::Ime(_)
     )
 }
 
-pub(super) fn caret_id() -> Id {
-    Id::unique("tc-text-box-caret")
+fn field_edit_id(ctx: &Context) -> Id {
+    Id::unique(("tc-field-edit", ctx.viewport_id()))
 }
 
-/// Caret a click put into the focused text box, set in the app's field.
-pub(super) fn apply_caret(ctx: &Context, app: &mut App) {
-    let Some(n) = ctx.data_mut(|d| d.remove_temp::<usize>(caret_id())) else {
-        return;
-    };
-    app.set_caret(n);
+fn field_flag_id(ctx: &Context) -> Id {
+    Id::unique(("tc-field-pass", ctx.viewport_id()))
+}
+
+/// A text field handled the keys last frame: the app skips what the field edits itself.
+pub(crate) fn field_active(ctx: &Context) -> bool {
+    let flag = field_flag_id(ctx);
+    let seen: Option<u64> = ctx.data(|d| d.get_temp(flag));
+    seen.is_some_and(|n| n + 1 == ctx.cumulative_pass_nr())
+}
+
+/// Text and caret (chars) a field edited this frame, taken.
+pub(super) fn take_field_edit(ctx: &Context) -> Option<(String, usize)> {
+    let slot = field_edit_id(ctx);
+    ctx.data_mut(|d| d.remove_temp(slot))
+}
+
+/// Edit of the focused field goes into the app's prompt.
+pub(super) fn apply_field(ctx: &Context, app: &mut App) {
+    if let Some((text, caret)) = take_field_edit(ctx) {
+        app.set_line(text, caret);
+    }
 }
 
 /// Full-width selectable list row (egui look); not focusable, so keys stay with the app.

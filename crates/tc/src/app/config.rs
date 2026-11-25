@@ -78,7 +78,7 @@ impl App {
     pub(super) fn rename_hist(&self, i: usize) -> Vec<super::FormRow> {
         let mut rows = rename_rows();
         if let Some(line) = self.rename_history.get(i) {
-            rows_from_line(&mut rows, line);
+            rows_from_line(&mut rows, &old_rename_line(line));
         }
         rows
     }
@@ -198,6 +198,24 @@ impl App {
     }
 }
 
+/// A rename-history line from before the Regex label: its regex flag under the new label, and a
+/// case-sensitive regex as `(?-i)` (regexes have no case-sensitive box now).
+fn old_rename_line(line: &str) -> String {
+    let parts: Vec<&str> = line.split('\t').collect();
+    if !parts.contains(&"Find is a regex=1") {
+        return line.to_owned();
+    }
+    let sensitive = parts.contains(&"Find case-sensitive=1");
+    let fixed: Vec<String> = (parts.iter())
+        .map(|&p| match p.split_once('=') {
+            Some(("Find is a regex", v)) => format!("Regex={v}"),
+            Some(("Find", v)) if sensitive => format!("Find=(?-i){v}"),
+            _ => p.to_owned(),
+        })
+        .collect();
+    fixed.join("\t")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -210,6 +228,16 @@ mod tests {
     use super::super::{
         App, FormRow, Mode, form_checked, form_text, rename_rows, rows_from_line, rows_to_line,
     };
+
+    #[test]
+    fn old_rename_history_keeps_its_regex() {
+        let old = "Find=a+\tFind is a regex=1\tFind case-sensitive=1";
+        assert_eq!(
+            super::old_rename_line(old),
+            "Find=(?-i)a+\tRegex=1\tFind case-sensitive=1"
+        );
+        assert_eq!(super::old_rename_line("Find=a\tRegex=1"), "Find=a\tRegex=1");
+    }
 
     fn app(dir: &std::path::Path) -> App {
         let mut app = App::new(Panel::open(dir).unwrap(), Panel::open(dir).unwrap());

@@ -1,4 +1,4 @@
-//! egui input events as the terminal key events `App` handles, so both front ends share all key logic.
+//! egui input events as the key events `App` handles.
 
 use eframe::egui::{Event, ImeEvent, Key, Modifiers};
 use tc::{KeyCode, KeyEvent, KeyModifiers};
@@ -51,8 +51,40 @@ pub fn translate(ev: &Event, alt: bool) -> Option<Input> {
     }
 }
 
-/// Option+key typed an ASCII symbol this frame (`[`, `@`, `|` on many macOS layouts):
-/// the text is the input, not the Alt+key shortcut. Non-ASCII Option text (∫, ç) stays a shortcut.
+/// Events a focused text field handles itself (typing, IME, clipboard, caret and delete keys,
+/// select all with the platform shortcuts); the app skips them. `alt`: Text is an Alt shortcut.
+pub fn field_event(ev: &Event, alt: bool) -> bool {
+    match ev {
+        Event::Text(_) | Event::Ime(_) => !alt,
+        Event::Paste(_) | Event::Copy | Event::Cut => true,
+        Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => {
+            matches!(
+                key,
+                Key::ArrowLeft
+                    | Key::ArrowRight
+                    | Key::Home
+                    | Key::End
+                    | Key::Backspace
+                    | Key::Delete
+            ) || (*key == Key::A && modifiers.command)
+        }
+        _ => false,
+    }
+}
+
+/// [`translate`] for the app: nothing for events the focused text field `field` handles itself.
+pub fn translate_for(ev: &Event, alt: bool, field: bool) -> Option<Input> {
+    if field && field_event(ev, alt) {
+        return None;
+    }
+    translate(ev, alt)
+}
+
 /// Keys the app keeps while an inline editor has the keyboard: Esc, F-keys, Alt+1..5 (tabs)
 /// and Ctrl+PgUp/PgDn; the rest is typing for the editor.
 pub fn app_key_in_editor(k: &KeyEvent) -> bool {
@@ -62,6 +94,8 @@ pub fn app_key_in_editor(k: &KeyEvent) -> bool {
             && matches!(k.code, KeyCode::PageUp | KeyCode::PageDown))
 }
 
+/// Option+key typed an ASCII symbol this frame (`[`, `@`, `|` on many macOS layouts):
+/// the text is the input, not the Alt+key shortcut. Non-ASCII Option text (∫, ç) stays a shortcut.
 pub fn option_typed(events: &[Event]) -> bool {
     events.iter().any(|e| {
         let Event::Text(t) = e else { return false };
@@ -205,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_keys_like_the_terminal() {
+    fn maps_egui_keys_to_app_keys() {
         let none = Modifiers::NONE;
         let (ctrl, alt, shift) = (Modifiers::CTRL, Modifiers::ALT, Modifiers::SHIFT);
         let cases = [

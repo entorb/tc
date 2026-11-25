@@ -13,8 +13,9 @@ fn frame(ctx: &egui::Context, app: &mut App, look: &mut Look, events: Vec<Event>
         ..Default::default()
     };
     let mut out = ctx.run_ui(input, |ui| {
+        let field = super::widgets::field_active(ui.ctx());
         for ev in &events {
-            if let Some(keys::Input::Key(k)) = keys::translate(ev, false) {
+            if let Some(keys::Input::Key(k)) = keys::translate_for(ev, false, field) {
                 app.on_key(k);
             }
         }
@@ -364,7 +365,7 @@ fn tool_screens_hide_the_menu_bar() {
     );
     let shown = frame(&ctx, &mut app, &mut look, vec![]);
     assert!(
-        shown.contains("Rename") && shown.contains("Cancel") && shown.contains("a.txt"),
+        shown.contains("F10 Rename") && shown.contains("F9 Cancel") && shown.contains("a.txt"),
         "{shown}"
     );
     assert!(!shown.contains("Select"), "{shown}");
@@ -444,4 +445,48 @@ fn help_scrolls_to_the_last_line() {
         });
         assert!(visible, "wheel {by_wheel}: {last:?} not visible");
     }
+}
+
+#[test]
+/// The field selects and clipboard-edits itself; the app gets the text and runs its side effects.
+fn text_box_selects_and_multi_rename_preview_follows() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    let mut run = |app: &mut App, ev: Vec<Event>| frame(&ctx, app, &mut look, ev);
+    run(&mut app, vec![press(Key::ArrowDown, Modifiers::NONE)]);
+    run(&mut app, vec![press(Key::M, Modifiers::CTRL)]);
+    run(&mut app, vec![]);
+    // Name field holds "[N]": select all (Ctrl+A), type over it
+    // egui-winit sets `command` with Ctrl (Cmd on macOS)
+    let select_all = Modifiers {
+        ctrl: true,
+        command: true,
+        ..Modifiers::NONE
+    };
+    run(&mut app, vec![press(Key::A, select_all)]);
+    run(&mut app, vec![Event::Text("x".into())]);
+    run(&mut app, vec![]);
+    let Mode::MultiRename(f) = &app.mode else {
+        panic!("not in multi-rename")
+    };
+    assert!(
+        matches!(&f.preview[0].1, Ok(n) if n == "x.txt"),
+        "{:?}",
+        f.preview
+    );
+    // Shift+Left selects the last char, typing replaces it
+    run(&mut app, vec![press(Key::ArrowLeft, Modifiers::SHIFT)]);
+    run(&mut app, vec![Event::Text("y".into())]);
+    run(&mut app, vec![]);
+    let Mode::MultiRename(f) = &app.mode else {
+        panic!("not in multi-rename")
+    };
+    assert!(
+        matches!(&f.preview[0].1, Ok(n) if n == "y.txt"),
+        "{:?}",
+        f.preview
+    );
 }

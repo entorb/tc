@@ -68,6 +68,18 @@ pub(super) const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
     CLOSE,
 ];
 
+/// Multi-rename: F2-F6 show the tabs, F10 runs it (and closes), F9 cancels.
+pub(super) const RENAME_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
+    HELP,
+    f("F2 Name", 2),
+    f("F3 Replace", 3),
+    f("F4 Placeholder", 4),
+    f("F5 Clean up", 5),
+    f("F6 Editor", 6),
+    f("F9 Cancel", 9),
+    f("F10 Rename", 10),
+];
+
 pub(super) const SETTINGS_FOOTER: [(&str, KeyCode, KeyModifiers); 2] = [HELP, CLOSE];
 
 /// Footer bar items: label, key sent when clicked.
@@ -99,7 +111,7 @@ pub(super) const N: KeyModifiers = KeyModifiers::NONE;
 /// One menu entry: label with its key, key sent when chosen.
 pub type MenuItem = (&'static str, KeyCode, KeyModifiers);
 
-/// F9 menu bar like mc, for terminals that swallow keys (macOS): group title and its entries.
+/// F9 menu bar like mc, for systems that swallow keys (macOS): group title and its entries.
 pub const MENUS: [(&str, &[MenuItem]); 5] = [
     (
         "File",
@@ -305,6 +317,7 @@ impl App {
                     self.mode,
                     Mode::Found(_)
                         | Mode::FindForm(_)
+                        | Mode::MultiRename(_)
                         | Mode::SyncForm(_)
                         | Mode::Settings(_)
                         | Mode::Props(_)
@@ -333,6 +346,7 @@ impl App {
             Mode::Found(_) => &FOUND_FOOTER,
             Mode::Sync(_) => &SYNC_FOOTER,
             Mode::FindForm(_) => &FIND_FORM_FOOTER,
+            Mode::MultiRename(_) => &RENAME_FOOTER,
             Mode::SyncForm(_) | Mode::Props(_) => &FORM_FOOTER,
             Mode::Settings(_) => &SETTINGS_FOOTER,
             Mode::Stats(_) => &STATS_FOOTER,

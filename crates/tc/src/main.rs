@@ -112,6 +112,7 @@ impl Gui {
             (i.events.clone(), alt, i.smooth_scroll_delta.y)
         });
         // macOS layouts type `[`, `@`, `|` with Option: keep that text, drop the Alt+key
+        let field = draw::field_active(ctx);
         let typed = cfg!(target_os = "macos") && alt && keys::option_typed(&events);
         for ev in &events {
             if typed && keys::is_alt_char(ev) {
@@ -119,13 +120,14 @@ impl Gui {
             }
             // an inline editor with the keyboard takes typing, Enter, Ctrl+Z and paste itself
             let editing = self.app.rename_editor_focused();
-            match keys::translate(ev, alt && !typed) {
+            match keys::translate_for(ev, alt && !typed, field) {
                 Some(keys::Input::Key(k)) if editing && !keys::app_key_in_editor(&k) => {}
                 Some(keys::Input::Paste(_)) if editing => {}
                 // in the file panel Ctrl+V pastes files; elsewhere it pastes text into the prompt or editor
                 Some(keys::Input::Key(k))
                     if k.code == tc::KeyCode::Char('v')
                         && k.modifiers == KeyModifiers::CONTROL
+                        && !field
                         && !self.app.panel_keys() =>
                 {
                     if let Some(text) = system_text() {
@@ -137,11 +139,17 @@ impl Gui {
                 None => {}
             }
         }
-        // the panels scroll natively; viewer, editor, processes and File Stats scroll through the app like the terminal wheel
+        // the panels scroll natively; viewer, editor, processes, File Stats and the rename preview
+        // scroll through the app through the app
         if !matches!(
             self.app.mode,
-            Mode::View { .. } | Mode::Edit { .. } | Mode::Procs(_) | Mode::Stats(_)
-        ) {
+            Mode::View { .. }
+                | Mode::Edit { .. }
+                | Mode::Procs(_)
+                | Mode::Stats(_)
+                | Mode::MultiRename(_)
+        ) || self.app.rename_editor_focused()
+        {
             self.wheel = 0.0;
             return;
         }

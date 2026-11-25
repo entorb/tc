@@ -13,6 +13,8 @@ pub const MAX_HISTORY: usize = 500;
 pub struct LineEdit {
     pub text: String,
     pub cur: usize,
+    /// Shown masked (password): the egui field must not edit it, the app does.
+    pub secret: bool,
     /// History index being shown (`None`: the typed draft).
     browse: Option<usize>,
     draft: String,
@@ -29,6 +31,13 @@ impl From<String> for LineEdit {
 }
 
 impl LineEdit {
+    /// Take over text and cursor edited in the egui field.
+    pub fn replace(&mut self, text: String, cur: usize) {
+        self.cur = cur.min(text.len());
+        self.text = text;
+        self.browse = None;
+    }
+
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cur, c);
         self.cur += c.len_utf8();

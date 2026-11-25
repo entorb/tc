@@ -519,6 +519,25 @@ pub fn md_blank_lines(lines: &[&str]) -> Vec<usize> {
     out
 }
 
+/// Lines (0-based) to delete so no two blank lines follow each other; code blocks are untouched.
+pub fn md_extra_blanks(lines: &[&str]) -> Vec<usize> {
+    let mut open = false;
+    let mut prev_blank = false;
+    let mut out = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        let line = raw.trim_end();
+        if is_fence(line) {
+            open = !open;
+        }
+        let blank = !open && line.is_empty();
+        if blank && prev_blank {
+            out.push(i);
+        }
+        prev_blank = blank;
+    }
+    out
+}
+
 /// Highlighted byte ranges of `line`, in order. `fence` is the markdown code-fence
 /// state, carried from row to row by the caller.
 pub fn tokens(lang: &Lang, line: &str, fence: &mut bool) -> Vec<(Range<usize>, Kind)> {
@@ -737,6 +756,10 @@ mod tests {
         ];
         assert_eq!(md_blank_lines(&md), [1, 2, 5, 6, 10, 12, 13]);
         assert!(md_blank_lines(&["# A", "", "b"]).is_empty());
+        assert_eq!(
+            md_extra_blanks(&["a", "", " ", "b", "```", "", "", "```"]),
+            [2]
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::widgets::{caret_id, text_box};
+use super::widgets::{field_active, take_field_edit, text_box};
 use super::{ACCENT, MUTED, TEXT};
 use crate::keys;
 use eframe::egui::{
@@ -31,8 +31,9 @@ pub(super) fn show_help(ctx: &Context, app: &mut App) {
 /// Keys of the help window, through the app like the main window's.
 fn help_keys(ui: &Ui, app: &mut App) {
     let (events, alt) = ui.input(|i| (i.events.clone(), i.modifiers.alt && !i.modifiers.ctrl));
+    let field = field_active(ui.ctx());
     for ev in &events {
-        if let Some(keys::Input::Key(k)) = keys::translate(ev, alt) {
+        if let Some(keys::Input::Key(k)) = keys::translate_for(ev, alt, field) {
             app.help_key(k);
         }
     }
@@ -49,8 +50,10 @@ fn help_body(ui: &mut Ui, app: &mut App) {
         ui.label(RichText::new("Find").strong());
         text_box(ui, &LineEdit::from(app.help_filter.clone()), true);
     });
-    // the filter has no caret of its own: a click there must not move the main window's caret
-    ui.data_mut(|d| d.remove_temp::<usize>(caret_id()));
+    // the filter is the app's `help_filter`, not a prompt line
+    if let Some((text, _)) = take_field_edit(ui.ctx()) {
+        app.help_set_filter(text);
+    }
     ui.separator();
     let max_h = ui.available_height();
     // a table row takes its height plus the item spacing; offsets count in that pitch
@@ -110,13 +113,17 @@ fn help_cells(row: &mut TableRow, line: &str, action: Option<(KeyCode, KeyModifi
         fmt::HelpLine::More(info) => (RichText::new(""), info),
         fmt::HelpLine::Text(t) => (RichText::new(t).color(MUTED), ""),
     };
-    // prose runs across the info column too: painted on the layer, not clipped to the cell
+    // prose runs across the info column too: clipped to the table's height, not the cell's width
     let prose = matches!(fmt::help_line(line), fmt::HelpLine::Text(_));
     row.col(|ui| {
         // painted, not a label: a long title runs over the info column without widening the
         // popup (a wider popup is pushed off the window's left edge while the line is visible)
         let painter = if prose {
-            ui.ctx().layer_painter(ui.layer_id())
+            let clip = ui.clip_rect();
+            let wide = egui::Rect::from_x_y_ranges(clip.left()..=f32::INFINITY, clip.y_range());
+            let mut p = ui.painter().clone();
+            p.set_clip_rect(wide);
+            p
         } else {
             ui.painter().clone()
         };

@@ -19,7 +19,7 @@ pub enum FormRow {
 }
 
 impl FormRow {
-    pub(super) fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             FormRow::Text(l, _) | FormRow::Check(l, _) | FormRow::Choice(l, _, _) => l,
         }
@@ -138,20 +138,35 @@ impl App {
     /// Mouse caret: puts the cursor of the focused text field before char `chars` (clamped).
     /// No text changes, so no per-key side effects.
     pub fn set_caret(&mut self, chars: usize) {
-        let line = if let Some(i) = &mut self.input {
-            Some(&mut i.text)
-        } else if let Some(f) = &mut self.search_form {
-            text_row(&mut f.rows, f.focus)
-        } else {
-            self.mode.line_mut()
-        };
-        if let Some(l) = line {
+        if let Some(l) = self.field_mut() {
             l.cur = l
                 .text
                 .char_indices()
                 .nth(chars)
                 .map_or(l.text.len(), |(i, _)| i);
         }
+    }
+
+    fn field_mut(&mut self) -> Option<&mut LineEdit> {
+        if let Some(i) = &mut self.input {
+            Some(&mut i.text)
+        } else if let Some(f) = &mut self.search_form {
+            text_row(&mut f.rows, f.focus)
+        } else {
+            self.mode.line_mut()
+        }
+    }
+
+    /// The egui text field of the focused prompt edited `text`, caret before char `caret`:
+    /// take both, then run the per-key side effects (preview, filter, error reset) once.
+    pub fn set_line(&mut self, text: String, caret: usize) {
+        let text = text.replace(['\r', '\n'], "");
+        let Some(l) = self.field_mut() else { return };
+        if l.text != text {
+            l.replace(text, 0);
+            self.on_key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE));
+        }
+        self.set_caret(caret);
     }
 
     /// Rows and focus of the open form: the search dialog over the text, else the form screen.
@@ -291,6 +306,8 @@ pub(super) fn edit_key(l: &mut LineEdit, key: KeyEvent) -> bool {
         {
             l.insert(c)
         }
+        // the egui field changed the text: run the caller's per-key side effects
+        KeyCode::Null => {}
         _ => return false,
     }
     true

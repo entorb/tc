@@ -1,6 +1,6 @@
 use super::menu::{
-    EDIT_FOOTER, FIND_FORM_FOOTER, FORM_FOOTER, FOUND_FOOTER, Footer, SETTINGS_FOOTER,
-    SHIFT_FOOTER, SYNC_FOOTER, VIEW_FOOTER,
+    EDIT_FOOTER, FIND_FORM_FOOTER, FORM_FOOTER, FOUND_FOOTER, Footer, RENAME_FOOTER,
+    SETTINGS_FOOTER, SHIFT_FOOTER, SYNC_FOOTER, VIEW_FOOTER,
 };
 use super::*;
 use crate::KeyModifiers;
@@ -126,7 +126,8 @@ fn f10_quits_letters_start_quick_search() {
 
 #[test]
 fn footer_keys_are_documented_in_their_help() {
-    let screens: [(&Footer, &[&str]); 10] = [
+    let screens: [(&Footer, &[&str]); 11] = [
+        (&RENAME_FOOTER, &[fmt::HELP_RENAME]),
         (&FOOTER, &[fmt::HELP_MAIN]),
         (&VIEW_FOOTER, &[fmt::HELP_VIEW]),
         (&EDIT_FOOTER, &[fmt::HELP_EDIT]),
@@ -374,16 +375,21 @@ fn shift_up_down_marks_and_unmarks() {
 #[test]
 fn quick_search_up_down_jump_between_matches() {
     let tmp = tempfile::tempdir().unwrap();
-    for n in ["apple", "apricot", "banana"] {
+    for n in ["apple", "apricot", "banana", "a_b"] {
         std::fs::write(tmp.path().join(n), "").unwrap();
     }
     let p = || Panel::open(tmp.path()).unwrap();
     let mut app = App::new(p(), p());
     key(&mut app, KeyCode::Char('a'));
-    assert_eq!(app.panels[0].current().unwrap().name, "apple");
+    assert_eq!(app.panels[0].current().unwrap().name, "a_b");
+    key(&mut app, KeyCode::Down);
     key(&mut app, KeyCode::Down);
     assert_eq!(app.panels[0].current().unwrap().name, "apricot");
     assert!(matches!(&app.mode, Mode::Search(t) if t == "a"));
     key(&mut app, KeyCode::Up);
     assert_eq!(app.panels[0].current().unwrap().name, "apple");
+    // `_` extends the search instead of ending it
+    key(&mut app, KeyCode::Char('_'));
+    assert_eq!(app.panels[0].current().unwrap().name, "a_b");
+    assert!(matches!(&app.mode, Mode::Search(t) if t == "a_"));
 }

@@ -300,6 +300,7 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             Some((Prompt::Password(label), l)) => {
                 let mut masked = LineEdit::from("*".repeat(l.text.chars().count()));
                 masked.cur = l.text[..l.cur].chars().count();
+                masked.secret = true;
                 edit(label, "", &masked, OK_CANCEL)
             }
             None => text("Connecting", format!("{}\n\n[Esc] Cancel", c.url)),
@@ -637,9 +638,6 @@ pub fn sync_footer(s: &Sync) -> String {
     )
 }
 
-/// Preview rows under the multi-rename form; PgUp/PgDn scroll by this.
-pub const RENAME_PREVIEW_ROWS: usize = 12;
-
 /// Placeholder legend under the multi-rename form.
 /// Tab titles of the multi-rename form (rows per tab: `app::multi_rename::TAB_ROWS`).
 pub const RENAME_TABS: [&str; 5] = ["Name", "Replace", "Placeholder", "Clean up", "Editor"];
@@ -665,7 +663,7 @@ pub const RENAME_PLACEHOLDER_EXAMPLES: [(&str, &str, &str); 2] = [
 ];
 
 /// Hover text of a multi-rename option: what it does, with an example.
-pub const RENAME_TIPS: [(&str, &str); 9] = [
+pub const RENAME_TIPS: [(&str, &str); 10] = [
     ("Find case-sensitive", "Plain only: off, 'x' finds 'X' too"),
     (
         "Regex",
@@ -677,6 +675,10 @@ pub const RENAME_TIPS: [(&str, &str); 9] = [
     (
         "Remove dots",
         "'A.B.C.' -> 'ABC', 'Mr.' -> 'Mr', '...' -> ''",
+    ),
+    (
+        "Trim spaces",
+        "'( a ) ' -> '(a)': the ends and inside brackets",
     ),
     (
         "Add to first number",
@@ -691,6 +693,17 @@ pub const RENAME_TIPS: [(&str, &str); 9] = [
         "3 digits: the counter [C] shows 001, 002 ...",
     ),
 ];
+
+/// Label shown for a form row key: the Replace tab's Find / Replace with read as the
+/// Placeholder tab's Search / Replace (keys stay unique).
+pub fn rename_shown(key: &str) -> &str {
+    match key {
+        "Find" => "Search",
+        "Replace with" => "Replace",
+        "Find case-sensitive" => "Case-sensitive",
+        _ => key,
+    }
+}
 
 /// Hover text for a multi-rename option by its label.
 pub fn rename_tip(label: &str) -> Option<&'static str> {

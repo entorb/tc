@@ -319,8 +319,9 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
             ];
             let c = &p.crit;
             // a column shows 🔍 while its filter field is set
+            // the text filter matches the id, the name and the command
             let filtered = [
-                false,
+                !c.text.is_empty(),
                 false,
                 c.min_cpu > 0.0,
                 c.min_mem > 0,

@@ -16,7 +16,8 @@ use self::dialogs::{draw_multi_rename, overlays};
 mod chrome;
 mod widgets;
 use self::chrome::{cmdline, footer, menu_bar, toolbar};
-use self::widgets::apply_caret;
+use self::widgets::apply_field;
+pub(crate) use self::widgets::field_active;
 
 const ACCENT: Color32 = Color32::from_rgb(90, 160, 255);
 const MARK: Color32 = Color32::from_rgb(255, 200, 60);
@@ -67,10 +68,7 @@ pub struct Look {
 
 pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
     let today = jiff::ZonedDateTime::now().date();
-    // the multi-rename screen has its own Rename / Cancel buttons instead of the F-key bar
-    if !matches!(app.mode, Mode::MultiRename(_)) {
-        egui::Panel::bottom("footer").show(ui, |ui| footer(ui, app));
-    }
+    egui::Panel::bottom("footer").show(ui, |ui| footer(ui, app));
     if matches!(app.mode, Mode::View { .. }) {
         egui::CentralPanel::default().show(ui, |ui| draw_view(ui, app));
     } else if app.mode.editor_mut().is_some() {
@@ -102,5 +100,5 @@ pub fn draw(ui: &mut Ui, app: &mut App, look: &mut Look) {
         });
     }
     overlays(ui.ctx(), app);
-    apply_caret(ui.ctx(), app);
+    apply_field(ui.ctx(), app);
 }

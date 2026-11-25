@@ -62,7 +62,7 @@ impl App {
     }
 
     /// New filter text: selects the first key line and scrolls to the top.
-    pub(super) fn help_set_filter(&mut self, filter: String) {
+    pub fn help_set_filter(&mut self, filter: String) {
         self.help_filter = filter;
         self.help_scroll = 0;
         self.help_sel = self
