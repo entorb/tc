@@ -27,7 +27,7 @@ shot panel
 shot editor "type readme" "key F4" "$w1"
 shot ncdu "key ctrl+space" "wait 5"
 shot top "key ctrl+p" "wait 3" "key slash" "$w1" "type tc" "$w1" "mousemove 137 372 click 1" "wait 2" "key slash" "$w1"
-shot rename "type +" "$w1" "type chk_*.sh" "$w1" "key Return" "$w1" "key ctrl+m" "key F4" \
+shot rename "key Tab" "type +" "$w1" "type chk_*.sh" "$w1" "key Return" "$w1" "key ctrl+m" "$w1" "key F4" \
   "type %a_%b" "key Tab" "type %a" "key space" "type -" "key space" "type %b" "$w1"
 # find: name mask, then the Content tab
 shot find "key ctrl+f" "$w1" "type *.sh" "key F3" "type cargo" "$w1"
