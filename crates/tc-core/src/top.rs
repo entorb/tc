@@ -266,10 +266,11 @@ fn cpu_stat(line: &str) -> Option<(u64, u64)> {
         .map(str::parse)
         .collect::<std::result::Result<_, _>>()
         .ok()?;
-    let total: u64 = v.iter().sum();
+    // server output: garbage must not overflow
+    let total = v.iter().try_fold(0u64, |a, &x| a.checked_add(x))?;
     // idle + iowait
-    let idle = v.get(3)? + v.get(4).unwrap_or(&0);
-    Some((total - idle, total))
+    let idle = v.get(3)?.saturating_add(*v.get(4).unwrap_or(&0));
+    Some((total.saturating_sub(idle), total))
 }
 
 /// CPU counters of the previous remote sample, for averages over the interval.
@@ -286,7 +287,7 @@ fn proc_stat(line: &str) -> Option<(u32, u64)> {
     let (pid, rest) = line.split_once(' ')?;
     // the name in parentheses may hold spaces; utime and stime are fields 14 and 15
     let mut f = rest.rsplit_once(')')?.1.split_whitespace().skip(11);
-    let used = f.next()?.parse::<u64>().ok()? + f.next()?.parse::<u64>().ok()?;
+    let used = (f.next()?.parse::<u64>().ok()?).checked_add(f.next()?.parse().ok()?)?;
     Some((pid.parse().ok()?, used))
 }
 
@@ -326,7 +327,10 @@ fn parse_head(head: &str) -> (Snapshot, Option<(u64, u64)>) {
     let (mut avail, mut swap_free) = (0, 0);
     for line in head.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
-        let kib = || f.get(1).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 1024;
+        let kib = || {
+            let v = f.get(1).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            v.saturating_mul(1024)
+        };
         match f.as_slice() {
             ["cpu", ..] => stat = cpu_stat(line),
             ["MemTotal:", ..] => s.mem_total = kib(),
@@ -357,7 +361,7 @@ fn parse_ps(line: &str) -> Option<Proc> {
     let pid = it.next()?.parse().ok()?;
     let user = it.next()?.to_owned();
     let cpu = it.next()?.parse().ok()?;
-    let mem = it.next()?.parse::<u64>().ok()? * 1024;
+    let mem = it.next()?.parse::<u64>().ok()?.checked_mul(1024)?;
     let run = parse_etime(it.next()?)?;
     let cmd = it.collect::<Vec<_>>().join(" ");
     let first = cmd.split(' ').next().unwrap_or_default();
@@ -386,7 +390,10 @@ fn parse_etime(s: &str) -> Option<u64> {
     if !(2..=3).contains(&parts.len()) {
         return None;
     }
-    Some(days * 86_400 + parts.iter().fold(0, |acc, p| acc * 60 + p))
+    let hms = parts
+        .iter()
+        .try_fold(0u64, |acc, &p| acc.checked_mul(60)?.checked_add(p))?;
+    days.checked_mul(86_400)?.checked_add(hms)
 }
 
 /// Send SIGTERM (`force`: SIGKILL) to `pid`, locally or on the `remote` server.
@@ -567,6 +574,21 @@ MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 100 kB\nSwapFree: 100 kB\n4\
             s.procs,
             vec![parse_ps("5 bob 1.0 10 00:07 [kthread]").unwrap()]
         );
+    }
+
+    #[test]
+    fn huge_server_numbers_do_not_overflow() {
+        let max = u64::MAX;
+        let head = format!("cpu {max} {max} 0 0\nMemTotal: {max} kB\n");
+        let out = format!(
+            "{head}---\n1 (x) S {}\n---\n1 a 0 {max} 1-00:00\n",
+            "0 ".repeat(20)
+        );
+        let s = parse_remote(&out, &mut Prev::default());
+        assert_eq!(s.mem_total, u64::MAX);
+        assert!(s.procs.is_empty());
+        assert_eq!(super::cpu_stat(&format!("cpu {max} 1 0 0")), None);
+        assert_eq!(super::parse_etime(&format!("{max}-00:00")), None);
     }
 
     #[test]
