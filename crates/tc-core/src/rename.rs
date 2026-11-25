@@ -229,11 +229,16 @@ impl Rule {
         let name = name.to_str().ok_or("name is not valid UTF-8")?;
         let (stem, ext) = split_ext(name);
         let time = modified.and_then(|t| ZonedDateTime::try_from(t).ok());
+        let counter = i64::try_from(index)
+            .ok()
+            .and_then(|i| self.spec.step.checked_mul(i))
+            .and_then(|s| s.checked_add(self.spec.start))
+            .ok_or("counter too large")?;
         let ctx = Ctx {
             stem,
             ext,
             time: time.as_ref(),
-            counter: self.spec.start + self.spec.step * index as i64,
+            counter,
             width: self.spec.width,
         };
         let mut new_stem = expand(&self.spec.name_mask, &ctx)?;
@@ -529,7 +534,7 @@ fn range(s: &str, spec: &str) -> Option<String> {
         "" => from,
         "-" => n,
         _ if rest.starts_with(',') => match signed(&rest[1..])? {
-            (len, "") if len >= 0 => from + len - 1,
+            (len, "") if len >= 0 => from.checked_add(len)? - 1,
             _ => return None,
         },
         _ if rest.starts_with('-') => match signed(&rest[1..])? {
@@ -692,6 +697,24 @@ mod tests {
         assert_eq!(range("äöü", "2").unwrap(), "ö");
         assert!(range("abc", "x").is_none());
         assert!(range("abc", "1,").is_none());
+        assert!(range("abc", "2,9223372036854775807").is_none());
+    }
+
+    #[test]
+    fn counter_overflow_is_an_error() {
+        let rule = Spec {
+            name_mask: "[C]".into(),
+            start: i64::MAX,
+            ..Spec::default()
+        }
+        .compile()
+        .unwrap();
+        let name = OsStr::new("a.txt");
+        assert_eq!(
+            rule.new_name(name, None, 0),
+            Ok(format!("{}.txt", i64::MAX))
+        );
+        assert!(rule.new_name(name, None, 1).is_err());
     }
 
     #[test]
