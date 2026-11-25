@@ -9,7 +9,7 @@ Type to filter this help, Up/Down select, Enter runs the key.
 F9              menu with all features (when keys are eaten)
 Ctrl+B          bookmarks
 Ctrl+Z          popular directories (most visited and recent)
-Ctrl+Space      FILE STATS (like ncdu): biggest files and dirs
+Ctrl+Space      DIR SIZE (like ncdu): biggest files and dirs
                 of the current tree, with % and bar
 Ctrl+N          SFTP / FTP / FTPS connections
 Disconnect all  (F9 Go) panels and tabs on a server go back
@@ -649,7 +649,7 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
     match mode {
         Mode::View { .. } => ("Help: viewer", HELP_VIEW),
         Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
-        Mode::Stats(_) => ("Help: file stats (ncdu)", HELP_STATS),
+        Mode::Stats(_) => ("Help: dir size (ncdu)", HELP_STATS),
         Mode::Procs(_) => ("Help: processes (top)", HELP_PROCS),
         Mode::Sync(_) => ("Help: synchronize directories", HELP_SYNC),
         Mode::FindForm(_) => ("Help: find files", HELP_FIND_FORM),

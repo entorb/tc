@@ -10,7 +10,7 @@ use tc_gui::fmt;
 
 /// Title of a half of the window, its optional note on the right, and the rule under both:
 /// the same on the left and right, so the two halves line up.
-fn panel_head(ui: &mut Ui, title: &str, note: Option<String>) {
+pub(super) fn panel_head(ui: &mut Ui, title: &str, note: Option<String>) {
     ui.horizontal(|ui| {
         ui.heading(title);
         if let Some(note) = note {
@@ -82,7 +82,7 @@ pub(super) fn draw_find_form(ui: &mut Ui, app: &mut App) {
     apply(app, act);
 }
 
-/// Synchronize options above the list: the checkboxes on one line, the focused one highlighted.
+/// Sync Dirs options above the list: the checkboxes on one line, the focused one highlighted.
 pub(super) fn sync_options(ui: &mut Ui, s: &Sync) -> Option<FormAct> {
     let mut act = None;
     ui.horizontal_wrapped(|ui| {

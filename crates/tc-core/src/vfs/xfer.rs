@@ -66,7 +66,7 @@ pub fn delete_all(
             if p.retry(t, || ops::trash(t))? {
                 p.add(c);
             }
-            // shortcut: a skipped item still counts, File Stats drops it until a rescan
+            // shortcut: a skipped item still counts, Dir Size drops it until a rescan
             each();
         }
         return Ok(());

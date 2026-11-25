@@ -25,7 +25,7 @@ pub struct Progress {
     pub files_total: AtomicU64,
     /// `total` and `files_total` are final.
     pub scanned: AtomicBool,
-    /// Directories in total / done (copy, move, delete); File Stats scan: found / listing read.
+    /// Directories in total / done (copy, move, delete); Dir Size scan: found / listing read.
     pub dirs: AtomicU64,
     pub dirs_done: AtomicU64,
     /// File being copied.

@@ -26,7 +26,7 @@ const MARK: Color32 = Color32::from_rgb(255, 200, 60);
 const LINK: Color32 = Color32::from_rgb(200, 140, 255);
 const TEXT: Color32 = Color32::from_gray(210);
 const MUTED: Color32 = Color32::from_gray(130);
-/// Synchronize: files only on the left / right and F5 / F6 (blue / green), differing files (red).
+/// Sync Dirs: files only on the left / right and F5 / F6 (blue / green), differing files (red).
 const SYNC_LEFT: Color32 = ACCENT;
 const SYNC_RIGHT: Color32 = Color32::from_rgb(110, 200, 120);
 const SYNC_DIFF: Color32 = Color32::LIGHT_RED;

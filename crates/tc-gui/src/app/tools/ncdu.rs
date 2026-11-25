@@ -1,4 +1,4 @@
-//! File Stats: directory size tree, marks, delete, panelize.
+//! Dir Size: directory size tree, marks, delete, panelize.
 
 use crate::app::{App, Filter, Mode, REMOTE, delete_question, delete_text};
 use crate::fmt;
@@ -17,7 +17,7 @@ use tc_core::stats::treemap::{self, Tile};
 use tc_core::stats::{self, Node};
 use tc_core::vfs::{self, Remote, Side};
 
-/// File Stats: the scanned tree and the directory being browsed.
+/// Dir Size: the scanned tree and the directory being browsed.
 pub struct Stats {
     pub dir: PathBuf,
     pub root: Node,
@@ -320,17 +320,17 @@ pub(in crate::app) fn spawn_scan(
 }
 
 impl App {
-    /// Ctrl+Space: File Stats of the active panel's directory.
+    /// Ctrl+Space: Dir Size of the active panel's directory.
     pub(in crate::app) fn spawn_stats(&mut self) {
         let panel = &self.panels[self.active];
         if panel.archive().is_some() {
-            self.mode = Mode::Message("File Stats does not work in archives.".into());
+            self.mode = Mode::Message("Dir Size does not work in archives.".into());
             return;
         }
         self.scan_stats(panel.path().to_owned(), panel.remote().cloned());
     }
 
-    /// Scan `dir` in a worker and show its File Stats.
+    /// Scan `dir` in a worker and show its Dir Size.
     pub(in crate::app) fn scan_stats(&mut self, dir: PathBuf, remote: Option<Arc<dyn Remote>>) {
         let progress = Arc::new(ops::Progress::default());
         let job = spawn_scan(dir.clone(), remote.clone(), progress.clone());
@@ -353,7 +353,7 @@ impl App {
         });
     }
 
-    /// Keys in File Stats; only Esc/q/F10 (cancel) work while scanning.
+    /// Keys in Dir Size; only Esc/q/F10 (cancel) work while scanning.
     pub(in crate::app) fn stats_mode_key(&mut self, mut st: Stats, key: KeyEvent) {
         if st.confirm.is_some() {
             return self.stats_confirm_key(st, key.code);
@@ -442,7 +442,7 @@ impl App {
         }
     }
 
-    /// Answer to the File Stats delete question: the entry leaves the tree without a rescan.
+    /// Answer to the Dir Size delete question: the entry leaves the tree without a rescan.
     pub(in crate::app) fn stats_confirm_key(&mut self, mut st: Stats, code: KeyCode) {
         let to_trash = match code {
             // no trash on remote panels
@@ -475,7 +475,7 @@ impl App {
         });
     }
 
-    /// F3 view, F4 edit, Shift+F4 external editor on the selected file of File Stats.
+    /// F3 view, F4 edit, Shift+F4 external editor on the selected file of Dir Size.
     pub(in crate::app) fn stats_open(&mut self, st: Stats, key: KeyEvent) {
         let Some(path) = st
             .selected()
@@ -883,7 +883,7 @@ mod tests {
         assert!(matches!(app.mode, Mode::Normal) && !app.quit);
     }
 
-    /// File Stats on a remote panel: scan, view, `:` over ssh and permanent delete.
+    /// Dir Size on a remote panel: scan, view, `:` over ssh and permanent delete.
     #[test]
     fn remote_stats_view_cmd_and_delete() {
         let left = tempfile::tempdir().unwrap();

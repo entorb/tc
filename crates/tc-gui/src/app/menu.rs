@@ -44,7 +44,7 @@ pub(super) const FOUND_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
     CLOSE,
 ];
 
-/// Synchronize: F5 / F6 sync one way.
+/// Sync Dirs: F5 / F6 sync one way.
 pub(super) const SYNC_FOOTER: [(&str, KeyCode, KeyModifiers); 5] = [
     HELP,
     f("F2 Reload", 2),
@@ -98,7 +98,7 @@ pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [
     ("F10 Quit", KeyCode::F(10), KeyModifiers::NONE),
 ];
 
-/// Shift alternates of footer buttons (panels, File Stats); shown while Shift is held.
+/// Shift alternates of footer buttons (panels, Dir Size); shown while Shift is held.
 pub(super) const SHIFT_FOOTER: [(&str, KeyCode, KeyModifiers); 1] =
     [("S-F4 Ext edit", KeyCode::F(4), KeyModifiers::SHIFT)];
 
@@ -183,10 +183,10 @@ pub const MENUS: [(&str, &[MenuItem]); 5] = [
         "Tools",
         &[
             ("Help                F1", KeyCode::F(1), N),
-            ("File stats (ncdu)   Ctrl+Space", KeyCode::Char(' '), C),
+            ("Dir size (ncdu)     Ctrl+Space", KeyCode::Char(' '), C),
             ("Processes (top)     Ctrl+P", KeyCode::Char('p'), C),
             ("Find files          Ctrl+F", KeyCode::Char('f'), C),
-            ("Synchronize dirs    Ctrl+E", KeyCode::Char('e'), C),
+            ("Sync Dirs           Ctrl+E", KeyCode::Char('e'), C),
             ("Go to found file    Ctrl+G", KeyCode::Char('g'), C),
             ("Quick search        Ctrl+S", KeyCode::Char('s'), C),
             ("Filter              /", KeyCode::Char('/'), N),
@@ -250,7 +250,7 @@ pub fn help_action(line: &str) -> Option<(KeyCode, KeyModifiers)> {
         .map(|m| (m.1, m.2))
 }
 
-/// F-key bar of File Stats (labels and the keys they send).
+/// F-key bar of Dir Size (labels and the keys they send).
 pub const STATS_FOOTER: [(&str, KeyCode, KeyModifiers); 9] = [
     ("F1 Help", KeyCode::F(1), KeyModifiers::NONE),
     ("F3 View", KeyCode::F(3), KeyModifiers::NONE),
@@ -291,7 +291,7 @@ pub const TOOLBAR: [&[ToolItem]; 2] = [
     ],
     &[
         ("⌨", "Run command (:)", KeyCode::Char(':'), N),
-        ("🗠", "File stats, ncdu (Ctrl+Space)", KeyCode::Char(' '), C),
+        ("🗠", "Dir size, ncdu (Ctrl+Space)", KeyCode::Char(' '), C),
         ("🖥", "Process monitor (Ctrl+P)", KeyCode::Char('p'), C),
         ("🔍", "Find files (Ctrl+F)", KeyCode::Char('f'), C),
         (
@@ -300,12 +300,7 @@ pub const TOOLBAR: [&[ToolItem]; 2] = [
             KeyCode::Char('y'),
             C,
         ),
-        (
-            "⬌",
-            "Synchronize directories (Ctrl+E)",
-            KeyCode::Char('e'),
-            C,
-        ),
+        ("⬌", "Sync Dirs (Ctrl+E)", KeyCode::Char('e'), C),
         ("🖊", "Multi-rename (Ctrl+M)", KeyCode::Char('m'), C),
     ],
 ];
@@ -325,7 +320,7 @@ impl App {
                 ))
     }
 
-    /// Screens that own the window (no menu bar, toolbar or panels): results, sync, File Stats,
+    /// Screens that own the window (no menu bar, toolbar or panels): results, sync, Dir Size,
     /// processes, multi-rename.
     pub fn sub_screen(&self) -> bool {
         self.stats.is_some()

@@ -8,7 +8,7 @@ use crate::vfs::Remote;
 
 /// One `find` on the server for `q` under `root` (see [`Query::remote_unsupported`]; content
 /// runs one `grep` per file). Output records: `type size mtime relative-path`, NUL separated,
-/// like the File Stats scan.
+/// like the Dir Size scan.
 pub fn remote_command(root: &str, q: &Query) -> String {
     let follow = if q.follow_links { "-L " } else { "" };
     let mut c = format!("find {follow}{} -mindepth 1", sh_quote(root));

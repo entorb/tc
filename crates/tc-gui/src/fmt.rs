@@ -543,13 +543,13 @@ pub fn found_cols(h: &Hit) -> [String; 2] {
     [size, text]
 }
 
-/// Sync screen title: both directories.
+/// Sync screen heading note: both directories.
 pub fn sync_title(s: &Sync) -> String {
     let side = |i: usize| {
         let url = s.sides[i].remote().map_or("", |r| r.url());
         format!("{url}{}", s.roots[i].display())
     };
-    format!(" Sync: {}  <->  {} ", side(0), side(1))
+    format!("{}  <->  {}", side(0), side(1))
 }
 
 /// How a sync row's files differ, left against right: "size 4 B < 7 B, date 08:22 > 26-11-23",
@@ -745,7 +745,7 @@ pub fn kind_rgb(k: TileKind, shade: u8) -> (u8, u8, u8) {
     (d(r), d(g), d(b))
 }
 
-/// File Stats row cells.
+/// Dir Size row cells.
 pub struct StatsCols {
     pub marked: bool,
     pub value: String,
@@ -770,7 +770,7 @@ pub fn stats_cols(st: &Stats, n: &Node) -> StatsCols {
     }
 }
 
-/// File Stats info popup text; `modified` only when known without a network round trip.
+/// Dir Size info popup text; `modified` only when known without a network round trip.
 pub fn stats_info(path: &Path, n: &Node, modified: Option<SystemTime>) -> String {
     let (kind, dirs) = if n.is_dir {
         (
@@ -794,7 +794,7 @@ pub fn stats_info(path: &Path, n: &Node, modified: Option<SystemTime>) -> String
     )
 }
 
-/// File Stats treemap tooltip: path below the browsed directory, size, files of a directory.
+/// Dir Size treemap tooltip: path below the browsed directory, size, files of a directory.
 pub fn stats_tip(rel: &Path, n: &Node) -> String {
     let size = format!("Size:  {}", human(n.size));
     if n.is_dir {
@@ -804,14 +804,14 @@ pub fn stats_tip(rel: &Path, n: &Node) -> String {
     }
 }
 
-/// File Stats title: directory, sort and filter.
+/// Dir Size title: directory, sort and filter.
 pub fn stats_title(st: &Stats) -> String {
     let key = if st.by_files { "count" } else { "size" };
-    format!("Stats: {} [{key}]{}", st.path().display(), st.filter.tag())
+    format!("{} [{key}]{}", st.path().display(), st.filter.tag())
 }
 
-/// File Stats footer: scan progress, else totals and keys.
-/// Scan progress shown centered while File Stats reads the tree.
+/// Dir Size footer: scan progress, else totals and keys.
+/// Scan progress shown centered while Dir Size reads the tree.
 pub fn stats_progress(st: &Stats) -> Option<String> {
     st.scanning().then(|| {
         format!(
@@ -839,10 +839,7 @@ pub fn procs_title(p: &Procs) -> String {
         ProcSort::Mem => "mem",
         ProcSort::Run => "run",
     };
-    let t = format!(
-        "Processes: {src} [{key}] [every {}s]",
-        p.every.as_secs_f64()
-    );
+    let t = format!("{src} [{key}] [every {}s]", p.every.as_secs_f64());
     t + &proc_filter_tag(&p.crit)
 }
 

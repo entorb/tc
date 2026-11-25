@@ -116,9 +116,9 @@ pub enum Mode {
     Found(Found),
     /// Multi-rename form (Ctrl+M) with the preview.
     MultiRename(RenameForm),
-    /// Synchronize directories (Ctrl+E): options and compare result, filled by a worker thread.
+    /// Sync Dirs (Ctrl+E): options and compare result, filled by a worker thread.
     Sync(Box<Sync>),
-    /// File Stats (ncdu-style) tree, scanned by a worker thread.
+    /// Dir Size (ncdu-style) tree, scanned by a worker thread.
     Stats(Stats),
     /// Process monitor, refreshed by a worker thread.
     Procs(Box<Procs>),
@@ -282,7 +282,7 @@ pub struct App {
     pub run: Option<(String, PathBuf, Option<String>)>,
     /// Entry extracted from an archive for the viewer; removed once the viewer is closed.
     view_tmp: Option<TempDir>,
-    /// File Stats left for a viewer or editor; back once the mode is `Normal` again.
+    /// Dir Size left for a viewer or editor; back once the mode is `Normal` again.
     pub stats: Option<Stats>,
     /// Saved connection URLs (Ctrl+N) and the file they are saved to.
     pub connections: Vec<PathBuf>,
@@ -838,7 +838,7 @@ impl App {
         ));
     }
 
-    /// Where the command line runs: the browsed File Stats directory, else the active panel.
+    /// Where the command line runs: the browsed Dir Size directory, else the active panel.
     pub fn cmd_dir(&self) -> PathBuf {
         self.stats
             .as_ref()
@@ -1224,7 +1224,7 @@ impl App {
         });
     }
 
-    /// Join a finished File Stats scan; true when one was handled.
+    /// Join a finished Dir Size scan; true when one was handled.
     fn stats_job_tick(&mut self) -> bool {
         let Mode::Stats(st) = &mut self.mode else {
             return false;
@@ -1246,12 +1246,12 @@ impl App {
                 st.splice = None;
                 if let Mode::Stats(st) = mem::replace(
                     &mut self.mode,
-                    Mode::Message("File Stats scan failed.".into()),
+                    Mode::Message("Dir Size scan failed.".into()),
                 ) {
                     self.stats = Some(st);
                 }
             }
-            Err(_) => self.mode = Mode::Message("File Stats scan failed.".into()),
+            Err(_) => self.mode = Mode::Message("Dir Size scan failed.".into()),
         }
         true
     }
@@ -1292,7 +1292,7 @@ impl App {
         if self.view_tmp.is_some() && !matches!(self.mode, Mode::View { .. }) {
             self.view_tmp = None;
         }
-        // File Stats comes back right after the editor closes, so it ends the remote edit too
+        // Dir Size comes back right after the editor closes, so it ends the remote edit too
         if self.edit_remote.is_some() && matches!(self.mode, Mode::Normal | Mode::Stats(_)) {
             self.edit_remote = None;
         }

@@ -68,7 +68,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         && let Some((_, text)) = &s.confirm
     {
         let d = Dialog::Text {
-            title: "Synchronize",
+            title: "Sync Dirs",
             text: text.clone(),
         };
         pressed = pressed.or(show_dialog(ctx, ("sync-confirm", false), &d));

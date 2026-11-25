@@ -139,7 +139,7 @@ impl Gui {
                 None => {}
             }
         }
-        // the panels scroll natively; viewer, editor, processes, File Stats and the rename preview
+        // the panels scroll natively; viewer, editor, processes, Dir Size and the rename preview
         // scroll through the app through the app
         if !matches!(
             self.app.mode,
@@ -193,7 +193,7 @@ impl Gui {
         let Some((child, cmd, out)) = &mut self.running else {
             return;
         };
-        // never replace an open editor, dialog or File Stats: the output waits until the panels show
+        // never replace an open editor, dialog or Dir Size: the output waits until the panels show
         if !matches!(self.app.mode, Mode::Normal) {
             return;
         }

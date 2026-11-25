@@ -1,4 +1,4 @@
-//! Synchronize directories (Ctrl+E): opening lists the files that differ between the two panel
+//! Sync Dirs (Ctrl+E): opening lists the files that differ between the two panel
 //! directories (top level only); F5 / F6 make the right / left side match the other.
 
 use std::path::PathBuf;
@@ -48,7 +48,7 @@ impl SyncForm {
 /// What a finished sync compares again: options, sides and roots.
 pub type SyncSetup = (SyncForm, [Side; 2], [PathBuf; 2]);
 
-/// Synchronize screen: the options on top, the files that differ below.
+/// Sync Dirs screen: the options on top, the files that differ below.
 pub struct Sync {
     pub sides: [Side; 2],
     pub roots: [PathBuf; 2],
@@ -120,7 +120,7 @@ impl Sync {
             "to trash"
         };
         format!(
-            "Synchronize {} -> {}?\n\nCopy: {} ({})\nOverwrite existing: {over}\n\
+            "Sync Dirs {} -> {}?\n\nCopy: {} ({})\nOverwrite existing: {over}\n\
              Delete on {} ({how}): {}\n\n[y] Start   [Esc] Cancel",
             names[from],
             names[to],
@@ -152,7 +152,7 @@ impl App {
             .any(|p| p.archive().is_some() || p.is_virtual())
         {
             self.mode = Mode::Message(
-                "Synchronize works on two directories, not in archives or found lists.".into(),
+                "Sync Dirs works on two directories, not in archives or found lists.".into(),
             );
             return;
         }
@@ -225,7 +225,7 @@ impl App {
         let (sides, roots) = (s.sides.clone(), s.roots.clone());
         self.sync_again = Some((s.form, s.sides, s.roots));
         let pair = (sides[0].clone(), sides[1].clone());
-        self.spawn_xfer("Synchronize", pair, move |p, _| {
+        self.spawn_xfer("Sync Dirs", pair, move |p, _| {
             sync::run(&sides, &roots, from, &plan, p)
         });
     }
@@ -248,8 +248,8 @@ impl App {
             }
             // nothing listed; F2 reloads
             Ok(Err(Error::Cancelled)) => {}
-            Ok(Err(e)) => self.mode = Mode::Message(format!("Synchronize: {e}")),
-            Err(_) => self.mode = Mode::Message("Synchronize: compare failed.".into()),
+            Ok(Err(e)) => self.mode = Mode::Message(format!("Sync Dirs: {e}")),
+            Err(_) => self.mode = Mode::Message("Sync Dirs: compare failed.".into()),
         }
     }
 }

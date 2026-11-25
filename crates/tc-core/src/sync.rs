@@ -1,4 +1,4 @@
-//! Synchronize directories one way: compare the files of two directories (top level only,
+//! Sync Dirs one way: compare the files of two directories (top level only,
 //! by size and date), then make the target match the source.
 
 use std::cmp;

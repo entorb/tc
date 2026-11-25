@@ -1,4 +1,5 @@
 use super::dialogs::apply;
+use super::tools::panel_head;
 use super::tools::sync_options;
 use super::widgets::{cell, click_table, left, line_edit, page_rows, right};
 use super::{ACCENT, MARK, MUTED, SYNC_DIFF, SYNC_LEFT, SYNC_RIGHT, TEXT};
@@ -18,7 +19,7 @@ use tc_gui::fmt::{
     self, StatsCols, found_cols, found_title, stats_cols, stats_footer, stats_title, sync_comment,
     sync_footer, sync_title,
 };
-use tc_gui::fmt::{procs_footer, procs_header, procs_prompt};
+use tc_gui::fmt::{procs_footer, procs_header, procs_prompt, procs_title};
 use tc_gui::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     let Mode::Found(f) = &mut app.mode else {
@@ -50,12 +51,12 @@ pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     }
 }
 
-/// Synchronize directories: the options on top, the files that differ below.
+/// Sync Dirs: the options on top, the files that differ below.
 pub(super) fn draw_sync(ui: &mut Ui, app: &mut App) {
     let Mode::Sync(s) = &mut app.mode else {
         return;
     };
-    ui.label(RichText::new(sync_title(s)).strong().color(ACCENT));
+    panel_head(ui, "Sync Dirs", Some(sync_title(s)));
     let act = sync_options(ui, s);
     app.page = sync_rows(ui, s);
     apply(app, act);
@@ -108,7 +109,7 @@ fn sync_cells(row: &mut TableRow, (name, st, comment): &(String, Status, String)
     row.col(|ui| cell(ui, false, |ui| left(ui, comment.as_str())));
 }
 
-/// Status line of File Stats (totals or its `:` prompt) and processes (footer or prompt).
+/// Status line of Dir Size (totals or its `:` prompt) and processes (footer or prompt).
 pub(super) fn status_line(ui: &mut Ui, app: &App) {
     match (&app.mode, &app.stats) {
         (Mode::Procs(p), _) => match procs_prompt(p) {
@@ -136,7 +137,7 @@ pub(super) fn prompt(ui: &mut Ui, label: &str, l: &LineEdit) {
     });
 }
 
-/// Window width from which File Stats shows the treemap beside the list.
+/// Window width from which Dir Size shows the treemap beside the list.
 const MAP_MIN_WIDTH: f32 = 700.0;
 
 /// Treemap of the browsed directory; `Some((row, double))` when a tile was clicked.
@@ -220,7 +221,7 @@ pub(super) fn draw_stats(ui: &mut Ui, app: &mut App) {
         (Mode::Cmd(l), Some(st)) => (st, Some(&*l)),
         _ => return,
     };
-    ui.label(RichText::new(stats_title(st)).strong().color(ACCENT));
+    panel_head(ui, "Dir Size", Some(stats_title(st)));
     let (row_h, h) = page_rows(ui);
     let start = st.sel / h * h;
     let rows: Vec<StatsCols> = st
@@ -305,6 +306,7 @@ pub(super) fn draw_procs(ui: &mut Ui, app: &mut App) {
     let Mode::Procs(p) = &mut app.mode else {
         return;
     };
+    panel_head(ui, "Processes", Some(procs_title(p)));
     ui.label(RichText::new(procs_header(p)).color(TEXT));
     let (row_h, h) = page_rows(ui);
     let start = p.sel / h * h;

@@ -1,4 +1,4 @@
-//! Disk usage tree for the File Stats screen (ncdu-style).
+//! Disk usage tree for the Dir Size screen (ncdu-style).
 
 pub mod treemap;
 

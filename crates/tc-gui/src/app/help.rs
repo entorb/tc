@@ -206,7 +206,7 @@ mod tests {
         let e = app.help_entries();
         // section title, the entry and its continuation line
         assert_eq!(e[0].0, "== Highlights ==");
-        assert!(e[1].0.contains("FILE STATS") && e[2].0.starts_with(' '));
+        assert!(e[1].0.contains("DIR SIZE") && e[2].0.starts_with(' '));
         hk(&mut app, KeyCode::Esc);
         assert!(app.help && app.help_filter.is_empty());
         hk(&mut app, KeyCode::Esc);
