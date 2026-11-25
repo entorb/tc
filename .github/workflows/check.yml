@@ -156,6 +156,8 @@ jobs:
       # 127.0.0.1, not localhost: vsftpd may not listen on ::1; empty path = server home
       TC_TEST_SFTP: sftp://runner@127.0.0.1
       TC_TEST_FTP: ftp://runner@127.0.0.1
+      # busybox find/stat (Alpine); the Podman step below covers GNU (Debian)
+      TC_TEST_CONTAINER: docker://tc-alpine
     steps:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -186,8 +188,19 @@ jobs:
           sudo systemctl restart ssh vsftpd
           ssh-keyscan -H 127.0.0.1 >> ~/.ssh/known_hosts  # system ssh for the ":" command line
 
+      # preinstalled on ubuntu runners
+      - name: Start Docker and Podman containers
+        run: |
+          docker run -d --name tc-alpine alpine:3 sleep infinity
+          podman run -d --name tc-debian docker.io/library/debian:stable-slim sleep infinity
+
       - name: Run e2e tests
         run: cargo test -p tc-remote --locked -- --ignored live_ --skip live_drop
+
+      - name: Run e2e container test on Podman
+        env:
+          TC_TEST_CONTAINER: podman://tc-debian
+        run: cargo test -p tc-remote --locked -- --ignored live_container
 
       # last: kills the servers' sessions
       - name: Run e2e session drop test

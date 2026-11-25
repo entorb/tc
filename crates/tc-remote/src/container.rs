@@ -433,18 +433,32 @@ mod tests {
     }
 
     /// Real container: `TC_TEST_CONTAINER=docker://name` (or `podman://`, `kube://ns/pod`); the
-    /// test works in a fresh `/tmp/tc-live-*` directory there.
+    /// test works in a fresh `/tmp/tc-live-*` directory there. Unset: skips locally, fails in CI.
     #[test]
     #[ignore = "needs a container"]
     fn live_container() {
         let Ok(url) = std::env::var("TC_TEST_CONTAINER") else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "TC_TEST_CONTAINER not set in CI"
+            );
             return;
         };
-        let c = Container::connect(&Url::parse(&url).unwrap()).unwrap();
+        let u = Url::parse(&url).unwrap();
+        let c = Container::connect(&u).unwrap();
         let root = format!("/tmp/tc-live-{}", std::process::id());
         c.mkdir(&root).unwrap();
         ops(&c, &root);
+        // `:` command line: runs in the given directory of the container
+        let out = crate::ssh_command(&url, "pwd", &root)
+            .unwrap()
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), root);
         c.run(&format!("rm -rf -- {}", sh_quote(&root))).unwrap();
+        // picker lists it
+        let picks = running(u.scheme).unwrap();
+        assert!(picks.iter().any(|p| p.host == u.host), "{picks:?}");
     }
 
     /// Every `Remote` operation inside the empty directory `root`.
