@@ -1,8 +1,9 @@
 //! File properties (Alt+Enter, F9 File): info on the marked entries or the cursor entry;
 //! Unix: mode, owner and group, elsewhere the read-only flag; applied in a worker.
 
-#[cfg(unix)]
 use super::form_text;
+#[cfg(unix)]
+use super::widgets::step_key;
 use super::{App, Done, FormRow, Mode, form_checked};
 use crate::{KeyCode, KeyEvent};
 use std::path::PathBuf;
@@ -179,7 +180,6 @@ impl App {
     }
 
     pub(super) fn props_key(&mut self, key: KeyEvent, mut form: Box<PropsForm>) {
-        let last = form.rows.len() - 1;
         match key.code {
             KeyCode::Esc | KeyCode::F(10) => return,
             KeyCode::Enter => match form.change() {
@@ -187,8 +187,9 @@ impl App {
                 Ok(c) => return self.props_spawn(form.targets, c),
                 Err(e) => form.error = Some(e),
             },
-            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
-            KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
+            KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up => {
+                form.focus = step_key(key.code, form.focus, form.rows.len());
+            }
             _ => {
                 form.rows[form.focus].key(key);
                 form.error = None;

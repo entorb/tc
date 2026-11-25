@@ -5,6 +5,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::{KeyCode, KeyEvent};
 
+use super::widgets::step_key;
 use super::{App, FormRow, Mode, form_checked, zoom_step};
 
 /// Release tag CI builds into release binaries; `None` in dev builds, which never check.
@@ -143,11 +144,11 @@ impl App {
     }
 
     pub(super) fn settings_key(&mut self, key: KeyEvent, mut form: SettingsForm) {
-        let last = form.rows.len() - 1;
         match key.code {
             KeyCode::Esc | KeyCode::F(10) | KeyCode::Enter => return,
-            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
-            KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
+            KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up => {
+                form.focus = step_key(key.code, form.focus, form.rows.len());
+            }
             _ => {
                 form.rows[form.focus].key(key);
                 let rows = form.rows.clone();

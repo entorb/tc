@@ -1,6 +1,6 @@
 //! Find files (Alt+F7 / Ctrl+F): form, streamed results, panelize.
 
-use super::widgets::{step_focus, tab_key, tab_of, tab_range};
+use super::widgets::{step_focus, step_key, tab_key, tab_of, tab_range};
 use super::{
     App, Filter, FormRow, Mode, form_checked, form_text, paste_line, rows_from_line, rows_to_line,
 };
@@ -480,8 +480,7 @@ impl App {
                 };
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                let delta = if key.code == KeyCode::Tab { 1 } else { -1 };
-                form.focus = step_focus(0..form.rows.len(), form.focus, delta, |_| false);
+                form.focus = step_key(key.code, form.focus, form.rows.len());
                 form.follow_focus();
             }
             KeyCode::Down => form.focus = step_focus(form.shown_rows(), form.focus, 1, |_| false),

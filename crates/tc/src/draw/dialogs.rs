@@ -535,21 +535,35 @@ fn show_props(ctx: &Context, form: &PropsForm) -> Option<FormAct> {
 /// Form as a label | widget grid, the focused row's label highlighted, and the error under it.
 /// Returns what the mouse did (a focused text field keeps its own clicks).
 fn form_rows(ui: &mut Ui, rows: &[FormRow], focus: usize, error: Option<&str>) -> Option<FormAct> {
+    let act = field_grid(ui, "form", rows, 0..rows.len(), focus);
+    if let Some(e) = error {
+        ui.label(RichText::new(e).color(Color32::LIGHT_RED));
+    }
+    act
+}
+
+/// Form rows `shown` (indexes into `rows`) as label | widget grid rows, `focus` highlighted.
+pub(super) fn field_grid(
+    ui: &mut Ui,
+    id: &str,
+    rows: &[FormRow],
+    shown: impl Iterator<Item = usize>,
+    focus: usize,
+) -> Option<FormAct> {
     let mut act = None;
-    egui::Grid::new("form")
+    egui::Grid::new(id)
         .num_columns(2)
         .spacing(vec2(12.0, 6.0))
         .show(ui, |ui| {
-            for (i, row) in rows.iter().enumerate() {
-                if let Some(a) = form_row(ui, i, row, i == focus, row.label()) {
+            for i in shown {
+                let row = &rows[i];
+                let label = fmt::rename_shown(row.label());
+                if let Some(a) = form_row(ui, i, row, i == focus, label) {
                     act = Some(a);
                 }
                 ui.end_row();
             }
         });
-    if let Some(e) = error {
-        ui.label(RichText::new(e).color(Color32::LIGHT_RED));
-    }
     act
 }
 

@@ -1,5 +1,6 @@
 //! Viewer (F3) and editor (F4): keys, find / replace / goto prompts, load and save.
 
+use super::widgets::step_key;
 use super::{App, Done, FormRow, Mode, edit_key};
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
@@ -412,7 +413,6 @@ impl App {
             return;
         };
         form.error = None;
-        let last = form.rows.len() - 1;
         match key.code {
             KeyCode::Esc | KeyCode::F(10) => self.search_form = None,
             KeyCode::Enter => self.search_enter(),
@@ -424,8 +424,9 @@ impl App {
                     }
                 }
             }
-            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1).min(last),
-            KeyCode::BackTab | KeyCode::Up => form.focus = form.focus.saturating_sub(1),
+            KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up => {
+                form.focus = step_key(key.code, form.focus, form.rows.len());
+            }
             _ => form.rows[form.focus].key(key),
         }
     }

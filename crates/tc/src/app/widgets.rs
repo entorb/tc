@@ -263,6 +263,16 @@ pub(super) fn tab_key(key: KeyEvent, tab: usize, n: usize) -> Option<usize> {
     Some(t.min(n - 1))
 }
 
+/// Tab / Down: the next of `len` form rows, Shift+Tab / Up: the previous (no wrap).
+pub(super) fn step_key(code: KeyCode, focus: usize, len: usize) -> usize {
+    let delta = if matches!(code, KeyCode::Tab | KeyCode::Down) {
+        1
+    } else {
+        -1
+    };
+    step_focus(0..len, focus, delta, |_| false)
+}
+
 /// Focus `delta` rows on from `focus` inside `r`, skipping `hidden` rows (an end row stops it).
 pub(super) fn step_focus(
     r: std::ops::Range<usize>,

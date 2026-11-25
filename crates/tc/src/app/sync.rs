@@ -12,6 +12,7 @@ use tc_core::sync::{Action, Item};
 use tc_core::vfs::Side;
 use tc_core::{Error, ops, sync};
 
+use super::widgets::step_key;
 use super::{
     App, Filter, FormRow, Mode, form_checked, form_text, paste_line, rows_from_line, rows_to_line,
 };
@@ -378,8 +379,9 @@ impl App {
                 };
             }
             KeyCode::Tab if s.form.focus == last && !s.items.is_empty() => s.editing = false,
-            KeyCode::Tab | KeyCode::Down => s.form.focus = (s.form.focus + 1).min(last),
-            KeyCode::BackTab | KeyCode::Up => s.form.focus = s.form.focus.saturating_sub(1),
+            KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up => {
+                s.form.focus = step_key(key.code, s.form.focus, s.form.rows.len());
+            }
             _ => {
                 let focus = s.form.focus;
                 s.form.rows[focus].key(key);

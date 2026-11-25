@@ -2,10 +2,10 @@
 //! left half (a tab bar when they do not fit one page) and what they act on or produce on the
 //! right half (find files has no right half: full width); the F-key bar runs them. Keys go through the app.
 
-use super::dialogs::{FormAct, apply, form_row};
+use super::dialogs::{FormAct, apply, field_grid, form_row};
 use super::{MUTED, TEXT};
 use eframe::egui::{self, Color32, RichText, TextStyle, Ui, vec2};
-use tc::app::{App, FormRow, Mode, RenameForm, Sync};
+use tc::app::{App, Mode, RenameForm, Sync};
 use tc::fmt;
 
 /// Title of a half of the window, its optional note on the right, and the rule under both:
@@ -43,31 +43,6 @@ fn tab_bar(
         }
     });
     ui.separator();
-    act
-}
-
-/// Form rows `shown` (indexes into `rows`) as label | widget grid rows, `focus` highlighted.
-fn field_grid(
-    ui: &mut Ui,
-    id: &str,
-    rows: &[FormRow],
-    shown: impl Iterator<Item = usize>,
-    focus: usize,
-) -> Option<FormAct> {
-    let mut act = None;
-    egui::Grid::new(id)
-        .num_columns(2)
-        .spacing(vec2(12.0, 6.0))
-        .show(ui, |ui| {
-            for i in shown {
-                let row = &rows[i];
-                let label = fmt::rename_shown(row.label());
-                if let Some(a) = form_row(ui, i, row, i == focus, label) {
-                    act = Some(a);
-                }
-                ui.end_row();
-            }
-        });
     act
 }
 
