@@ -32,7 +32,7 @@ Adding features of
 ![Panels](screenshots/panel.png)
 
 - Norton Commander look, two panels with tabs
-- SSH, SFTP, FTP via `CTRL+N`
+- SSH, SFTP, FTP, Docker / Podman / Kubernetes containers via `CTRL+N`
 - `LEFT` / `RIGHT` go to the parent or into the directory under the cursor
 - Sort by name, extension, date, size
 - Filter by `/`
@@ -94,9 +94,10 @@ Adding features of
 - `.zip`, `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.gz`, `.bz2`, `.xz` open as directories in panel
 - read-only
 
-### Remote (SSH, SFTP, FTP, FTPS) `CTRL+N`
+### Remote (SSH, SFTP, FTP, FTPS, containers) `CTRL+N`
 
-- Saved connections; passwords are asked on connect, never stored
+- Saved connections, added in a form with a type dropdown; passwords are asked on connect, never stored
+- Docker, Podman, Kubernetes: pick a running container; runs `docker|podman|kubectl exec`, needs `sh`, `find`, `stat` in the container (no distroless), current kubectl context only
 - SFTP checks `~/.ssh/known_hosts`
 - FTP anonymous by default
 - FTPS explicit TLS

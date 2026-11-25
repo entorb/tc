@@ -27,12 +27,14 @@ conds
 constexpr
 copysign
 corasick
+coredns
 cpus
 crossterm
 dalek
 dedupe
 deque
 devbox
+distroless
 doublecmd
 eexist
 eframe
@@ -94,6 +96,7 @@ ncdu
 neighbour
 newermt
 noch
+noclobber
 nodate
 noext
 noreplace
