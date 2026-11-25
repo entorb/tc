@@ -119,7 +119,6 @@ impl Mode {
                 rename: Some(l), ..
             }) => Some(l),
             Mode::FindForm(f) => text_row(&mut f.rows, f.focus),
-            Mode::Sync(s) if s.editing => text_row(&mut s.form.rows, s.form.focus),
             Mode::MultiRename(f) => text_row(&mut f.rows, f.focus),
             Mode::Settings(f) => text_row(&mut f.rows, f.focus),
             Mode::Props(f) => text_row(&mut f.rows, f.focus),
@@ -188,13 +187,6 @@ impl App {
                 self.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
             }
             return;
-        }
-        // sync: a click on an option gives the options the keyboard
-        if let Mode::Sync(s) = &mut self.mode {
-            if s.busy() {
-                return;
-            }
-            s.editing = true;
         }
         let Some((rows, focus)) = self.form_rows_mut() else {
             return;

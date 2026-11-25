@@ -1,5 +1,5 @@
 use super::widgets::line_edit;
-use super::{MUTED, icons, mono};
+use super::{MUTED, SYNC_LEFT, SYNC_RIGHT, icons, mono};
 
 use eframe::egui::{self, Button, Id, RichText, Sense, Ui};
 use tc::app::{App, MENUS, Mode, TOOLBAR, ToolItem};
@@ -111,8 +111,13 @@ pub(super) fn footer(ui: &mut Ui, app: &mut App) {
             } else {
                 item
             };
+            let text = match (&app.mode, code) {
+                (Mode::Sync(_), KeyCode::F(5)) => RichText::new(label).color(SYNC_LEFT),
+                (Mode::Sync(_), KeyCode::F(6)) => RichText::new(label).color(SYNC_RIGHT),
+                _ => RichText::new(label),
+            };
             let clicked = ui
-                .add(Button::new(label).sense(Sense::CLICK))
+                .add(Button::new(text).sense(Sense::CLICK))
                 .on_hover_ui(|ui| {
                     ui.label(tc::fmt::key_help(help, label));
                 })

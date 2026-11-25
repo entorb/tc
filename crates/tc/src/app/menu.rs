@@ -44,14 +44,12 @@ pub(super) const FOUND_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
     CLOSE,
 ];
 
-/// Synchronize, the rows focused.
-pub(super) const SYNC_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
+/// Synchronize: F5 / F6 sync one way.
+pub(super) const SYNC_FOOTER: [(&str, KeyCode, KeyModifiers); 5] = [
     HELP,
-    ("Enter Sync", KeyCode::Enter, KeyModifiers::NONE),
-    ("/ Filter", KeyCode::Char('/'), KeyModifiers::NONE),
-    ("Ctrl+R Compare", KeyCode::Char('r'), KeyModifiers::CONTROL),
-    ("Space Skip", KeyCode::Char(' '), KeyModifiers::NONE),
-    ("Tab Options", KeyCode::Tab, KeyModifiers::NONE),
+    f("F2 Reload", 2),
+    f("F5 Left -> Right", 5),
+    f("F6 Right -> Left", 6),
     CLOSE,
 ];
 
@@ -64,13 +62,6 @@ pub(super) const FIND_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
     f("F5 Size/Date", 5),
     f("F9 Cancel", 9),
     f("F10 Search", 10),
-];
-
-/// Synchronize, the options focused.
-pub(super) const SYNC_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
-    HELP,
-    ("Enter Compare", KeyCode::Enter, KeyModifiers::NONE),
-    CLOSE,
 ];
 
 pub(super) const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
@@ -355,7 +346,6 @@ impl App {
             Mode::View { .. } => &VIEW_FOOTER,
             Mode::Edit { .. } | Mode::AskSave { .. } | Mode::AskExit(_) => &EDIT_FOOTER,
             Mode::Found(_) => &FOUND_FOOTER,
-            Mode::Sync(s) if s.editing => &SYNC_FORM_FOOTER,
             Mode::Sync(_) => &SYNC_FOOTER,
             Mode::FindForm(_) => &FIND_FORM_FOOTER,
             Mode::MultiRename(_) => &RENAME_FOOTER,

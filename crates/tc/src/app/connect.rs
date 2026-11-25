@@ -24,7 +24,6 @@ impl App {
             .collect();
         self.file_clip.take_if(|c| remote(&c.side));
         self.rename_undo.take_if(|b| remote(&b.side));
-        self.sync_back.take_if(|s| s.sides.iter().any(remote));
         self.sync_again.take_if(|s| s.1.iter().any(remote));
         self.found.take_if(|f| f.remote);
         if !errors.is_empty() {

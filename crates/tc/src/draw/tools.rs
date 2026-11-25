@@ -82,34 +82,20 @@ pub(super) fn draw_find_form(ui: &mut Ui, app: &mut App) {
     apply(app, act);
 }
 
-/// Synchronize options above the rows: the mask field (row 0) on one line, the checkboxes
-/// wrapped on the next. The focused row is highlighted only while they have the keyboard.
+/// Synchronize options above the list: the checkboxes on one line, the focused one highlighted.
 pub(super) fn sync_options(ui: &mut Ui, s: &Sync) -> Option<FormAct> {
-    let focus = if s.editing { s.form.focus } else { usize::MAX };
-    let rows = &s.form.rows;
-    let mask = field_grid(ui, "sync-mask", rows, 0..1, focus);
     let mut act = None;
     ui.horizontal_wrapped(|ui| {
         // a wrapped layout would break the checkbox texts onto each other
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        for (i, row) in rows.iter().enumerate().skip(1) {
-            if let Some(a) = form_row(ui, i, row, i == focus, row.label()) {
+        for (i, row) in s.form.rows.iter().enumerate() {
+            if let Some(a) = form_row(ui, i, row, i == s.form.focus, row.label()) {
                 act = Some(a);
             }
         }
     });
-    let act = mask.or(act);
-    if let Some(e) = &s.form.error {
-        ui.label(RichText::new(e).color(Color32::LIGHT_RED));
-    }
     ui.separator();
     act
-}
-
-/// Before the first compare: what the rows will offer.
-pub(super) fn sync_hints(ui: &mut Ui) {
-    ui.label(RichText::new("Enter compares the two panel directories.").strong());
-    info_and_error(ui, &fmt::SYNC_INFO, None);
 }
 
 /// Multi-rename: the options on the left half, the preview on the right half.

@@ -134,16 +134,13 @@ fn footer_keys_are_documented_in_their_help() {
         (&FOUND_FOOTER, &[fmt::HELP_FOUND]),
         (&SYNC_FOOTER, &[fmt::HELP_SYNC]),
         (&FIND_FORM_FOOTER, &[fmt::HELP_FIND_FORM]),
-        (
-            &FORM_FOOTER,
-            &[fmt::HELP_RENAME, fmt::HELP_SYNC_FORM, fmt::HELP_PROPS],
-        ),
+        (&FORM_FOOTER, &[fmt::HELP_RENAME, fmt::HELP_PROPS]),
         (&SETTINGS_FOOTER, &[fmt::HELP_SETTINGS]),
         (&STATS_FOOTER, &[fmt::HELP_STATS]),
         (&PROCS_FOOTER, &[fmt::HELP_PROCS]),
     ];
     for (footer, helps) in screens {
-        // every screen: F1 help first, F10 close last, F-keys only up to F12
+        // every screen: F1 help first, F10 close last (tool screens like sync: F9), F-keys only up to F12
         assert_eq!(footer.first().map(|f| f.1), Some(KeyCode::F(1)));
         assert_eq!(footer.last().map(|f| f.1), Some(KeyCode::F(10)));
         assert!(footer.iter().all(|f| !matches!(f.1, KeyCode::F(13..))));

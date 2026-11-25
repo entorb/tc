@@ -224,7 +224,7 @@ mod tests {
 
     use super::super::find_files::F_NAME;
     use super::super::{
-        App, FormRow, Mode, form_checked, form_text, rename_rows, rows_from_line, rows_to_line,
+        App, FormRow, Mode, form_checked, rename_rows, rows_from_line, rows_to_line,
     };
 
     #[test]
@@ -358,30 +358,21 @@ mod tests {
     }
 
     #[test]
-    fn sync_form_history_persists_and_recalls() {
+    fn sync_options_persist_and_reopen() {
         let tmp = tempfile::tempdir().unwrap();
         let mut a = app(tmp.path());
-        a.remember("sync-forms", "File mask=*.rs\tSubdirectories=0");
-        let alt = |a: &mut App, code| a.on_key(KeyEvent::new(code, KeyModifiers::ALT));
-        let mask = |a: &App| match &a.mode {
-            Mode::Sync(s) => (
-                form_text(&s.form.rows, "File mask").to_owned(),
-                form_checked(&s.form.rows, "Subdirectories"),
-            ),
-            _ => panic!("no sync form"),
+        let line = format!("{}=1", super::super::sync::S_NODATE);
+        a.remember("sync-forms", &line);
+        let nodate = |a: &App| match &a.mode {
+            Mode::Sync(s) => form_checked(&s.form.rows, super::super::sync::S_NODATE),
+            _ => panic!("no sync screen"),
         };
         a.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        assert_eq!(mask(&a), ("*.rs".into(), false));
-        alt(&mut a, KeyCode::Down);
-        assert_eq!(mask(&a), ("*".into(), true));
-        alt(&mut a, KeyCode::Up);
-        assert_eq!(mask(&a).0, "*.rs");
-        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(nodate(&a));
+        a.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!nodate(&a));
         let saved = tc_core::cmdline::load_history(&tmp.path().join("cfg/sync-forms")).unwrap();
-        assert!(
-            saved
-                .last()
-                .is_some_and(|l| l.starts_with("File mask=*.rs\t"))
-        );
+        let off = format!("{}=0", super::super::sync::S_NODATE);
+        assert!(saved.last().is_some_and(|l| l.starts_with(&off)));
     }
 }

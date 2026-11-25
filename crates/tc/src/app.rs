@@ -249,19 +249,16 @@ pub struct App {
     rename_history: Vec<String>,
     /// Find files forms of past searches ([`FindForm::to_line`]), oldest first.
     finds: Vec<String>,
+    /// Sync options of past runs ([`rows_to_line`]), oldest first; Ctrl+E opens with the last.
     syncs: Vec<String>,
     /// Patterns of the viewer / editor search dialog, oldest first.
     find_history: Vec<String>,
     /// Directory of the settings and history files (none: not persisted).
     config_dir: Option<PathBuf>,
-    /// Sync form as last used; Ctrl+E reopens it.
-    last_sync: Option<SyncForm>,
     /// A running sync compares again when it ends.
     sync_again: Option<sync::SyncSetup>,
     /// Find results while a result is open in the viewer or editor; shown again after it.
     found: Option<Found>,
-    /// Sync rows while a file is open in the viewer or editor; shown again after it.
-    sync_back: Option<Box<Sync>>,
     /// The batch being renamed, and the last one that finished completely (undo, until quit).
     rename_running: Option<RenameBatch>,
     rename_undo: Option<RenameBatch>,
@@ -348,10 +345,8 @@ impl App {
             syncs: Vec::new(),
             find_history: Vec::new(),
             config_dir: None,
-            last_sync: None,
             sync_again: None,
             found: None,
-            sync_back: None,
             rename_running: None,
             rename_undo: None,
             cut_pending: false,
@@ -864,15 +859,6 @@ impl App {
         }
     }
 
-    /// Back to the sync screen after a viewer or editor opened from it closed.
-    fn restore_sync_back(&mut self) {
-        if matches!(self.mode, Mode::Normal)
-            && let Some(s) = self.sync_back.take()
-        {
-            self.mode = Mode::Sync(s);
-        }
-    }
-
     fn normal_key(&mut self, code: KeyCode) {
         let page = self.page as isize;
         let panel = &mut self.panels[self.active];
@@ -1160,7 +1146,6 @@ impl App {
             Mode::Editor(_, l) => paste_line(l, &text),
             Mode::FindForm(f) => f.paste(&text),
             Mode::MultiRename(f) => f.paste(&text),
-            Mode::Sync(s) if s.editing => s.form.paste(&text),
             Mode::Xfer(Xfer {
                 rename: Some(l), ..
             }) => paste_line(l, &text),
@@ -1298,7 +1283,6 @@ impl App {
             self.mode = Mode::Found(f);
         }
         self.popular_tick();
-        self.restore_sync_back();
         self.update_tick();
         if matches!(self.mode, Mode::Normal)
             && let Some(setup) = self.sync_again.take()

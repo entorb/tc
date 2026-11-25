@@ -526,7 +526,7 @@ impl App {
     /// Alt+Right / Alt+Left: view the next / previous file of the panel, cursor follows.
     pub(super) fn view_step(&mut self, title: String, view: Viewer, forward: bool) {
         let dir = if forward { "next" } else { "previous" };
-        let from_panel = self.found.is_none() && self.stats.is_none() && self.sync_back.is_none();
+        let from_panel = self.found.is_none() && self.stats.is_none();
         let next = if from_panel && self.current_file().as_deref() == Some(view.path()) {
             self.next_viewable(forward)
         } else {

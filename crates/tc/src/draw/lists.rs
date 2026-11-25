@@ -1,7 +1,7 @@
 use super::dialogs::apply;
-use super::tools::{sync_hints, sync_options};
+use super::tools::sync_options;
 use super::widgets::{cell, click_table, left, line_edit, page_rows, right};
-use super::{ACCENT, MARK, MUTED, TEXT};
+use super::{ACCENT, MARK, MUTED, SYNC_DIFF, SYNC_LEFT, SYNC_RIGHT, TEXT};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Label, Pos2, ProgressBar, Rect, RichText, Sense,
     Shape, Stroke, StrokeKind, Ui, epaint::Mesh, vec2,
@@ -10,7 +10,7 @@ use egui_extras::{Column, TableBuilder, TableRow};
 use std::sync::Arc;
 use tc::app::{App, Mode, Stats};
 use tc::fmt::{
-    self, StatsCols, found_cols, found_title, stats_cols, stats_footer, stats_title, sync_cols,
+    self, StatsCols, found_cols, found_title, stats_cols, stats_footer, stats_title, sync_comment,
     sync_footer, sync_title,
 };
 use tc::fmt::{procs_footer, procs_header, procs_prompt};
@@ -19,6 +19,7 @@ use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
 use tc_core::procs::ProcSort;
 use tc_core::stats::treemap::Tile;
+use tc_core::sync::Status;
 pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     let Mode::Found(f) = &mut app.mode else {
         return;
@@ -49,70 +50,62 @@ pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     }
 }
 
-/// Synchronize directories: the options on top, the compared rows below; a click on a row
-/// selects it and gives the rows the keyboard.
+/// Synchronize directories: the options on top, the files that differ below.
 pub(super) fn draw_sync(ui: &mut Ui, app: &mut App) {
     let Mode::Sync(s) = &mut app.mode else {
         return;
     };
     ui.label(RichText::new(sync_title(s)).strong().color(ACCENT));
     let act = sync_options(ui, s);
-    if s.editing && s.items.is_empty() && !s.comparing() {
-        sync_hints(ui);
-    } else {
-        app.page = sync_rows(ui, s);
-    }
+    app.page = sync_rows(ui, s);
     apply(app, act);
 }
 
-/// The compared rows that fit, the selected one's page; returns the rows per page.
-fn sync_rows(ui: &mut Ui, s: &mut tc::app::Sync) -> usize {
+/// The listed files from the top row that fit; returns the rows per page.
+fn sync_rows(ui: &mut Ui, s: &tc::app::Sync) -> usize {
     let today = jiff::ZonedDateTime::now().date();
     let (row_h, h) = page_rows(ui);
-    let start = s.sel / h * h;
-    let rows: Vec<[String; 6]> = (s.shown().skip(start).take(h))
-        .map(|it| sync_cols(it, today))
+    let start = s.top;
+    let nodate = s.ignore_date();
+    let rows: Vec<(String, Status, String)> = (s.shown().skip(start).take(h))
+        .map(|(it, st)| {
+            let name = it.name.to_string_lossy().into_owned();
+            (name, st, sync_comment(it, nodate, today))
+        })
         .collect();
     let cols = [
-        Column::exact(80.0),
-        Column::exact(110.0),
-        Column::exact(60.0),
-        Column::exact(80.0),
-        Column::exact(110.0),
+        Column::exact(300.0).clip(true),
+        Column::exact(50.0),
         Column::remainder().clip(true),
     ];
-    let titles = [
-        "Left size",
-        "Left date",
-        "Action",
-        "Right size",
-        "Right date",
-        "Path",
-    ];
-    let clicked = click_table(
+    click_table(
         ui,
         &cols,
-        &titles,
-        &[0, 3],
-        (row_h, start, rows.len(), s.sel),
+        &["Name", "Status", "Comment"],
+        &[],
+        (row_h, start, rows.len(), usize::MAX),
         |row, i| sync_cells(row, &rows[i - start]),
     );
-    if let Some((k, _)) = clicked {
-        s.sel = k;
-        s.editing = false;
-    }
     h
 }
 
-fn sync_cells(row: &mut TableRow, c: &[String; 6]) {
-    row.col(|ui| right(ui, c[0].as_str()));
-    row.col(|ui| left(ui, c[1].as_str()));
+/// Status icon color: only on the left blue, only on the right green, differs red.
+pub(super) fn sync_color(st: Status) -> Color32 {
+    match st {
+        Status::LeftOnly => SYNC_LEFT,
+        Status::RightOnly => SYNC_RIGHT,
+        Status::Differs => SYNC_DIFF,
+        Status::Equal => TEXT,
+    }
+}
+
+fn sync_cells(row: &mut TableRow, (name, st, comment): &(String, Status, String)) {
+    row.col(|ui| cell(ui, false, |ui| left(ui, name.as_str())));
     row.col(|ui| {
-        ui.centered_and_justified(|ui| ui.label(c[2].as_str()));
+        let icon = RichText::new(st.icon()).color(sync_color(*st));
+        ui.centered_and_justified(|ui| ui.label(icon));
     });
-    row.col(|ui| right(ui, c[3].as_str()));
-    row.col(|ui| left(ui, c[4].as_str()));
-    row.col(|ui| left(ui, c[5].as_str()));
+    row.col(|ui| cell(ui, false, |ui| left(ui, comment.as_str())));
 }
 
 /// Status line of File Stats (totals or its `:` prompt) and processes (footer or prompt).

@@ -193,69 +193,34 @@ F8 / Del / d    delete marked entries, else the selected one,
 Esc / q / F10   close (while scanning: cancel)";
 pub const HELP_SYNC: &str = "\
 == About ==
--> left is newer or only left, <- right is newer or only
-right, = equal, != differs without direction (same date,
-date ignored, file vs directory), del> delete right
-(asymmetric or r), <del delete left, <del> delete both,
--- skip. A directory on one side only is one row,
-copied or deleted whole.
-Copies keep the date on local disks; remote targets get
-the copy time, so use Ignore date against SFTP / FTP.
-Hidden and filtered-out rows are not synchronized. Local
-deletes go to the trash, remote ones are permanent.
-
-== Move ==
-Up/Down         move cursor
-PgUp/PgDn       page up / down
-Home/End        first / last row
-F3 / F4         view / edit the left file (the right one when
-                only it has the file); local only
-
-== Actions ==
-Right           copy left -> right (overwrites the right file)
-Left            copy right -> left (overwrites the left file)
-l / r / b       delete left / right / both (Space undoes)
-c               compare the two files of the row: equal or
-                first differing byte / line
-*               reverse -> and <- of all shown rows
-                (only rows on both sides)
-Space           no action / restore the compare result
-> = ! <         show / hide rows compared ->, =, !=, <- (and del)
-/               filter the rows by path: Enter keeps, Esc clears
-Enter           synchronize the shown rows: y starts,
-                n / Esc goes back
-Ctrl+R          compare again
-Tab             to the options (Enter there compares again)
-Esc / q / F10   close (while comparing: cancel)";
-pub const HELP_SYNC_FORM: &str = "\
-== About ==
-One screen: the options on top, the compare result below.
-Tab past the last option goes to the rows (once compared).
-
-== Fields ==
-Tab             next field
-Shift+Tab       previous field
-Up/Down         previous / next field
-Space           toggle checkbox
-Click           focus a field; toggles a checkbox, cycles a choice
-Left/Right      move in text
-Ctrl+Left/Right word left / right (Alt too: Mac Option)
-Ctrl+Bksp/Del   delete word left / right (Alt too)
-Alt+Up/Down     previous / next used settings (saved in
-                tc/sync-forms)
+Opening compares the files directly in the two panel
+directories (subdirectories are not compared or synced)
+and lists the ones that differ; equal files are not listed.
+Equal: same size and date. Status: ➡ (blue) only on the
+left, ⬅ (green) only on the right, ≠ (red) size or date
+differ; the comment
+shows left against right: size 4 B < 7 B, date ... > ...
+A sync is one way: every listed file of the source is
+copied, overwriting the target's file even when that one
+is newer. Copies keep the date on local disks; remote
+targets get the copy time, so use Ignore date against
+SFTP / FTP.
 
 == Options ==
-File mask: names to compare, `*` and `?`, comma or space
-separated. Subdirectories: compare the whole tree.
-By content: same size is compared byte by byte.
 Ignore date: same size = equal.
-Asymmetric: the right side becomes a copy of the left
-(extra right files are deleted).
+Mirror: files only on the target are deleted, so it
+becomes a copy (local: to the trash, remote: permanently).
+Up/Down/Tab     next / previous option
+Space           toggle the option (click too)
 
-== Run ==
-Enter           compare the two panel directories
-Ctrl+R          compare too
-Esc / F10       close (the options are kept for next time)";
+== Keys ==
+F5              Left -> Right: make the right side match
+                the left; y starts, Esc goes back
+F6              Right -> Left: the same the other way
+F2 / Ctrl+R     reload: list both directories again
+PgUp/PgDn       scroll the list
+Home/End        first / last row
+Esc / F10       close (while comparing: cancel)";
 pub const HELP_SETTINGS: &str = "\
 == Fields ==
 Up/Down / Tab   previous / next field
@@ -686,7 +651,6 @@ pub fn help(mode: &Mode) -> (&'static str, &'static str) {
         Mode::Edit { .. } => ("Help: editor", HELP_EDIT),
         Mode::Stats(_) => ("Help: file stats (ncdu)", HELP_STATS),
         Mode::Procs(_) => ("Help: processes (top)", HELP_PROCS),
-        Mode::Sync(s) if s.editing => ("Help: synchronize options", HELP_SYNC_FORM),
         Mode::Sync(_) => ("Help: synchronize directories", HELP_SYNC),
         Mode::FindForm(_) => ("Help: find files", HELP_FIND_FORM),
         Mode::Settings(_) => ("Help: settings", HELP_SETTINGS),

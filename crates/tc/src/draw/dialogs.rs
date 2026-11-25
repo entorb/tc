@@ -65,7 +65,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         _ => None,
     };
     if let Mode::Sync(s) = &app.mode
-        && let Some(text) = &s.confirm
+        && let Some((_, text)) = &s.confirm
     {
         let d = Dialog::Text {
             title: "Synchronize",

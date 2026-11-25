@@ -1,274 +1,112 @@
-//! Synchronize directories (like Total Commander): compare two trees, then copy and delete
-//! the differences the user kept.
+//! Synchronize directories one way: compare the files of two directories (top level only,
+//! by size and date), then make the target match the source.
 
+use std::cmp;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::UNIX_EPOCH;
 
 use crate::ops::{self, Decision, Progress};
 use crate::panel::{Entry, entry_with};
-use crate::search::Masks;
 use crate::vfs::{self, Side, rpath};
 use crate::{Error, Result, io_err};
 
-/// Content compare chunk per side.
-const CHUNK: usize = 1 << 16;
-
-#[derive(Debug, Clone, Default)]
-pub struct Options {
-    /// File name masks (`*`, `?`, comma or space separated); empty = all files.
-    pub mask: String,
-    pub subdirs: bool,
-    /// Files of the same size are equal only with the same content.
-    pub by_content: bool,
-    /// Same size = equal; a difference gets no direction.
-    pub ignore_date: bool,
-    /// Make the right side a copy of the left: right-only entries are deleted.
-    pub asymmetric: bool,
-}
-
+/// How the two files of a name compare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
+pub enum Status {
     Equal,
-    /// Differs, no direction (same date, date ignored, or file against directory).
-    NotEqual,
-    ToRight,
-    ToLeft,
-    DeleteRight,
-    /// The user dropped the action.
-    Skip,
-    DeleteLeft,
-    DeleteBoth,
+    LeftOnly,
+    RightOnly,
+    /// Size or date differ; [`Item::order`] says how.
+    Differs,
 }
 
-impl Action {
-    pub fn symbol(self) -> &'static str {
+impl Status {
+    /// Status column: an arrow points from the side that has the file, `≠` differs.
+    pub fn icon(self) -> &'static str {
         match self {
-            Action::Equal => "=",
-            Action::NotEqual => "!=",
-            Action::ToRight => "->",
-            Action::ToLeft => "<-",
-            Action::DeleteRight => "del>",
-            Action::Skip => "--",
-            Action::DeleteLeft => "<del",
-            Action::DeleteBoth => "<del>",
+            Status::Equal => "=",
+            Status::LeftOnly => "➡",
+            Status::RightOnly => "⬅",
+            Status::Differs => "≠",
         }
     }
 }
 
-/// One compared name: a file, or a directory that exists on one side only (copied or deleted whole).
+/// One file name found in either directory.
 #[derive(Debug, Clone)]
 pub struct Item {
-    /// Path below both roots.
-    pub rel: PathBuf,
+    pub name: OsString,
     pub left: Option<Entry>,
     pub right: Option<Entry>,
-    /// Result of the compare; show filters group by it.
-    pub default: Action,
-    /// What a sync does, changed by the user.
-    pub action: Action,
+}
+
+/// Whole seconds: file systems and servers store times at different precision.
+fn secs(e: &Entry) -> Option<u64> {
+    e.modified
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
 }
 
 impl Item {
-    pub fn is_dir(&self) -> bool {
-        self.left
-            .as_ref()
-            .or(self.right.as_ref())
-            .is_some_and(|e| e.is_dir)
+    /// Equal by size and date (`ignore_date`: by size alone).
+    pub fn status(&self, ignore_date: bool) -> Status {
+        match (&self.left, &self.right) {
+            (Some(l), Some(r)) if l.size == r.size && (ignore_date || secs(l) == secs(r)) => {
+                Status::Equal
+            }
+            (Some(_), Some(_)) => Status::Differs,
+            (Some(_), None) => Status::LeftOnly,
+            _ => Status::RightOnly,
+        }
+    }
+
+    /// Left against right file: (date, size) order, `None` when one side is missing;
+    /// `ignore_date` makes the dates compare equal.
+    pub fn order(&self, ignore_date: bool) -> Option<(cmp::Ordering, cmp::Ordering)> {
+        let (l, r) = (self.left.as_ref()?, self.right.as_ref()?);
+        let date = if ignore_date {
+            cmp::Ordering::Equal
+        } else {
+            secs(l).cmp(&secs(r))
+        };
+        Some((date, l.size.cmp(&r.size)))
+    }
+
+    /// The entry on side `i` (0 left, 1 right).
+    pub fn side(&self, i: usize) -> Option<&Entry> {
+        if i == 0 {
+            self.left.as_ref()
+        } else {
+            self.right.as_ref()
+        }
     }
 }
 
-/// Compare `roots[0]` on `sides[0]` (left) with `roots[1]` on `sides[1]` (right); items sorted
-/// by path. Directory symlinks are not descended. `p.files` counts compared names; `p.cancel` stops.
-pub fn compare(
-    sides: &[Side; 2],
-    roots: &[PathBuf; 2],
-    o: &Options,
-    p: &Progress,
-) -> Result<Vec<Item>> {
-    if o.by_content {
-        check_pair(sides)?;
-    }
-    let masks = Masks::new(&o.mask);
-    let mut items = Vec::new();
-    let mut stack = vec![PathBuf::new()];
-    while let Some(rel) = stack.pop() {
-        let mut names: BTreeMap<OsString, [Option<Entry>; 2]> = BTreeMap::new();
-        for (i, side) in sides.iter().enumerate() {
-            for e in list(side, &roots[i].join(&rel))? {
-                let slot = &mut names.entry(e.name.clone()).or_default()[i];
-                *slot = Some(e);
-            }
-        }
-        p.dirs_done.fetch_add(1, Ordering::Relaxed);
-        for (name, [l, r]) in names {
+/// List the files of `roots[0]` on `sides[0]` (left) and `roots[1]` on `sides[1]` (right),
+/// sorted by name. Subdirectories are not entered; a name that is a directory on either side
+/// is left out. `p.files` counts listed names; `p.cancel` stops.
+pub fn compare(sides: &[Side; 2], roots: &[PathBuf; 2], p: &Progress) -> Result<Vec<Item>> {
+    let mut names: BTreeMap<OsString, [Option<Entry>; 2]> = BTreeMap::new();
+    for (i, side) in sides.iter().enumerate() {
+        for e in list(side, &roots[i])? {
             if p.cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
             }
             p.files.fetch_add(1, Ordering::Relaxed);
-            let rel = rel.join(&name);
-            let paths = [roots[0].join(&rel), roots[1].join(&rel)];
-            let Some(action) = classify(sides, &paths, (l.as_ref(), r.as_ref()), o, &masks, p)?
-            else {
-                if is_plain_dir(l.as_ref()) && is_plain_dir(r.as_ref()) && o.subdirs {
-                    stack.push(rel);
-                }
-                continue;
-            };
-            items.push(Item {
-                rel,
-                left: l,
-                right: r,
-                default: action,
-                action,
-            });
+            let slot = &mut names.entry(e.name.clone()).or_default()[i];
+            *slot = Some(e);
         }
     }
-    items.sort_by(|a, b| a.rel.cmp(&b.rel));
-    Ok(items)
-}
-
-fn is_plain_dir(e: Option<&Entry>) -> bool {
-    e.is_some_and(|e| e.is_dir && !e.is_symlink)
-}
-
-/// Action for one name, `None` if it is not listed (filtered out, or a directory on both sides).
-fn classify(
-    sides: &[Side; 2],
-    paths: &[PathBuf; 2],
-    pair: (Option<&Entry>, Option<&Entry>),
-    o: &Options,
-    masks: &Masks,
-    p: &Progress,
-) -> Result<Option<Action>> {
-    let any_dir = [pair.0, pair.1].into_iter().flatten().any(|e| e.is_dir);
-    if any_dir && !o.subdirs {
-        return Ok(None);
-    }
-    let name = paths[0].file_name().unwrap_or_default().to_string_lossy();
-    if !any_dir && !masks.is_empty() && !masks.matches(&name) {
-        return Ok(None);
-    }
-    Ok(match pair {
-        (Some(_), None) => Some(Action::ToRight),
-        (None, Some(_)) if o.asymmetric => Some(Action::DeleteRight),
-        (None, Some(_)) => Some(Action::ToLeft),
-        (Some(a), Some(b)) if a.is_dir && b.is_dir => None,
-        (Some(a), Some(b)) if a.is_dir || b.is_dir => Some(Action::NotEqual),
-        (Some(a), Some(b)) => Some(file_action(sides, paths, a, b, o, p)?),
-        (None, None) => None,
-    })
-}
-
-/// Two files: equal by size and date (or content), else the newer one wins.
-fn file_action(
-    sides: &[Side; 2],
-    paths: &[PathBuf; 2],
-    a: &Entry,
-    b: &Entry,
-    o: &Options,
-    p: &Progress,
-) -> Result<Action> {
-    // whole seconds: file systems and servers store times at different precision
-    let secs = |e: &Entry| {
-        e.modified
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-    };
-    let same_time = secs(a) == secs(b);
-    let equal = a.size == b.size
-        && if o.by_content {
-            same_content(sides, paths, p)?
-        } else {
-            o.ignore_date || same_time
-        };
-    Ok(if equal {
-        Action::Equal
-    } else if o.ignore_date || same_time {
-        Action::NotEqual
-    } else if secs(a) > secs(b) {
-        Action::ToRight
-    } else {
-        Action::ToLeft
-    })
-}
-
-/// Content compare reads both files at once: not on one connection.
-fn check_pair(sides: &[Side; 2]) -> Result<()> {
-    if sides[0].remote().is_some() && sides[0].same(&sides[1]) {
-        return Err(Error::Remote(
-            "compare by content needs two different connections or a local side".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Streams both files chunk by chunk; stops at the first difference.
-fn same_content(sides: &[Side; 2], paths: &[PathBuf; 2], p: &Progress) -> Result<bool> {
-    Ok(first_diff(sides, paths, p)?.is_none())
-}
-
-/// First differing byte (0-based offset) and its line (1-based) of two files, `None` if equal;
-/// a file that is a prefix of the other differs at its end. `p.done` counts compared bytes.
-pub fn first_diff(
-    sides: &[Side; 2],
-    paths: &[PathBuf; 2],
-    p: &Progress,
-) -> Result<Option<(u64, u64)>> {
-    check_pair(sides)?;
-    let mut diff = None;
-    sides[0].read(&paths[0], &mut |a| {
-        sides[1].read(&paths[1], &mut |b| {
-            diff = diff_streams(a, b, paths, p)?;
-            Ok(())
-        })
-    })?;
-    Ok(diff)
-}
-
-fn diff_streams(
-    a: &mut dyn Read,
-    b: &mut dyn Read,
-    paths: &[PathBuf; 2],
-    p: &Progress,
-) -> Result<Option<(u64, u64)>> {
-    let (mut x, mut y) = (vec![0; CHUNK], vec![0; CHUNK]);
-    let (mut offset, mut line) = (0u64, 1u64);
-    let lines = |s: &[u8]| s.iter().filter(|&&c| c == b'\n').count() as u64;
-    loop {
-        if p.cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
-        }
-        let n = fill(a, &mut x, &paths[0])?;
-        let m = fill(b, &mut y, &paths[1])?;
-        if x[..n] != y[..m] {
-            let at = (x.iter().zip(&y).take(n.min(m))).position(|(u, v)| u != v);
-            let at = at.unwrap_or(n.min(m));
-            return Ok(Some((offset + at as u64, line + lines(&x[..at]))));
-        }
-        if n == 0 {
-            return Ok(None);
-        }
-        offset += n as u64;
-        line += lines(&x[..n]);
-        p.done.fetch_add(n as u64, Ordering::Relaxed);
-    }
-}
-
-/// Read until `buf` is full or the stream ends (network reads return short chunks).
-fn fill(r: &mut dyn Read, buf: &mut [u8], path: &Path) -> Result<usize> {
-    let mut n = 0;
-    while n < buf.len() {
-        match r.read(&mut buf[n..]).map_err(io_err(path))? {
-            0 => break,
-            k => n += k,
-        }
-    }
-    Ok(n)
+    let files = names
+        .into_iter()
+        .filter(|(_, pair)| !pair.iter().flatten().any(|e| e.is_dir));
+    Ok(files
+        .map(|(name, [left, right])| Item { name, left, right })
+        .collect())
 }
 
 fn list(side: &Side, dir: &Path) -> Result<Vec<Entry>> {
@@ -286,48 +124,62 @@ fn list(side: &Side, dir: &Path) -> Result<Vec<Entry>> {
     Ok(out)
 }
 
-/// Run the actions of `items`: copies (overwriting the older file, the user confirmed them)
-/// first, then deletes on the right and on the left (local: trash, remote: permanently). Stops at the first error.
-pub fn run(sides: &[Side; 2], roots: &[PathBuf; 2], items: &[Item], p: &Progress) -> Result<()> {
-    let srcs = |a: Action, i: usize| -> Vec<PathBuf> {
-        let it = items.iter().filter(|it| it.action == a);
-        it.map(|it| roots[i].join(&it.rel)).collect()
-    };
-    let jobs = [(Action::ToRight, 0, 1), (Action::ToLeft, 1, 0)];
-    let (mut bytes, mut files) = (0, 0);
-    for &(a, from, _) in &jobs {
-        vfs::scan(&sides[from], &srcs(a, from), p);
-        bytes += p.total.load(Ordering::Relaxed);
-        files += p.files_total.load(Ordering::Relaxed);
-    }
-    p.total.store(bytes, Ordering::Relaxed);
-    p.files_total.store(files, Ordering::Relaxed);
-    let mut overwrite = |_: &Path, _: &Path| Decision::Overwrite;
-    for (a, from, to) in jobs {
-        let local = matches!((&sides[from], &sides[to]), (Side::Local, Side::Local));
-        for it in items.iter().filter(|it| it.action == a) {
-            let (s, t) = (roots[from].join(&it.rel), roots[to].join(&it.rel));
-            if local {
-                ops::copy(&s, &t, &mut overwrite, p)?;
-            } else {
-                vfs::transfer(&sides[from], &s, &sides[to], &t, false, &mut overwrite, p)?;
-            }
+/// What a one-way sync from side `from` does.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// Names copied from the source, overwriting the target's file.
+    pub copy: Vec<OsString>,
+    /// Names only on the target, deleted.
+    pub delete: Vec<OsString>,
+}
+
+/// Every file of `from` that is missing or different on the other side is copied;
+/// with `delete_extras`, the target's files missing on `from` are deleted.
+pub fn plan(items: &[Item], from: usize, ignore_date: bool, delete_extras: bool) -> Plan {
+    let mut plan = Plan::default();
+    for it in items
+        .iter()
+        .filter(|it| it.status(ignore_date) != Status::Equal)
+    {
+        if it.side(from).is_some() {
+            plan.copy.push(it.name.clone());
+        } else if delete_extras {
+            plan.delete.push(it.name.clone());
         }
     }
-    let deletes = [
-        (1, [Action::DeleteRight, Action::DeleteBoth]),
-        (0, [Action::DeleteLeft, Action::DeleteBoth]),
-    ];
-    for (i, acts) in deletes {
-        for it in items.iter().filter(|it| acts.contains(&it.action)) {
-            if p.cancel.load(Ordering::Relaxed) {
-                return Err(Error::Cancelled);
-            }
-            let t = roots[i].join(&it.rel);
-            match &sides[i] {
-                Side::Local => ops::trash(&t)?,
-                side => side.delete(&t)?,
-            }
+    plan
+}
+
+/// Run `plan` from side `from` to the other: copies first (overwriting, the user confirmed),
+/// then deletes (local: trash, remote: permanently). Stops at the first error.
+pub fn run(
+    sides: &[Side; 2],
+    roots: &[PathBuf; 2],
+    from: usize,
+    plan: &Plan,
+    p: &Progress,
+) -> Result<()> {
+    let to = 1 - from;
+    let srcs: Vec<PathBuf> = plan.copy.iter().map(|n| roots[from].join(n)).collect();
+    vfs::scan(&sides[from], &srcs, p);
+    let local = matches!((&sides[from], &sides[to]), (Side::Local, Side::Local));
+    let mut overwrite = |_: &Path, _: &Path| Decision::Overwrite;
+    for (s, name) in srcs.iter().zip(&plan.copy) {
+        let t = roots[to].join(name);
+        if local {
+            ops::copy(s, &t, &mut overwrite, p)?;
+        } else {
+            vfs::transfer(&sides[from], s, &sides[to], &t, false, &mut overwrite, p)?;
+        }
+    }
+    for name in &plan.delete {
+        if p.cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let t = roots[to].join(name);
+        match &sides[to] {
+            Side::Local => ops::trash(&t)?,
+            side => side.delete(&t)?,
         }
     }
     Ok(())
@@ -335,8 +187,9 @@ pub fn run(sides: &[Side; 2], roots: &[PathBuf; 2], items: &[Item], p: &Progress
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, CHUNK, Item, Options, Progress, Side, compare, first_diff, run};
+    use super::{Plan, Progress, Side, Status, compare, plan, run};
     use crate::vfs::mem::Mem;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
@@ -353,15 +206,6 @@ mod tests {
             .unwrap();
     }
 
-    fn cmp(l: &Path, r: &Path, o: &Options) -> Vec<(String, Action)> {
-        let roots = [l.to_owned(), r.to_owned()];
-        let items = compare(&[Side::Local, Side::Local], &roots, o, &Progress::default()).unwrap();
-        items
-            .into_iter()
-            .map(|i| (i.rel.to_string_lossy().replace('\\', "/"), i.action))
-            .collect()
-    }
-
     fn pair() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let t = tempfile::tempdir().unwrap();
         let (l, r) = (t.path().join("l"), t.path().join("r"));
@@ -371,168 +215,125 @@ mod tests {
         put(&r.join("newer.txt"), "old", 100);
         put(&l.join("older.txt"), "old", 100);
         put(&r.join("older.txt"), "new!", 10);
+        put(&l.join("size.txt"), "ab", 100);
+        put(&r.join("size.txt"), "abc", 100);
         put(&l.join("left.txt"), "l", 100);
         put(&r.join("right.log"), "r", 100);
         put(&l.join("sub/deep.txt"), "d", 100);
         put(&r.join("sub/deep.txt"), "DD", 100);
-        put(&l.join("only/x.txt"), "x", 100);
+        put(&l.join("mixed/x.txt"), "x", 100);
+        put(&r.join("mixed"), "a file", 100);
         (t, l, r)
     }
 
+    fn statuses(l: &Path, r: &Path, ignore_date: bool) -> Vec<(String, Status)> {
+        let roots = [l.to_owned(), r.to_owned()];
+        let items = compare(&[Side::Local, Side::Local], &roots, &Progress::default()).unwrap();
+        (items.iter())
+            .map(|i| (i.name.to_string_lossy().into(), i.status(ignore_date)))
+            .collect()
+    }
+
+    fn names(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(OsString::from).collect()
+    }
+
     #[test]
-    fn compare_directions_subdirs_mask_and_asymmetric() {
+    fn compare_top_level_files_by_size_and_date() {
         let (_t, l, r) = pair();
-        let subdirs = Options {
-            subdirs: true,
-            ..Options::default()
-        };
-        assert_eq!(
-            cmp(&l, &r, &subdirs),
+        let want = |newer: Status| -> Vec<(String, Status)> {
             [
-                ("left.txt".into(), Action::ToRight),
-                ("newer.txt".into(), Action::ToRight),
-                ("older.txt".into(), Action::ToLeft),
-                ("only".into(), Action::ToRight),
-                ("right.log".into(), Action::ToLeft),
-                ("same.txt".into(), Action::Equal),
-                ("sub/deep.txt".into(), Action::NotEqual),
+                ("left.txt", Status::LeftOnly),
+                ("newer.txt", newer),
+                ("older.txt", Status::Differs),
+                ("right.log", Status::RightOnly),
+                ("same.txt", Status::Equal),
+                ("size.txt", Status::Differs),
+            ]
+            .map(|(n, s)| (n.to_owned(), s))
+            .into()
+        };
+        assert_eq!(statuses(&l, &r, false), want(Status::Differs));
+        // same size: equal
+        assert_eq!(statuses(&l, &r, true), want(Status::Equal));
+        let roots = [l, r];
+        let items = compare(&[Side::Local, Side::Local], &roots, &Progress::default()).unwrap();
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let order = |nodate| -> Vec<_> { items.iter().map(|i| i.order(nodate)).collect() };
+        let o = order(false);
+        assert_eq!(
+            [o[0], o[1], o[2], o[3], o[5]],
+            [
+                None,
+                Some((Greater, Equal)),
+                Some((Less, Less)),
+                None,
+                Some((Equal, Less))
             ]
         );
-        let flat = Options {
-            mask: "*.log".into(),
-            asymmetric: true,
-            ..Options::default()
-        };
-        assert_eq!(
-            cmp(&l, &r, &flat),
-            [("right.log".into(), Action::DeleteRight)]
-        );
-        let ignore = Options {
-            ignore_date: true,
-            mask: "newer.txt".into(),
-            ..Options::default()
-        };
-        assert_eq!(cmp(&l, &r, &ignore), [("newer.txt".into(), Action::Equal)]);
+        assert_eq!(order(true)[2], Some((Equal, Less)));
     }
 
     #[test]
-    fn by_content_finds_equal_and_different_files() {
-        let t = tempfile::tempdir().unwrap();
-        let (l, r) = (t.path().join("l"), t.path().join("r"));
-        put(&l.join("eq"), "same", 10);
-        put(&r.join("eq"), "same", 100);
-        put(&l.join("ne"), "abcd", 100);
-        put(&r.join("ne"), "abce", 100);
-        // bigger than one chunk, differs at the end
-        let big = "x".repeat(super::CHUNK + 5);
-        put(&l.join("big"), &big, 100);
-        put(
-            &r.join("big"),
-            &(big[..big.len() - 1].to_owned() + "y"),
-            100,
-        );
-        let o = Options {
-            by_content: true,
-            ..Options::default()
-        };
+    fn plan_copies_differences_one_way_and_deletes_extras_on_request() {
+        let (_t, l, r) = pair();
+        let roots = [l, r];
+        let items = compare(&[Side::Local, Side::Local], &roots, &Progress::default()).unwrap();
+        let to_right = ["left.txt", "newer.txt", "older.txt", "size.txt"];
         assert_eq!(
-            cmp(&l, &r, &o),
-            [
-                ("big".into(), Action::NotEqual),
-                ("eq".into(), Action::Equal),
-                ("ne".into(), Action::NotEqual)
-            ]
+            plan(&items, 0, false, false),
+            Plan {
+                copy: names(&to_right),
+                delete: vec![]
+            }
         );
+        assert_eq!(plan(&items, 0, false, true).delete, names(&["right.log"]));
+        let to_left = plan(&items, 1, true, true);
+        assert_eq!(to_left.copy, names(&["older.txt", "right.log", "size.txt"]));
+        assert_eq!(to_left.delete, names(&["left.txt"]));
     }
 
     #[test]
-    fn run_copies_both_ways_overwrites_and_skips() {
+    fn run_overwrites_newer_target_and_leaves_extras() {
         let (_t, l, r) = pair();
         let roots = [l.clone(), r.clone()];
         let sides = [Side::Local, Side::Local];
-        let o = Options {
-            subdirs: true,
-            ..Options::default()
-        };
-        let mut items: Vec<Item> = compare(&sides, &roots, &o, &Progress::default()).unwrap();
-        for it in &mut items {
-            if it.rel == Path::new("right.log") {
-                it.action = Action::Skip;
-            }
-        }
-        run(&sides, &roots, &items, &Progress::default()).unwrap();
+        let items = compare(&sides, &roots, &Progress::default()).unwrap();
+        run(
+            &sides,
+            &roots,
+            0,
+            &plan(&items, 0, false, false),
+            &Progress::default(),
+        )
+        .unwrap();
         let read = |p: PathBuf| fs::read_to_string(p).unwrap();
         assert_eq!(read(r.join("newer.txt")), "new");
-        assert_eq!(read(l.join("older.txt")), "new!");
-        assert_eq!(read(r.join("only/x.txt")), "x");
+        assert_eq!(read(r.join("older.txt")), "old");
         assert_eq!(read(r.join("left.txt")), "l");
-        assert!(!l.join("right.log").exists());
-        // not-equal files keep both versions
-        assert_eq!(
-            (read(l.join("sub/deep.txt")), read(r.join("sub/deep.txt"))),
-            ("d".into(), "DD".into())
-        );
-        let left: Vec<_> = cmp(&l, &r, &o)
+        assert_eq!(read(r.join("right.log")), "r");
+        // subdirectories are not touched
+        assert_eq!(read(r.join("sub/deep.txt")), "DD");
+        let left: Vec<_> = statuses(&l, &r, false)
             .into_iter()
-            .filter(|(_, a)| *a != Action::Equal)
+            .filter(|(_, s)| *s != Status::Equal)
             .collect();
-        assert_eq!(
-            left,
-            [
-                ("right.log".into(), Action::ToLeft),
-                ("sub/deep.txt".into(), Action::NotEqual)
-            ]
-        );
+        assert_eq!(left, [("right.log".to_owned(), Status::RightOnly)]);
     }
 
     #[test]
-    fn run_deletes_left_right_and_both() {
+    fn run_deletes_extras_on_the_target_only() {
         let (ml, mr) = (Mem::new(), Mem::new());
         let sides = [Side::Remote(ml.clone()), Side::Remote(mr.clone())];
-        for n in ["dl", "dr", "db", "sk"] {
-            ml.put(&format!("/{n}"), b"x");
-            mr.put(&format!("/{n}"), b"x");
-        }
-        let item = |n: &str, action| Item {
-            rel: n.into(),
-            left: None,
-            right: None,
-            default: action,
-            action,
-        };
-        let items = [
-            item("dl", Action::DeleteLeft),
-            item("dr", Action::DeleteRight),
-            item("db", Action::DeleteBoth),
-            item("sk", Action::Skip),
-        ];
+        ml.put("/a", b"x");
+        mr.put("/a", b"x");
+        mr.put("/extra", b"x");
         let roots = [PathBuf::from("/"), PathBuf::from("/")];
-        run(&sides, &roots, &items, &Progress::default()).unwrap();
-        assert_eq!(ml.paths(), ["/", "/dr", "/sk"]);
-        assert_eq!(mr.paths(), ["/", "/dl", "/sk"]);
-    }
-
-    #[test]
-    fn first_diff_offset_line_and_prefix() {
-        let t = tempfile::tempdir().unwrap();
-        let sides = [Side::Local, Side::Local];
-        let diff = |a: &[u8], b: &[u8], p: &Progress| {
-            let paths = [t.path().join("a"), t.path().join("b")];
-            fs::write(&paths[0], a).unwrap();
-            fs::write(&paths[1], b).unwrap();
-            first_diff(&sides, &paths, p)
-        };
-        let p = Progress::default();
-        assert_eq!(diff(b"ab\ncd", b"ab\ncd", &p).unwrap(), None);
-        assert_eq!(diff(b"ab\ncd", b"ab\ncX", &p).unwrap(), Some((4, 2)));
-        assert_eq!(diff(b"abc", b"abcd", &p).unwrap(), Some((3, 1)));
-        let (mut big, mut other) = ("x\n".repeat(CHUNK).into_bytes(), Vec::new());
-        other.extend_from_slice(&big);
-        big.extend_from_slice(b"ab");
-        other.extend_from_slice(b"aZ");
-        let want = Some((2 * CHUNK as u64 + 1, CHUNK as u64 + 1));
-        assert_eq!(diff(&big, &other, &p).unwrap(), want);
-        p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(matches!(diff(b"a", b"a", &p), Err(crate::Error::Cancelled)));
+        let items = compare(&sides, &roots, &Progress::default()).unwrap();
+        let p = plan(&items, 0, true, true);
+        assert_eq!(p.delete, names(&["extra"]));
+        run(&sides, &roots, 0, &p, &Progress::default()).unwrap();
+        assert_eq!(ml.paths(), ["/", "/a"]);
+        assert_eq!(mr.paths(), ["/", "/a"]);
     }
 }

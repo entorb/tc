@@ -22,12 +22,12 @@ use crate::app::{
     App, Filter, FormRow, Found, Input, ListRow, Mode, Procs, Stats, Step, Sync, Xfer, list_rows,
 };
 use tc_core::procs::{Criteria, Proc, ProcSort};
-use tc_core::sync::Item;
+use tc_core::sync::{Item, Status};
 
 pub use help::{
     HELP_CONFLICT, HELP_EDIT, HELP_FIND_FORM, HELP_FOUND, HELP_LISTS, HELP_MAIN, HELP_PROCS,
-    HELP_PROPS, HELP_RENAME, HELP_SEARCH, HELP_SETTINGS, HELP_STATS, HELP_SYNC, HELP_SYNC_FORM,
-    HELP_VIEW, HelpLine, help, help_filter, help_line, key_help,
+    HELP_PROPS, HELP_RENAME, HELP_SEARCH, HELP_SETTINGS, HELP_STATS, HELP_SYNC, HELP_VIEW,
+    HelpLine, help, help_filter, help_line, key_help,
 };
 
 /// `1234567` as `1,234,567`.
@@ -543,98 +543,54 @@ pub fn found_cols(h: &Hit) -> [String; 2] {
     [size, text]
 }
 
-/// Sync screen title: both directories and the options.
+/// Sync screen title: both directories.
 pub fn sync_title(s: &Sync) -> String {
     let side = |i: usize| {
         let url = s.sides[i].remote().map_or("", |r| r.url());
         format!("{url}{}", s.roots[i].display())
     };
-    let hidden: String = (["->", "=", "!=", "<-"].iter().zip(s.show))
-        .filter(|(_, on)| !on)
-        .map(|(k, _)| format!(" {k}"))
-        .collect();
-    let hidden = if hidden.is_empty() {
-        String::new()
-    } else {
-        format!("  hidden:{hidden}")
-    };
-    format!(
-        " Sync: {}  <->  {}{hidden}{} ",
-        side(0),
-        side(1),
-        s.filter.tag()
-    )
+    format!(" Sync: {}  <->  {} ", side(0), side(1))
 }
 
-/// Sync row cells: left size and date, action, right size and date, path.
-pub fn sync_cols(it: &Item, today: jiff::civil::Date) -> [String; 6] {
-    let side = |e: &Option<Entry>| match e {
-        Some(e) if e.is_dir => ["<DIR>".to_string(), date_of(e, today)],
-        Some(e) => [human(e.size), date_of(e, today)],
-        None => [String::new(), String::new()],
+/// How a sync row's files differ, left against right: "size 4 B < 7 B, date 08:22 > 26-11-23",
+/// or "left only" / "right only".
+pub fn sync_comment(it: &Item, ignore_date: bool, today: jiff::civil::Date) -> String {
+    let (Some((date, size)), Some(l), Some(r)) = (it.order(ignore_date), &it.left, &it.right)
+    else {
+        let side = if it.left.is_some() { "left" } else { "right" };
+        return format!("{side} only");
     };
-    let slash = if it.is_dir() { "/" } else { "" };
-    let [ls, ld] = side(&it.left);
-    let [rs, rd] = side(&it.right);
-    let path = format!("{}{slash}", it.rel.display());
-    [ls, ld, it.action.symbol().to_string(), rs, rd, path]
-}
-
-/// Message of `c` on a sync row: equal, first difference, or the error.
-pub fn sync_diff_text(
-    rel: &Path,
-    sizes: [u64; 2],
-    res: &tc_core::Result<Option<(u64, u64)>>,
-) -> String {
-    let rel = rel.display();
-    match res {
-        Ok(None) => format!("Equal content: {rel} ({})", human(sizes[0])),
-        Ok(Some((at, line))) => {
-            let mut text = format!(
-                "Different: {rel}\nFirst difference at byte {} (line {line}).",
-                thousands(*at)
-            );
-            if sizes[0] != sizes[1] {
-                text += &format!("\nLeft {}, right {}.", human(sizes[0]), human(sizes[1]));
-            }
-            text
-        }
-        Err(e) => format!("Compare: {e}"),
+    let sign = |o: std::cmp::Ordering| if o.is_lt() { "<" } else { ">" };
+    let mut parts = Vec::new();
+    if size.is_ne() {
+        parts.push(format!(
+            "size {} {} {}",
+            human(l.size),
+            sign(size),
+            human(r.size)
+        ));
     }
+    if date.is_ne() {
+        let (dl, dr) = (date_of(l, today), date_of(r, today));
+        parts.push(format!("date {dl} {} {dr}", sign(date)));
+    }
+    parts.join(", ")
 }
 
-/// Sync status line: compare progress, else counts and keys.
+/// Sync status line: compare progress, else the counts of the listed files.
 pub fn sync_footer(s: &Sync) -> String {
-    if let Some(rel) = s.diffing() {
-        let p = &s.progress;
-        return format!(
-            "comparing {}: {} of {}  [Esc] Cancel",
-            rel.display(),
-            human(p.done.load(Ordering::Relaxed)),
-            human(p.total.load(Ordering::Relaxed))
-        );
-    }
     if s.comparing() {
         return format!(
-            "comparing: {} names, {} dirs  [Esc] Cancel",
-            thousands(s.progress.files.load(Ordering::Relaxed)),
-            thousands(s.progress.dirs_done.load(Ordering::Relaxed))
+            "comparing: {} names  [Esc] Cancel",
+            thousands(s.progress.files.load(Ordering::Relaxed))
         );
     }
-    let mut n = [0; 8];
-    for it in s.shown() {
-        n[it.action as usize] += 1;
-    }
+    let only = |st: Status| s.shown().filter(|(_, x)| *x == st).count();
     format!(
-        "{} shown of {}: = {}  != {}  -> {}  <- {}  del {}  -- {}   Left/Right direction  l/r/b delete  c compare file  > = ! < show",
+        "{} differ: {} left only, {} right only",
         s.view.len(),
-        s.items.len(),
-        n[0],
-        n[1],
-        n[2],
-        n[3],
-        n[4] + n[6] + n[7],
-        n[5]
+        only(Status::LeftOnly),
+        only(Status::RightOnly)
     )
 }
 
@@ -655,16 +611,6 @@ pub const FIND_TAB_INFO: [&str; 4] = [
      Skip hidden: dot names. Max depth: 1 = only this directory.",
     "Sizes: a number with K, M, G or T (1024 steps), e.g. 10k, 2 MB. Dates: YYYY-MM-DD. \
      Not older than: 30m, 12h, 7d, 2w (a bare number = days).",
-];
-
-/// Synchronize form: what the compare result shows, next to the options.
-pub const SYNC_INFO: [&str; 4] = [
-    "The result lists every name that differs: -> copy left to right, <- right to left, \
-     = equal, != differs without a direction.",
-    "There, Left / Right set a row's direction, l / r / b delete, Space does nothing with it, \
-     * reverses all shown rows, c compares a file pair.",
-    "> = ! < show or hide those rows, / filters by path.",
-    "Enter synchronizes the shown rows after a confirm: nothing changes before.",
 ];
 
 /// Name-tab buttons (placeholder, hover text): each inserts into the focused field.
