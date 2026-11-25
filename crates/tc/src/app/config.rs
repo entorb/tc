@@ -23,7 +23,6 @@ impl App {
         let lines = |name: &str| {
             cmdline::load_history(&dir.join(name)).with_context(|| format!("cannot read {name}"))
         };
-        self.searches = lines("searches")?;
         self.history = lines("history")?;
         self.finds = lines("find-forms")?;
         self.syncs = lines("sync-forms")?;
@@ -41,7 +40,6 @@ impl App {
         self.hotlist_file = Some(dir.join("hotlist"));
         self.popular_file = Some(dir.join("popular"));
         self.connections_file = Some(dir.join("connections"));
-        self.searches_file = Some(dir.join("searches"));
         self.history_file = Some(dir.join("history"));
         self.config_dir = Some(dir);
         Ok(())
@@ -187,7 +185,7 @@ impl App {
             Ok(n) => {
                 (self.hotlist_file, self.connections_file) = (None, None);
                 self.popular_file = None;
-                (self.searches_file, self.history_file, self.config_dir) = (None, None, None);
+                (self.history_file, self.config_dir) = (None, None);
                 format!(
                     "Deleted {n} file(s) in {}. Nothing is saved until tc restarts.",
                     dir.display()

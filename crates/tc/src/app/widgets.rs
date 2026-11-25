@@ -3,8 +3,8 @@
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use tc_core::cmdline::{self, LineEdit};
+use std::path::PathBuf;
+use tc_core::cmdline::LineEdit;
 use tc_core::hotlist;
 
 use super::{App, Connecting, Mode, link::LinkAsk, xfer::Xfer};
@@ -275,59 +275,6 @@ pub(super) fn step_focus(
             return at;
         }
     }
-}
-
-/// Wording of one kind of saved form lines (see [`preset_key`]).
-pub(super) struct PresetKind {
-    /// Note when the list is empty.
-    pub(super) none: &'static str,
-    /// Label of the name row.
-    pub(super) label: &'static str,
-    /// What one entry is called in "No ... x.".
-    pub(super) one: &'static str,
-    /// What the file holds in "Cannot save ...".
-    pub(super) all: &'static str,
-}
-
-/// F6 saves `line` (`name\t...`) under `name`, F7 returns the line after `name`'s (cycling),
-/// F8 deletes `name`; the file is written at once. Returns the line to load and the note.
-pub(super) fn preset_key(
-    list: &mut Vec<String>,
-    file: Option<&Path>,
-    code: KeyCode,
-    name: &str,
-    line: String,
-    kind: &PresetKind,
-) -> (Option<String>, String) {
-    let pos = list.iter().position(|l| l.split('\t').next() == Some(name));
-    let (load, note) = match (code, pos) {
-        (KeyCode::F(7), _) if list.is_empty() => (None, kind.none.to_owned()),
-        (KeyCode::F(7), _) => {
-            let next = list[pos.map_or(0, |i| (i + 1) % list.len())].clone();
-            let note = format!("Loaded {}.", next.split('\t').next().unwrap_or_default());
-            (Some(next), note)
-        }
-        _ if name.is_empty() => (None, format!("Type a name in \"{}\" first.", kind.label)),
-        (KeyCode::F(6), Some(i)) => {
-            list[i] = line;
-            (None, format!("Saved {name}."))
-        }
-        (KeyCode::F(6), None) => {
-            list.push(line);
-            (None, format!("Saved {name}."))
-        }
-        (_, Some(i)) => {
-            list.remove(i);
-            (None, format!("Deleted {name}."))
-        }
-        (_, None) => (None, format!("No {} {name}.", kind.one)),
-    };
-    if let Some(Err(e)) = file.map(|f| cmdline::save_history(f, list))
-        && code != KeyCode::F(7)
-    {
-        return (None, format!("Cannot save {}: {e}", kind.all));
-    }
-    (load, note)
 }
 
 /// Edit keys shared by all text prompts; true if `key` was one of them.

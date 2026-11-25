@@ -341,12 +341,6 @@ Min / Max size: number with K, M, G or T (1024 steps),
 e.g. 10k, 2 MB. Modified after / before: YYYY-MM-DD.
 Not older than: 30m, 12h, 7d, 2w (bare number = days).
 
-== Saved searches (right) ==
-F6              save the form under the name in \"Saved search\"
-F7              load the next saved search
-F8              delete the saved search of that name
-Click           a saved search in the list loads it
-
 == Run ==
 Enter / F10     start the search
 Esc / F9        cancel (the form is kept for next time)";

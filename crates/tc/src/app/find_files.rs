@@ -1,9 +1,8 @@
-//! Find files (Alt+F7 / Ctrl+F): form, saved searches, streamed results, panelize.
+//! Find files (Alt+F7 / Ctrl+F): form, streamed results, panelize.
 
 use super::widgets::{step_focus, tab_key, tab_of, tab_range};
 use super::{
-    App, Filter, FormRow, Mode, PresetKind, form_checked, form_text, paste_line, preset_key,
-    rows_from_line, rows_to_line,
+    App, Filter, FormRow, Mode, form_checked, form_text, paste_line, rows_from_line, rows_to_line,
 };
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
@@ -21,7 +20,7 @@ use tc_core::panel::Entry;
 use tc_core::vfs;
 use tc_core::{find, search};
 
-// Find form row labels; also the keys of saved searches.
+// Find form row labels; also the keys of the find history lines.
 pub(super) const F_NAME: &str = "Name (masks)";
 
 pub(super) const F_NAME_RE: &str = "Name is a regex";
@@ -66,16 +65,7 @@ pub(super) const F_AGE: &str = "Not older than";
 
 pub(super) const F_EXTS: &str = "Extensions";
 
-pub(super) const F_SAVED: &str = "Saved search";
-
-pub(super) const SEARCH_KIND: PresetKind = PresetKind {
-    none: "No saved searches yet: F6 saves one.",
-    label: "Saved search",
-    one: "saved search",
-    all: "searches",
-};
-
-/// Rows per tab (titles in `fmt::FIND_TABS`), in row order; the saved search name follows them.
+/// Rows per tab (titles in `fmt::FIND_TABS`), in row order.
 pub(super) const FIND_TAB_ROWS: [usize; 4] = [5, 7, 5, 5];
 
 const _: () = assert!(FIND_TAB_ROWS.len() == crate::fmt::FIND_TABS.len());
@@ -107,7 +97,6 @@ pub(super) fn find_rows() -> Vec<FormRow> {
         text(F_AFTER),
         text(F_BEFORE),
         text(F_AGE),
-        text(F_SAVED),
     ]
 }
 
@@ -139,16 +128,6 @@ impl FindForm {
         tab_range(&FIND_TAB_ROWS, self.tab)
     }
 
-    /// The name in "Saved search".
-    pub fn saved_name(&self) -> &str {
-        self.text(F_SAVED).trim()
-    }
-
-    /// Row index of the saved search name (past the tabs).
-    pub fn saved_row(&self) -> usize {
-        self.rows.len() - 1
-    }
-
     /// Tab `t` has a field filled or a box ticked (its title gets a dot).
     pub fn tab_changed(&self, t: usize) -> bool {
         self.rows[tab_range(&FIND_TAB_ROWS, t)]
@@ -166,7 +145,7 @@ impl FindForm {
         self.focus = self.shown_rows().start;
     }
 
-    /// Focus moved (Tab, click): the tab follows it; the saved search name keeps the tab.
+    /// Focus moved (Tab, click): the tab follows it.
     pub(super) fn follow_focus(&mut self) {
         if let Some(t) = tab_of(&FIND_TAB_ROWS, self.focus) {
             self.tab = t;
@@ -207,24 +186,16 @@ impl FindForm {
         }
     }
 
-    /// One line of the saved searches file: `name`, then the [`rows_to_line`] of the form.
-    pub(super) fn to_line(&self, name: &str) -> String {
-        format!(
-            "{}\t{}",
-            name.replace('\t', " "),
-            rows_to_line(&self.rows, F_SAVED)
-        )
+    /// One line of the find history: the [`rows_to_line`] of the form.
+    pub(super) fn to_line(&self) -> String {
+        rows_to_line(&self.rows, "")
     }
 
-    /// The form a saved line describes; unknown labels are ignored, missing ones stay empty.
+    /// The form a history line describes; unknown labels (a saved-search name in old lines)
+    /// are ignored, missing ones stay empty.
     pub(super) fn from_line(line: &str) -> Self {
         let mut form = FindForm::new();
-        let (name, rest) = line.split_once('\t').unwrap_or((line, ""));
-        rows_from_line(&mut form.rows, rest);
-        if let Some(FormRow::Text(_, l)) = form.rows.iter_mut().find(|r| r.label() == F_SAVED) {
-            l.text = name.into();
-            l.end();
-        }
+        rows_from_line(&mut form.rows, line);
         form
     }
 
@@ -489,7 +460,7 @@ impl App {
             KeyCode::Esc | KeyCode::F(9) => return self.last_find = Some(form),
             KeyCode::Enter | KeyCode::F(10) => match form.query(self.exact, remote) {
                 Ok(q) => {
-                    let line = form.to_line(form.text(F_SAVED).trim());
+                    let line = form.to_line();
                     self.note = self.remember("find-forms", &line);
                     self.last_find = Some(form);
                     return self.spawn_find(q);
@@ -515,57 +486,9 @@ impl App {
             }
             KeyCode::Down => form.focus = step_focus(form.shown_rows(), form.focus, 1, |_| false),
             KeyCode::Up => form.focus = step_focus(form.shown_rows(), form.focus, -1, |_| false),
-            KeyCode::F(6..=8) => form = self.saved_search_key(key.code, form),
             _ => form.key(key),
         }
         self.mode = Mode::FindForm(form);
-    }
-
-    /// Names of the saved searches, in file order.
-    pub fn saved_searches(&self) -> impl Iterator<Item = &str> {
-        (self.searches.iter()).map(|l| l.split('\t').next().unwrap_or_default())
-    }
-
-    /// Click on saved search `i` in the list: load it into the form.
-    pub fn saved_search_click(&mut self, i: usize) {
-        let Mode::FindForm(form) = &mut self.mode else {
-            return;
-        };
-        if let Some(line) = self.searches.get(i) {
-            let name = line.split('\t').next().unwrap_or_default();
-            *form = FindForm {
-                focus: form.focus,
-                tab: form.tab,
-                hist: form.hist,
-                error: Some(format!("Loaded {name}.")),
-                ..FindForm::from_line(line)
-            };
-        }
-    }
-
-    /// F6 saves the form under the "Saved search" name, F7 loads the next saved search,
-    /// F8 deletes the named one; the file is written at once.
-    pub(super) fn saved_search_key(&mut self, code: KeyCode, form: FindForm) -> FindForm {
-        let name = form.text(F_SAVED).trim().to_owned();
-        let line = form.to_line(&name);
-        let (load, note) = preset_key(
-            &mut self.searches,
-            self.searches_file.as_deref(),
-            code,
-            &name,
-            line,
-            &SEARCH_KIND,
-        );
-        let mut form = match load {
-            Some(l) => FindForm {
-                focus: form.focus,
-                tab: form.tab,
-                ..FindForm::from_line(&l)
-            },
-            None => form,
-        };
-        form.error = Some(note);
-        form
     }
 
     pub(super) fn found_key(&mut self, key: KeyEvent, mut f: Found) {
@@ -664,8 +587,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::super::find_files::{
-        F_CONTENT, F_CONTENT_ON, F_EVERY, F_FOLLOW, F_HIDDEN, F_MIN, F_NAME, F_SAVED, F_SKIP_DIRS,
-        Found, FoundSort,
+        F_CONTENT, F_CONTENT_ON, F_EVERY, F_MIN, F_NAME, F_SKIP_DIRS, Found, FoundSort,
     };
 
     use super::super::{App, Filter, Mode};
@@ -682,7 +604,6 @@ mod tests {
     use tc_core::panel::{Entry, Panel};
 
     use super::super::tests::{key, settle, two_panels, type_keys, wait, with};
-    use tc_core::cmdline;
 
     /// Fills the find form (name, then content regex, which ticks its checkbox) and searches.
     fn find_in_form(app: &mut App, mask: &str, content: Option<&str>) {
@@ -980,44 +901,6 @@ mod tests {
         let p = &app.panels[0];
         assert!(!p.is_virtual() && p.path() == d.join("sub"));
         assert_eq!(p.current().unwrap().name, "b.txt");
-    }
-
-    #[test]
-    fn saved_searches_save_load_and_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = two_panels(dir.path(), dir.path());
-        let file = dir.path().join("searches");
-        app.searches_file = Some(file.clone());
-        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
-        type_keys(&mut app, "*.rs");
-        form_focus(&mut app, F_HIDDEN);
-        key(&mut app, KeyCode::Char(' '));
-        key(&mut app, KeyCode::F(6)); // no name yet
-        assert!(
-            matches!(&app.mode, Mode::FindForm(f) if f.error.as_deref().is_some_and(|e| e.contains("name")))
-        );
-        form_focus(&mut app, F_SAVED);
-        type_keys(&mut app, "rust");
-        key(&mut app, KeyCode::F(6));
-        assert_eq!(cmdline::load_history(&file).unwrap().len(), 1);
-        key(&mut app, KeyCode::Esc);
-        app.last_find = None; // a fresh form
-        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
-        key(&mut app, KeyCode::F(7));
-        let Mode::FindForm(f) = &app.mode else {
-            panic!("no form");
-        };
-        assert_eq!((f.text(F_NAME), f.text(F_SAVED)), ("*.rs", "rust"));
-        assert!(f.checked(F_HIDDEN) && !f.checked(F_FOLLOW));
-        // a click in the list loads it too
-        app.last_find = None;
-        key(&mut app, KeyCode::Esc);
-        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
-        assert_eq!(app.saved_searches().collect::<Vec<_>>(), ["rust"]);
-        app.saved_search_click(0);
-        assert!(matches!(&app.mode, Mode::FindForm(f) if f.text(F_NAME) == "*.rs"));
-        key(&mut app, KeyCode::F(8));
-        assert!(cmdline::load_history(&file).unwrap().is_empty());
     }
 
     #[test]

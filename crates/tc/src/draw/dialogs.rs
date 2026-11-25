@@ -30,8 +30,6 @@ pub(super) enum FormAct {
     Insert(&'static str),
     /// Multi-rename Editor text changed.
     Editor,
-    /// Find files: saved search clicked in the list, loaded into the form.
-    Load(usize),
 }
 pub(super) fn overlays(ctx: &Context, app: &mut App) {
     let mut pressed = None;
@@ -119,7 +117,6 @@ pub(super) fn apply(app: &mut App, act: Option<FormAct>) {
         Some(FormAct::Key(c)) => app.on_key(KeyEvent::new(c, KeyModifiers::NONE)),
         Some(FormAct::Bookmark(c)) => app.bookmark_click(c),
         Some(FormAct::Tab(t)) => app.tab_click(t),
-        Some(FormAct::Load(i)) => app.saved_search_click(i),
         Some(FormAct::Insert(s)) => app.rename_insert(s),
         Some(FormAct::Editor) => app.rename_editor_changed(),
         Some(FormAct::Pick(by, double)) => {

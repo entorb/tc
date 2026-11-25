@@ -60,8 +60,7 @@ pub use sync::{Sync, SyncForm};
 pub use update::{RELEASES, SettingsForm, VERSION};
 pub use widgets::{Filter, FormRow, ListRow, list_rows};
 use widgets::{
-    PresetKind, edit_key, form_checked, form_text, list_nav, paste_line, preset_key,
-    rows_from_line, rows_to_line,
+    edit_key, form_checked, form_text, list_nav, paste_line, rows_from_line, rows_to_line,
 };
 pub use xfer::{FileClip, Job, Xfer};
 use xfer::{delete_question, delete_text};
@@ -268,9 +267,6 @@ pub struct App {
     /// The batch being renamed, and the last one that finished completely (undo, until quit).
     rename_running: Option<RenameBatch>,
     rename_undo: Option<RenameBatch>,
-    /// Saved find forms, one line each (see `FindForm::to_line`), and their file.
-    searches: Vec<String>,
-    searches_file: Option<PathBuf>,
     /// The running transfer pastes a cut: `file_clip` is dropped once it succeeds.
     cut_pending: bool,
     /// Size calculation in a worker thread: directory and its progress (`scanned` = result ready).
@@ -360,8 +356,6 @@ impl App {
             sync_back: None,
             rename_running: None,
             rename_undo: None,
-            searches: Vec::new(),
-            searches_file: None,
             cut_pending: false,
             dir_job: None,
             view_numbers: false,

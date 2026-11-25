@@ -1,12 +1,11 @@
 //! Full-screen tool forms: multi-rename, find files, synchronize. Each has the options on the
 //! left half (a tab bar when they do not fit one page) and what they act on or produce on the
-//! right half; the F-key bar runs them. Keys go through the app.
+//! right half (find files has no right half: full width); the F-key bar runs them. Keys go through the app.
 
 use super::dialogs::{FormAct, apply, form_row};
 use super::{MUTED, TEXT};
-use eframe::egui::{self, Button, Color32, RichText, Sense, TextStyle, Ui, vec2};
-use tc::KeyCode;
-use tc::app::{App, FindForm, FormRow, Mode, RenameForm};
+use eframe::egui::{self, Color32, RichText, TextStyle, Ui, vec2};
+use tc::app::{App, FormRow, Mode, RenameForm};
 use tc::fmt;
 
 /// Title of a half of the window, its optional note on the right, and the rule under both:
@@ -87,26 +86,11 @@ fn info_and_error(ui: &mut Ui, info: &[&str], error: Option<&str>) {
     });
 }
 
-/// A button that sends `code` like its key; the key shows on its right.
-fn key_button(ui: &mut Ui, label: &str, key: &str, code: KeyCode) -> Option<FormAct> {
-    let b = Button::new(label).shortcut_text(key).sense(Sense::CLICK);
-    ui.add(b).clicked().then_some(FormAct::Key(code))
-}
-
-/// Find files: the tabs of options on the left, the saved searches on the right.
+/// Find files: the tab bar, the shown tab's fields, what they take and the error; full width.
 pub(super) fn draw_find_form(ui: &mut Ui, app: &mut App) {
     let Mode::FindForm(form) = &app.mode else {
         return;
     };
-    let act = ui.columns(2, |cols| {
-        let options = find_options(&mut cols[0], app, form);
-        options.or(find_saved(&mut cols[1], app, form))
-    });
-    apply(app, act);
-}
-
-/// The tab bar, the shown tab's fields, what they take and the error.
-fn find_options(ui: &mut Ui, app: &App, form: &FindForm) -> Option<FormAct> {
     let dir = app.panels[app.active].path().display();
     panel_head(ui, "Find files", Some(format!("in {dir}")));
     let tabs = tab_bar(ui, &fmt::FIND_TABS, form.tab, |t| form.tab_changed(t));
@@ -119,47 +103,8 @@ fn find_options(ui: &mut Ui, app: &App, form: &FindForm) -> Option<FormAct> {
             act
         })
         .inner;
-    tabs.or(body)
-}
-
-/// The saved search name, its F6 / F7 / F8 buttons and the list of saved searches.
-fn find_saved(ui: &mut Ui, app: &App, form: &FindForm) -> Option<FormAct> {
-    panel_head(ui, "Saved searches", None);
-    let saved = form.saved_row();
-    let name = field_grid(ui, "find-saved", &form.rows, saved..=saved, form.focus);
-    let buttons = ui
-        .horizontal(|ui| {
-            let save = key_button(ui, "Save", "F6", KeyCode::F(6));
-            let load = key_button(ui, "Load next", "F7", KeyCode::F(7));
-            save.or(load)
-                .or(key_button(ui, "Delete", "F8", KeyCode::F(8)))
-        })
-        .inner;
-    ui.separator();
-    let list = saved_list(ui, app, form.saved_name());
-    name.or(buttons).or(list)
-}
-
-/// The saved searches by name, the one named in the form highlighted; a click loads one.
-fn saved_list(ui: &mut Ui, app: &App, current: &str) -> Option<FormAct> {
-    let mut act = None;
-    egui::ScrollArea::vertical()
-        .id_salt("find-saved-list")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let mut any = false;
-            for (i, name) in app.saved_searches().enumerate() {
-                any = true;
-                if ui.selectable_label(name == current, name).clicked() {
-                    act = Some(FormAct::Load(i));
-                }
-            }
-            if !any {
-                let none = "None yet: type a name above, F6 saves the form under it.";
-                ui.label(RichText::new(none).color(MUTED));
-            }
-        });
-    act
+    let act = tabs.or(body);
+    apply(app, act);
 }
 
 /// Synchronize: the options on the left, the two directories and what comes next on the right.
