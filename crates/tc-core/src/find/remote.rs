@@ -4,7 +4,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use super::{Content, MAX_LINE, MAX_RESULTS, Query};
 use crate::panel::Entry;
-use crate::vfs::Remote;
+use crate::vfs::{Remote, sh_quote};
 
 /// One `find` on the server for `q` under `root` (see [`Query::remote_unsupported`]; content
 /// runs one `grep` per file). Output records: `type size mtime relative-path`, NUL separated,
@@ -171,10 +171,6 @@ pub(super) fn parse_record(root: &str, text: &str) -> Option<Entry> {
     })
 }
 
-/// Single-quoted shell word.
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
 #[cfg(test)]
 mod tests {
     use jiff::{SignedDuration, Timestamp};

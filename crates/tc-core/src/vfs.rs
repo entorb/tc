@@ -54,6 +54,11 @@ pub trait Remote: Send + Sync + fmt::Debug {
     }
 }
 
+/// Single-quoted POSIX shell word: safe for any text in a remote command line.
+pub fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// Remote path from a panel path (`\` from `Path::join` on Windows becomes `/`).
 pub fn rpath(p: &Path) -> String {
     let s = p.to_string_lossy();

@@ -59,7 +59,7 @@ pub fn scan(dir: &Path, p: &Progress) -> Node {
 /// Like [`scan`] on a remote `dir`: one `find` on the server if it can run commands (GNU find),
 /// else a walk with parallel listings, which hides the network latency of each request.
 pub fn scan_remote(r: &dyn Remote, dir: &Path, p: &Progress) -> Node {
-    let quoted = format!("'{}'", vfs::rpath(dir).replace('\'', r"'\''"));
+    let quoted = vfs::sh_quote(&vfs::rpath(dir));
     let cmd = format!(r"find {quoted} -mindepth 1 -printf '%y %s %P\0'");
     let mut found = None;
     // no output at all (no GNU find, empty dir): the walk decides

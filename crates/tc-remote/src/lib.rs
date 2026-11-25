@@ -96,7 +96,7 @@ pub fn ssh_command(url: &str, cmd: &str, dir: &str) -> Result<Command> {
             "commands run only on SFTP connections".into(),
         ));
     }
-    let quoted = format!("'{}'", dir.replace('\'', r"'\''"));
+    let quoted = tc_core::vfs::sh_quote(dir);
     let mut c = Command::new("ssh");
     c.args(["-t", "-p", &url.port.to_string()]);
     if !url.user.is_empty() {
