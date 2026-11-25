@@ -228,6 +228,55 @@ pub(super) fn form_checked(rows: &[FormRow], label: &str) -> bool {
         .any(|r| matches!(r, FormRow::Check(l, true) if *l == label))
 }
 
+/// Rows of tab `t` of a tool form whose tabs hold `sizes[t]` rows each, in row order
+/// (0: a tab without rows, like the multi-rename Editor).
+pub(super) fn tab_range(sizes: &[usize], t: usize) -> std::ops::Range<usize> {
+    let start: usize = sizes[..t].iter().sum();
+    start..start + sizes[t]
+}
+
+/// Tab that holds row `row`; none for a row past the tabs.
+pub(super) fn tab_of(sizes: &[usize], row: usize) -> Option<usize> {
+    (0..sizes.len()).find(|&t| tab_range(sizes, t).contains(&row))
+}
+
+/// Tab keys of the tool forms (`n` tabs): F2.. and Alt+1.. show a tab, Ctrl+PgUp/PgDn step.
+pub(super) fn tab_key(key: KeyEvent, tab: usize, n: usize) -> Option<usize> {
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let t = match key.code {
+        KeyCode::F(f) if !alt && !ctrl && (2..2 + n).contains(&usize::from(f)) => {
+            usize::from(f) - 2
+        }
+        KeyCode::Char(d @ '1'..='9') if alt => d as usize - '1' as usize,
+        KeyCode::PageDown if ctrl => tab + 1,
+        KeyCode::PageUp if ctrl => tab.saturating_sub(1),
+        _ => return None,
+    };
+    Some(t.min(n - 1))
+}
+
+/// Focus `delta` rows on from `focus` inside `r`, skipping `hidden` rows (an end row stops it).
+pub(super) fn step_focus(
+    r: std::ops::Range<usize>,
+    focus: usize,
+    delta: isize,
+    hidden: impl Fn(usize) -> bool,
+) -> usize {
+    if r.is_empty() {
+        return focus;
+    }
+    let (first, last) = (r.start as isize, r.end as isize - 1);
+    let mut f = focus as isize;
+    loop {
+        f = (f + delta).clamp(first, last);
+        let at = f as usize;
+        if !hidden(at) || f == first || f == last {
+            return at;
+        }
+    }
+}
+
 /// Wording of one kind of saved form lines (see [`preset_key`]).
 pub(super) struct PresetKind {
     /// Note when the list is empty.
@@ -240,7 +289,7 @@ pub(super) struct PresetKind {
     pub(super) all: &'static str,
 }
 
-/// F2 saves `line` (`name\t...`) under `name`, F3 returns the line after `name`'s (cycling),
+/// F6 saves `line` (`name\t...`) under `name`, F7 returns the line after `name`'s (cycling),
 /// F8 deletes `name`; the file is written at once. Returns the line to load and the note.
 pub(super) fn preset_key(
     list: &mut Vec<String>,
@@ -252,18 +301,18 @@ pub(super) fn preset_key(
 ) -> (Option<String>, String) {
     let pos = list.iter().position(|l| l.split('\t').next() == Some(name));
     let (load, note) = match (code, pos) {
-        (KeyCode::F(3), _) if list.is_empty() => (None, kind.none.to_owned()),
-        (KeyCode::F(3), _) => {
+        (KeyCode::F(7), _) if list.is_empty() => (None, kind.none.to_owned()),
+        (KeyCode::F(7), _) => {
             let next = list[pos.map_or(0, |i| (i + 1) % list.len())].clone();
             let note = format!("Loaded {}.", next.split('\t').next().unwrap_or_default());
             (Some(next), note)
         }
         _ if name.is_empty() => (None, format!("Type a name in \"{}\" first.", kind.label)),
-        (KeyCode::F(2), Some(i)) => {
+        (KeyCode::F(6), Some(i)) => {
             list[i] = line;
             (None, format!("Saved {name}."))
         }
-        (KeyCode::F(2), None) => {
+        (KeyCode::F(6), None) => {
             list.push(line);
             (None, format!("Saved {name}."))
         }
@@ -274,7 +323,7 @@ pub(super) fn preset_key(
         (_, None) => (None, format!("No {} {name}.", kind.one)),
     };
     if let Some(Err(e)) = file.map(|f| cmdline::save_history(f, list))
-        && code != KeyCode::F(3)
+        && code != KeyCode::F(7)
     {
         return (None, format!("Cannot save {}: {e}", kind.all));
     }
@@ -432,4 +481,35 @@ pub(super) fn list_nav(
     };
     *sel = view.get(pos).copied().unwrap_or(0);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KeyCode, KeyEvent, KeyModifiers, step_focus, tab_key, tab_of, tab_range};
+
+    #[test]
+    fn tabs_split_rows_and_keys_pick_one() {
+        let sizes = [2, 0, 3];
+        assert_eq!(tab_range(&sizes, 1), 2..2);
+        assert_eq!(tab_range(&sizes, 2), 2..5);
+        assert_eq!(tab_of(&sizes, 4), Some(2));
+        assert_eq!(tab_of(&sizes, 5), None);
+        let k = |c, m| tab_key(KeyEvent::new(c, m), 1, 3);
+        assert_eq!(k(KeyCode::F(4), KeyModifiers::NONE), Some(2));
+        assert_eq!(k(KeyCode::F(5), KeyModifiers::NONE), None);
+        assert_eq!(k(KeyCode::Char('1'), KeyModifiers::ALT), Some(0));
+        assert_eq!(k(KeyCode::PageDown, KeyModifiers::CONTROL), Some(2));
+        assert_eq!(k(KeyCode::Char('1'), KeyModifiers::NONE), None);
+    }
+
+    #[test]
+    fn focus_steps_over_hidden_rows_and_stays_inside() {
+        let hidden = |i| i == 3;
+        assert_eq!(step_focus(2..6, 2, 1, hidden), 4);
+        assert_eq!(step_focus(2..6, 4, -1, hidden), 2);
+        assert_eq!(step_focus(2..6, 5, 1, hidden), 5);
+        // a focus outside the range (a row past the tabs) comes back into it
+        assert_eq!(step_focus(0..3, 7, -1, |_| false), 2);
+        assert_eq!(step_focus(0..0, 7, 1, |_| false), 7);
+    }
 }

@@ -53,14 +53,20 @@ pub(super) const SYNC_FOOTER: [(&str, KeyCode, KeyModifiers); 6] = [
     CLOSE,
 ];
 
-pub(super) const FIND_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 6] = [
+/// Find files form: F2-F5 show the tabs, F10 searches, F9 cancels (like multi-rename).
+pub(super) const FIND_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 7] = [
     HELP,
-    ("Enter Start", KeyCode::Enter, KeyModifiers::NONE),
-    f("F2 Save", 2),
-    f("F3 Load", 3),
-    f("F8 Del", 8),
-    CLOSE,
+    f("F2 Name", 2),
+    f("F3 Content", 3),
+    f("F4 Folders", 4),
+    f("F5 Size/Date", 5),
+    f("F9 Cancel", 9),
+    f("F10 Search", 10),
 ];
+
+/// Synchronize form: F10 compares, F9 cancels.
+pub(super) const SYNC_FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] =
+    [HELP, f("F9 Cancel", 9), f("F10 Compare", 10)];
 
 pub(super) const FORM_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
     HELP,
@@ -331,6 +337,8 @@ impl App {
             || matches!(
                 self.mode,
                 Mode::Found(_)
+                    | Mode::FindForm(_)
+                    | Mode::SyncForm(_)
                     | Mode::Sync(_)
                     | Mode::Stats(_)
                     | Mode::Procs(_)
@@ -347,7 +355,8 @@ impl App {
             Mode::Sync(_) => &SYNC_FOOTER,
             Mode::FindForm(_) => &FIND_FORM_FOOTER,
             Mode::MultiRename(_) => &RENAME_FOOTER,
-            Mode::SyncForm(_) | Mode::Props(_) => &FORM_FOOTER,
+            Mode::SyncForm(_) => &SYNC_FORM_FOOTER,
+            Mode::Props(_) => &FORM_FOOTER,
             Mode::Settings(_) => &SETTINGS_FOOTER,
             Mode::Stats(_) => &STATS_FOOTER,
             Mode::Cmd(_) if self.stats.is_some() => &STATS_FOOTER,
@@ -408,7 +417,7 @@ mod tests {
     use super::super::tests::key;
 
     #[test]
-    fn footer_follows_screen_and_f10_closes_forms() {
+    fn footer_follows_screen_and_f9_cancels_tool_forms() {
         let tmp = tempfile::tempdir().unwrap();
         let p = || Panel::open(tmp.path()).unwrap();
         let mut app = App::new(p(), p());
@@ -416,7 +425,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert!(matches!(app.mode, Mode::FindForm(_)));
         assert_eq!(app.footer_keys(), &FIND_FORM_FOOTER);
-        key(&mut app, KeyCode::F(10));
+        key(&mut app, KeyCode::F(9));
         assert!(matches!(app.mode, Mode::Normal));
     }
 

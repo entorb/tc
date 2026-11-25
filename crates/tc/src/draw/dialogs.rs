@@ -3,11 +3,10 @@ use super::widgets::{line_edit, list_button, text_box};
 use super::{ACCENT, MUTED, TEXT, icons, modal};
 use eframe::egui::{
     self, Button, Color32, ComboBox, Context, Label, ModalResponse, Response, RichText, ScrollArea,
-    Sense, Sides, TextStyle, Ui, vec2,
+    Sense, Sides, Ui, vec2,
 };
 use tc::app::{
-    App, BmClick, BookmarkForm, BookmarkRow, FilterForm, FindForm, FormRow, Mode, PropsForm,
-    RenameForm, SettingsForm, SyncForm,
+    App, BmClick, BookmarkForm, BookmarkRow, FilterForm, FormRow, Mode, PropsForm, SettingsForm,
 };
 use tc::fmt::{self, Dialog, dialog, input_dialog, stats_progress};
 use tc::fmt::{ProcInfo, procs_confirm, procs_info};
@@ -31,6 +30,8 @@ pub(super) enum FormAct {
     Insert(&'static str),
     /// Multi-rename Editor text changed.
     Editor,
+    /// Find files: saved search clicked in the list, loaded into the form.
+    Load(usize),
 }
 pub(super) fn overlays(ctx: &Context, app: &mut App) {
     let mut pressed = None;
@@ -49,8 +50,6 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
             (&form.rows, form.focus, form.error.as_deref()),
             Some("OK"),
         ),
-        (None, Mode::FindForm(form)) => show_find_form(ctx, form),
-        (None, Mode::SyncForm(form)) => show_sync_form(ctx, form),
         (None, Mode::Settings(form)) => show_settings(ctx, form),
         (None, Mode::Props(form)) => show_props(ctx, form),
         (None, Mode::BookmarkEdit(form)) => show_bookmark_edit(ctx, form),
@@ -113,13 +112,14 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
 }
 
 /// Runs what the mouse did through the app, like the matching keys.
-fn apply(app: &mut App, act: Option<FormAct>) {
+pub(super) fn apply(app: &mut App, act: Option<FormAct>) {
     match act {
         Some(FormAct::Row(i)) => app.form_click(i),
         Some(FormAct::Choose(i, k)) => app.form_choose(i, k),
         Some(FormAct::Key(c)) => app.on_key(KeyEvent::new(c, KeyModifiers::NONE)),
         Some(FormAct::Bookmark(c)) => app.bookmark_click(c),
-        Some(FormAct::Tab(t)) => app.rename_tab_click(t),
+        Some(FormAct::Tab(t)) => app.tab_click(t),
+        Some(FormAct::Load(i)) => app.saved_search_click(i),
         Some(FormAct::Insert(s)) => app.rename_insert(s),
         Some(FormAct::Editor) => app.rename_editor_changed(),
         Some(FormAct::Pick(by, double)) => {
@@ -321,28 +321,6 @@ fn text_with_keys(ui: &mut Ui, text: &str) -> Option<KeyCode> {
         }
     });
     pressed
-}
-
-/// Find files form: fields and checkboxes, the focused one highlighted; keys go through the app.
-fn show_find_form(ctx: &Context, form: &FindForm) -> Option<FormAct> {
-    let (rows, err) = (&form.rows, form.error.as_deref());
-    show_form(
-        ctx,
-        ("find-form", "Find files"),
-        (rows, form.focus, err),
-        Some("Search"),
-    )
-}
-
-fn show_sync_form(ctx: &Context, form: &SyncForm) -> Option<FormAct> {
-    let title = "Synchronize directories (left <-> right panel)";
-    let (rows, err) = (&form.rows, form.error.as_deref());
-    show_form(
-        ctx,
-        ("sync-form", title),
-        (rows, form.focus, err),
-        Some("Compare"),
-    )
 }
 
 fn show_settings(ctx: &Context, form: &SettingsForm) -> Option<FormAct> {
@@ -557,208 +535,6 @@ fn show_props(ctx: &Context, form: &PropsForm) -> Option<FormAct> {
     }))
 }
 
-/// Multi-rename: the options on the left half, the preview on the right half; the F-key bar
-/// runs it. Keys go through the app.
-pub(super) fn draw_multi_rename(ui: &mut Ui, app: &mut App) {
-    let Mode::MultiRename(form) = &mut app.mode else {
-        return;
-    };
-    form.editor_focused = false;
-    let mut act = None;
-    ui.columns(2, |cols| {
-        act = rename_options(&mut cols[0], form);
-        rename_preview(&mut cols[1], form);
-    });
-    apply(app, act);
-}
-
-/// The options: tabs and fields scroll; the Editor's text box fills the height.
-fn rename_options(ui: &mut Ui, form: &mut RenameForm) -> Option<FormAct> {
-    let mut body = None;
-    ui.vertical(|ui| {
-        panel_head(ui, "Multi-rename", None);
-        body = rename_tabs(ui, form).or_else(|| {
-            // the Editor takes all the height left; the other tabs scroll
-            if form.tab == fmt::RENAME_TABS.len() - 1 {
-                names_editor(ui, form)
-            } else {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| rename_fields(ui, form))
-                    .inner
-            }
-        });
-    });
-    body
-}
-
-/// The Editor: one new name per line, starting from the other tabs' result, filling the height
-/// below the tabs. While it has the keyboard, egui takes the typing (see
-/// `App::rename_editor_focused`).
-fn names_editor(ui: &mut Ui, form: &mut RenameForm) -> Option<FormAct> {
-    ui.label(RichText::new("New names, one per line").strong());
-    names_info(ui);
-    if let Some(e) = &form.error {
-        ui.label(RichText::new(e).color(Color32::LIGHT_RED));
-    }
-    let size = egui::vec2(ui.available_width(), ui.available_height());
-    let out = egui::TextEdit::multiline(&mut form.editor)
-        .font(egui::FontId::monospace(14.0))
-        .min_size(size)
-        .desired_width(f32::INFINITY)
-        .show(ui);
-    let r = out.response.response;
-    form.editor_focused = r.has_focus();
-    if !r.has_focus() && ui.ctx().memory(|m| m.focused().is_none()) {
-        r.request_focus();
-    }
-    r.changed().then_some(FormAct::Editor)
-}
-
-/// One selectable title per tab, with a dot on a tab whose options differ from the defaults.
-fn rename_tabs(ui: &mut Ui, form: &RenameForm) -> Option<FormAct> {
-    let mut act = None;
-    ui.horizontal(|ui| {
-        for (t, title) in fmt::RENAME_TABS.iter().enumerate() {
-            let text = if form.changed[t] {
-                format!("{title} •")
-            } else {
-                title.to_string()
-            };
-            if ui.selectable_label(form.tab == t, text).clicked() {
-                act = Some(FormAct::Tab(t));
-            }
-        }
-    });
-    ui.separator();
-    act
-}
-
-/// The shown tab's fields as label | widget rows, then what the tab adds: the placeholder
-/// examples, the placeholder buttons (Name) or the names editor (Names); the error under them.
-fn rename_fields(ui: &mut Ui, form: &RenameForm) -> Option<FormAct> {
-    let mut act = None;
-    egui::Grid::new("rename-fields")
-        .num_columns(2)
-        .spacing(vec2(12.0, 6.0))
-        .show(ui, |ui| {
-            for i in form.shown_rows().filter(|&i| !form.hidden(i)) {
-                let row = &form.rows[i];
-                let shown = fmt::rename_shown(row.label());
-                if let Some(a) = form_row(ui, i, row, i == form.focus, shown) {
-                    act = Some(a);
-                }
-                ui.end_row();
-            }
-        });
-    let extra = match form.tab {
-        0 => rename_chips(ui),
-        2 => {
-            placeholder_examples(ui);
-            None
-        }
-        _ => None,
-    };
-    if let Some(e) = &form.error {
-        ui.label(RichText::new(e).color(Color32::LIGHT_RED));
-    }
-    act.or(extra)
-}
-
-/// Buttons that insert a placeholder into the focused field; the hover text says what it is.
-fn rename_chips(ui: &mut Ui) -> Option<FormAct> {
-    let mut act = None;
-    ui.horizontal(|ui| {
-        ui.label("Insert:");
-        for (chip, tip) in fmt::RENAME_CHIPS {
-            if ui.button(chip).on_hover_text(tip).clicked() {
-                act = Some(FormAct::Insert(chip));
-            }
-        }
-    });
-    act
-}
-
-/// Placeholder mode is the hard one: show what the letters do, with examples, always visible.
-fn placeholder_examples(ui: &mut Ui) {
-    egui::Grid::new("rename-placeholder")
-        .num_columns(3)
-        .spacing(vec2(16.0, 4.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new("Search").color(MUTED));
-            ui.label(RichText::new("Replace").color(MUTED));
-            ui.label(RichText::new("Example").color(MUTED));
-            ui.end_row();
-            for (search, replace, example) in fmt::RENAME_PLACEHOLDER_EXAMPLES {
-                ui.label(RichText::new(search).monospace());
-                ui.label(RichText::new(replace).monospace());
-                ui.label(example);
-                ui.end_row();
-            }
-        });
-}
-
-/// What the Editor is, above its text box.
-fn names_info(ui: &mut Ui) {
-    ui.label("The Editor starts from the result of the other tabs.");
-    ui.label(
-        RichText::new(
-            "Edit the names in the box. A setting above starts the Editor over (F7 restores).",
-        )
-        .color(MUTED),
-    );
-}
-
-/// Title of a half of the window, its optional note on the right, and the rule under both:
-/// the same on the left and right, so the two halves line up.
-fn panel_head(ui: &mut Ui, title: &str, note: Option<String>) {
-    ui.horizontal(|ui| {
-        ui.heading(title);
-        if let Some(note) = note {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(note);
-            });
-        }
-    });
-    ui.separator();
-}
-
-/// Count of changes, then the old -> new table of the items that fit.
-fn rename_preview(ui: &mut Ui, form: &mut RenameForm) {
-    panel_head(
-        ui,
-        "Preview",
-        Some(format!("{} of {} change", form.count, form.preview.len())),
-    );
-    let row_h = ui.text_style_height(&TextStyle::Body) + ui.spacing().item_spacing.y;
-    let fit = (ui.available_height() / row_h).max(1.0) as usize;
-    form.page = fit; // the PgUp / PgDn step
-    egui::Grid::new("rename-preview")
-        .num_columns(3)
-        .spacing(vec2(8.0, 2.0))
-        .show(ui, |ui| {
-            for (old, new) in form.preview.iter().skip(form.scroll).take(fit) {
-                rename_preview_row(ui, old, new);
-                ui.end_row();
-            }
-        });
-}
-
-/// One preview row: old name, arrow (`=` unchanged, `!` a problem), new name.
-fn rename_preview_row(ui: &mut Ui, old: &str, new: &Result<String, String>) {
-    let cell = fmt::rename_cell(old, new);
-    let same = matches!(cell, fmt::RenameCell::Same);
-    let (arrow, text, color) = match cell {
-        fmt::RenameCell::Same => ("=", "unchanged", MUTED),
-        fmt::RenameCell::New(n) => ("->", n, TEXT),
-        fmt::RenameCell::Blank => ("", "", TEXT),
-        fmt::RenameCell::Bad(e) => ("!", e, Color32::LIGHT_RED),
-    };
-    ui.label(RichText::new(old).color(if same { MUTED } else { TEXT }));
-    ui.label(RichText::new(arrow).color(MUTED));
-    ui.label(RichText::new(text).color(color));
-}
-
 /// Form as a label | widget grid, the focused row's label highlighted, and the error under it.
 /// Returns what the mouse did (a focused text field keeps its own clicks).
 fn form_rows(ui: &mut Ui, rows: &[FormRow], focus: usize, error: Option<&str>) -> Option<FormAct> {
@@ -782,7 +558,13 @@ fn form_rows(ui: &mut Ui, rows: &[FormRow], focus: usize, error: Option<&str>) -
 
 /// One grid row: a text field, checkbox or dropdown drawn by egui, its state owned by the app;
 /// `shown` is the label text (the row's key is `row.label()`).
-fn form_row(ui: &mut Ui, i: usize, row: &FormRow, focused: bool, shown: &str) -> Option<FormAct> {
+pub(super) fn form_row(
+    ui: &mut Ui,
+    i: usize,
+    row: &FormRow,
+    focused: bool,
+    shown: &str,
+) -> Option<FormAct> {
     let color = if focused { ACCENT } else { TEXT };
     let label = |t: &str| RichText::new(t.to_owned()).color(color);
     let click = |ui: &mut Ui, t: RichText| ui.add(Label::new(t).sense(Sense::click())).clicked();

@@ -323,14 +323,15 @@ impl App {
         SyncForm { hist: i, ..form }
     }
 
+    /// Sync form: Enter / F10 compares, Esc / F9 cancel.
     pub(super) fn sync_form_key(&mut self, key: KeyEvent, mut form: SyncForm) {
         let last = form.rows.len() - 1;
         match key.code {
-            KeyCode::Esc | KeyCode::F(10) => {
+            KeyCode::Esc | KeyCode::F(9) => {
                 self.last_sync = Some(form);
                 return;
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::F(10) => {
                 self.note = self.remember("sync-forms", &rows_to_line(&form.rows, ""));
                 self.last_sync = Some(form.clone());
                 let sides = [self.panels[0].side(), self.panels[1].side()];

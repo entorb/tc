@@ -227,6 +227,10 @@ Enter           synchronize the shown rows: y starts,
 Ctrl+R          compare again
 Esc / q / F10   close (while comparing: cancel)";
 pub const HELP_SYNC_FORM: &str = "\
+== About ==
+Full screen: the options on the left, the two panel
+directories and what the result shows on the right.
+
 == Fields ==
 Tab             next field
 Shift+Tab       previous field
@@ -248,8 +252,8 @@ Asymmetric: the right side becomes a copy of the left
 (extra right files are deleted).
 
 == Run ==
-Enter           compare the two panel directories
-Esc / F10       close";
+Enter / F10     compare the two panel directories
+Esc / F9        cancel (the form is kept for next time)";
 pub const HELP_SETTINGS: &str = "\
 == Fields ==
 Up/Down / Tab   previous / next field
@@ -293,26 +297,32 @@ Enter           apply; stops at the first error, what was done
                 stays done; Esc cancels while it runs
 Esc / F10       close";
 pub const HELP_FIND_FORM: &str = "\
+== Tabs ==
+F2 F3 F4 F5     show tab 1 to 4 (Name, Content, Folders,
+                Size/Date; Alt+1 .. Alt+4 too)
+Ctrl+PgUp/PgDn  previous / next tab
+Click           a tab title, or a field of the tab
+A tab title with a dot has a field filled or a box ticked.
+
 == Fields ==
-Tab             next field
+Tab             next field (the tab follows)
 Shift+Tab       previous field
-Up/Down         previous / next field
+Up/Down         previous / next field of the shown tab
 Space           toggle checkbox
-Click           focus a field; toggles a checkbox, cycles a choice
 Left/Right      move in text
 Ctrl+Left/Right word left / right (Alt too: Mac Option)
 Ctrl+Bksp/Del   delete word left / right (Alt too)
 Alt+Up/Down     earlier / later searches (history)
 
-== Name ==
+== Name tab ==
 Name (masks): `*` any run, `?` one character, several
 masks separated by comma or space; empty = any name.
 Name is a regex: the field is a regular expression
-instead (local panels only). Exclude files: masks of
-files to leave out. Case-sensitive: names match exactly.
-Extensions: comma separated, with or without dot.
+instead (local panels only). Case-sensitive: names match
+exactly. Extensions: comma separated, with or without
+dot. Exclude files: masks of files to leave out.
 
-== Content ==
+== Content tab ==
 Typing in Content turns on Search file contents.
 Plain text, `*` matches any run within a line. Content is
 a regex uses a regular expression, Whole words, Not
@@ -320,23 +330,26 @@ containing (files without the text), List every match
 (one result per line). No capital letter = ignore case
 unless Content case-sensitive is on.
 
-== Limits ==
+== Folders tab ==
 Exclude dirs: names or paths with `/` below the start
 directory, comma separated. Skip hidden: dot names.
 Use .gitignore (local only). Follow symlinks. Max depth:
 1 = only this directory.
+
+== Size/Date tab ==
 Min / Max size: number with K, M, G or T (1024 steps),
 e.g. 10k, 2 MB. Modified after / before: YYYY-MM-DD.
 Not older than: 30m, 12h, 7d, 2w (bare number = days).
 
-== Saved searches ==
-F2              save the form under the name in \"Saved search\"
-F3              load the next saved search
+== Saved searches (right) ==
+F6              save the form under the name in \"Saved search\"
+F7              load the next saved search
 F8              delete the saved search of that name
+Click           a saved search in the list loads it
 
 == Run ==
-Enter           start the search
-Esc / F10       close (the form is kept for next time)";
+Enter / F10     start the search
+Esc / F9        cancel (the form is kept for next time)";
 pub const HELP_FOUND: &str = "\
 == Move ==
 Up/Down         move cursor

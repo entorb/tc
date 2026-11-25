@@ -642,6 +642,31 @@ pub fn sync_footer(s: &Sync) -> String {
 /// Tab titles of the multi-rename form (rows per tab: `app::multi_rename::TAB_ROWS`).
 pub const RENAME_TABS: [&str; 5] = ["Name", "Replace", "Placeholder", "Clean up", "Editor"];
 
+/// Find files tab titles (rows: `FIND_TAB_ROWS`); same names as their F-keys in the footer.
+pub const FIND_TABS: [&str; 4] = ["Name", "Content", "Folders", "Size/Date"];
+
+/// Find files: what each tab's fields take, shown under them.
+pub const FIND_TAB_INFO: [&str; 4] = [
+    "Masks: * any run, ? one character; several separated by comma or space; empty = any \
+     name. Extensions: comma separated, with or without dot. Exclude files: masks to leave out.",
+    "Typing text turns content search on. Plain text: * matches any run within a line. \
+     No capital letter = ignore case, unless case-sensitive is on.",
+    "Exclude dirs: names, or paths with / below the start directory, comma separated. \
+     Skip hidden: dot names. Max depth: 1 = only this directory.",
+    "Sizes: a number with K, M, G or T (1024 steps), e.g. 10k, 2 MB. Dates: YYYY-MM-DD. \
+     Not older than: 30m, 12h, 7d, 2w (a bare number = days).",
+];
+
+/// Synchronize form: what the compare result shows, next to the options.
+pub const SYNC_INFO: [&str; 4] = [
+    "The result lists every name that differs: -> copy left to right, <- right to left, \
+     = equal, != differs without a direction.",
+    "There, Left / Right set a row's direction, l / r / b delete, Space does nothing with it, \
+     * reverses all shown rows, c compares a file pair.",
+    "> = ! < show or hide those rows, / filters by path.",
+    "Enter synchronizes the shown rows after a confirm: nothing changes before.",
+];
+
 /// Name-tab buttons (placeholder, hover text): each inserts into the focused field.
 pub const RENAME_CHIPS: [(&str, &str); 6] = [
     ("[N]", "name without the extension"),

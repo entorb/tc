@@ -1,5 +1,6 @@
 //! Multi-rename (Ctrl+M) form, names from the editor, undo; F2 / Shift+F6 rename.
 
+use super::widgets::{step_focus, tab_key, tab_of, tab_range};
 use super::{App, FormRow, Mode, Op, READ_ONLY, form_checked, form_text, paste_line, rows_to_line};
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::ffi::OsString;
@@ -101,12 +102,6 @@ pub(super) fn rename_rows() -> Vec<FormRow> {
         text(R_ADD, ""),
         FormRow::Choice(R_CASE, &CASE_NAMES, 0),
     ]
-}
-
-/// Flat row indexes of tab `t`.
-fn tab_range(t: usize) -> std::ops::Range<usize> {
-    let start: usize = TAB_ROWS[..t].iter().sum();
-    start..start + TAB_ROWS[t]
 }
 
 fn row_differs(a: &FormRow, b: &FormRow) -> bool {
@@ -218,7 +213,7 @@ impl RenameForm {
             .count();
         let defaults = rename_rows();
         self.changed = std::array::from_fn(|t| {
-            let r = tab_range(t);
+            let r = tab_range(&TAB_ROWS, t);
             self.rows[r.clone()]
                 .iter()
                 .zip(&defaults[r])
@@ -253,7 +248,7 @@ impl RenameForm {
 
     /// Flat row indexes of the shown tab.
     pub fn shown_rows(&self) -> std::ops::Range<usize> {
-        tab_range(self.tab)
+        tab_range(&TAB_ROWS, self.tab)
     }
 
     /// Show tab `t` and focus its first row.
@@ -261,12 +256,12 @@ impl RenameForm {
         self.tab = t.min(TAB_ROWS.len() - 1);
         // keys after the switch go to the form until the drawing focuses the editor again
         self.editor_focused = false;
-        self.focus = tab_range(self.tab).start;
+        self.focus = tab_range(&TAB_ROWS, self.tab).start;
     }
 
     /// Focus moved (Tab, click): the tab follows it.
     pub(super) fn follow_focus(&mut self) {
-        if let Some(t) = (0..TAB_ROWS.len()).find(|&t| tab_range(t).contains(&self.focus)) {
+        if let Some(t) = tab_of(&TAB_ROWS, self.focus) {
             self.tab = t;
         }
     }
@@ -279,36 +274,13 @@ impl RenameForm {
 
     /// Up / Down: move inside the shown tab, over the rows that are shown.
     pub(super) fn step_in_tab(&mut self, delta: isize) {
-        let r = tab_range(self.tab);
-        if r.is_empty() {
-            return;
-        }
-        let mut f = self.focus as isize;
-        loop {
-            f = (f + delta).clamp(r.start as isize, r.end as isize - 1);
-            let at = f as usize;
-            if !self.hidden(at) || at == r.start || at == r.end - 1 {
-                break;
-            }
-        }
-        self.focus = f as usize;
+        self.focus = step_focus(self.shown_rows(), self.focus, delta, |i| self.hidden(i));
     }
 
     /// Tab / Shift+Tab: the next row that is shown (`forward` or back), staying in the form.
     pub(super) fn next_visible(&mut self, forward: bool) {
-        let last = self.rows.len() - 1;
-        let mut f = self.focus;
-        loop {
-            f = if forward {
-                (f + 1).min(last)
-            } else {
-                f.saturating_sub(1)
-            };
-            if !self.hidden(f) || f == 0 || f == last {
-                break;
-            }
-        }
-        self.focus = f;
+        let delta = if forward { 1 } else { -1 };
+        self.focus = step_focus(0..self.rows.len(), self.focus, delta, |i| self.hidden(i));
     }
 
     /// Renames to run, or why not.
@@ -449,14 +421,15 @@ impl App {
 
     pub(super) fn multi_rename_key(&mut self, key: KeyEvent, mut form: RenameForm) {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(t) = tab_key(key, form.tab, TAB_ROWS.len()) {
+            form.goto_tab(t);
+            self.mode = Mode::MultiRename(form);
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::F(9) => return,
             // F10 renames and closes (the form stays open on a problem)
             KeyCode::Enter | KeyCode::F(10) => return self.multi_rename_run(form),
-            KeyCode::Char(d @ '1'..='5') if alt => form.goto_tab(d as usize - '1' as usize),
-            KeyCode::PageDown if ctrl => form.goto_tab(form.tab + 1),
-            KeyCode::PageUp if ctrl => form.goto_tab(form.tab.saturating_sub(1)),
             KeyCode::Up | KeyCode::Down if alt => {
                 let len = self.rename_history.len();
                 form.hist = match key.code {
@@ -466,7 +439,6 @@ impl App {
                 form.rows = self.rename_hist(form.hist);
                 form.settings_changed();
             }
-            KeyCode::F(n @ 2..=6) => form.goto_tab(n as usize - 2),
             KeyCode::F(7) => form.restore_lost(),
             KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.rename_undo_run(form);
@@ -562,9 +534,11 @@ impl App {
     }
 
     /// Click on a tab title.
-    pub fn rename_tab_click(&mut self, tab: usize) {
-        if let Mode::MultiRename(form) = &mut self.mode {
-            form.goto_tab(tab);
+    pub fn tab_click(&mut self, tab: usize) {
+        match &mut self.mode {
+            Mode::MultiRename(form) => form.goto_tab(tab),
+            Mode::FindForm(form) => form.goto_tab(tab),
+            _ => {}
         }
     }
 
