@@ -46,9 +46,9 @@ Adding features of
 - Copy `F5`, move `F6`, delete `F8` run in a worker with progress and ETA, supports SSH
 - Symlinks and hard links via in the `F9` menu
 
-### File Stats (`ncdu`) `CTRL+SPACE`
+### Dir Size (`ncdu`) `CTRL+SPACE`
 
-![File Stats](screenshots/ncdu.png)
+![Dir Size](screenshots/ncdu.png)
 
 - locate biggest files and directories
 - table and cluster map
@@ -76,9 +76,9 @@ Adding features of
 - names or regex, content, size, date, `.gitignore`; options in tabs
 - feed results as panel
 
-### Synchronize directories `CTRL+E`
+### Sync Dirs `CTRL+E`
 
-![Synchronize](screenshots/sync.png)
+![Sync Dirs](screenshots/sync.png)
 
 - lists the files that differ, at once; top level only (no subdirectories)
 - one way: left -> right or right -> left, optionally mirrored (extras on the target deleted)

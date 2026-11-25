@@ -32,7 +32,7 @@ Each of these shipped as a bug once.
 - Windows: `fs::rename` refuses to replace a read-only file (git objects); overwrite via `ops::rename_over`. File-op tests run on all three OSes in CI: no `#[cfg(unix)]` on a test unless the API is Unix-only.
 - `#[cfg(unix)]` on a `use` must match every use of the name: an unconditional call needs an unconditional import (`props.rs` `step_key` broke the Windows build), a unix-only use needs the gated one (else unused-import warning). Linux `cargo check` hides both; CI runs Windows.
 - Windows: pass shell commands raw to `cmd /C` (no Rust arg quoting).
-- Read state (cursor name, selection) before replacing the data it points into (File Stats rescan bug).
+- Read state (cursor name, selection) before replacing the data it points into (Dir Size rescan bug).
 - Opening a FIFO blocks forever, sockets fail: read local file content through `ops::open_regular`; copies skip specials (`ops/copy.rs` `is_special`).
 
 ## Reference Code
@@ -40,7 +40,7 @@ Each of these shipped as a bug once.
 `templates/` holds cloned reference repos (git-ignored, not scanned). Never edit them.
 
 - `mc` (C, GPL-3), `doublecmd` (Pascal, GPL-2), `krusader` (C++/Qt, GPL-2+): UX, behavior, edge cases (encodings, VFS, SSH/FTP, panels). Re-implement idiomatically; do not transliterate. Ported code keeps license attribution.
-- `yazi`, `btop`, `ncdu`: UX references for panels, processes, File Stats. `templates/FEATURES-*.md` summarize each.
+- `yazi`, `btop`, `ncdu`: UX references for panels, processes, Dir Size. `templates/FEATURES-*.md` summarize each.
 - `rea`: template for agent guidelines and repo tooling only.
 
 ## Tools

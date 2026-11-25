@@ -37,7 +37,7 @@ For every review:
   - check `templates/FEATURES-*.md` first, then code of templates/mc, doublecmd, krusader, yazi (use codegraph) if they have a similar feature
   - suggest harmonisations of feature UIs to ensure consistency across app (F10 close, F1 help, footer keys, F9 menu entry, etc.)
     - editor/viewer
-    - File Stats (ncdu)
+    - Dir Size (ncdu)
     - Processes (top)
     - multi-rename
     - search file

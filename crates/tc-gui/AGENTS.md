@@ -10,7 +10,7 @@ The app, binary `tc`: library `lib.rs` (`app`, `fmt`: state, keys, dialogs, help
 - Items shared across modules are `pub(super)` and imported in `app.rs`; siblings use `super::Name`.
 - Reusable egui pieces (text field, list row, table cell, click table) live in `draw/widgets.rs`, mirroring `app/widgets.rs`: check there before writing a helper; a helper a second screen needs moves there. Dialog pieces returning `FormAct` (`title_bar`, `ok_cancel`, `list_rows`) stay in `draw/dialogs.rs`.
 - Full-screen tool forms live in `draw/tools.rs` (`panel_head`, `tab_bar`, `field_grid`, `info_and_error`): multi-rename (options left, preview right; F2.. tabs, F9 cancel, F10 run), find files (tabs, full width; F10 searches). Sync is one screen (`draw/lists.rs` `draw_sync`): opening compares at once, `sync_options` checkboxes on top (always have the keys), differing files below; F5 / F6 sync one way, Esc / F10 close. App side: `app/widgets.rs` `tab_range` / `tab_of` / `tab_key` / `step_focus`. A new tool form reuses both.
-- Tool screens (File Stats, Find form and results, Sync, Processes, Multi-rename: `App::sub_screen`) own the window: no menu bar or toolbar, F-key bar at the bottom. Toolbar disabled in dialogs and prompts; icons come from one loaded emoji font.
+- Tool screens (Dir Size, Find form and results, Sync, Processes, Multi-rename: `App::sub_screen`) own the window: no menu bar or toolbar, F-key bar at the bottom. Toolbar disabled in dialogs and prompts; icons come from one loaded emoji font.
 
 ## Pitfalls
 
