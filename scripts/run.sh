@@ -7,6 +7,6 @@ if [ -d "$root/target" ]; then
   find "$root/target" -type f -mtime +7 -delete
   find "$root/target" -mindepth 1 -type d -empty -delete
 fi
-cargo build --profile fast --manifest-path "$root/Cargo.toml" -p tc
+cargo build --profile fast --manifest-path "$root/Cargo.toml" -p tc-gui
 cp "$root/target/fast/tc" ~/bin/
 exec "$root/target/fast/tc" "$@"

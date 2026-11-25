@@ -7,14 +7,15 @@
 # tc opens in the caller's directory with the user's config; window 1280x800 (TC_SHOT_SIZE=WxH to change).
 set -e
 root="$(dirname "$0")/.."
-bin=$(cargo build --manifest-path "$root/Cargo.toml" -p tc --message-format=json 2>/dev/null |
+bin=$(cargo build --manifest-path "$root/Cargo.toml" -p tc-gui --message-format=json 2>/dev/null |
   grep -o '"executable":"[^"]*/tc"' | cut -d'"' -f4)
 [ -x "$bin" ] || {
-  echo "build failed: cargo build -p tc" >&2
+  echo "build failed: cargo build -p tc-gui" >&2
   exit 1
 }
 TC_SHOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export TC_SHOT_BIN="$bin" TC_SHOT_DIR
+export TC_SHOT_SIZE
 # shellcheck disable=SC2016 # the inner script expands its variables inside Xvfb
 exec xvfb-run -a -s "-screen 0 ${TC_SHOT_SIZE:-1280x800}x24" sh -c '
   LIBGL_ALWAYS_SOFTWARE=1 "$TC_SHOT_BIN" >/dev/null 2>&1 &
@@ -29,6 +30,10 @@ exec xvfb-run -a -s "-screen 0 ${TC_SHOT_SIZE:-1280x800}x24" sh -c '
   sleep 1
   # no window manager: focus by hand so keys reach tc
   xdotool windowfocus "$w"
+  # no window manager: fit tc (opens at 1280x800) to the screen
+  size=${TC_SHOT_SIZE:-1280x800}
+  xdotool windowsize "$w" "${size%x*}" "${size#*x}"
+  sleep 0.5
   for step in "$@"; do
     case $step in
       "shot "*) import -window root "${step#shot }" ;;
