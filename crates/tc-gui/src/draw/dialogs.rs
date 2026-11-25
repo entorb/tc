@@ -6,7 +6,8 @@ use eframe::egui::{
     Sense, Sides, Ui, vec2,
 };
 use tc_gui::app::{
-    App, BmClick, BookmarkForm, BookmarkRow, FilterForm, FormRow, Mode, PropsForm, SettingsForm,
+    App, BmClick, BookmarkForm, BookmarkRow, ConnForm, FilterForm, FormRow, Mode, PropsForm,
+    SettingsForm,
 };
 use tc_gui::fmt::{self, Dialog, dialog, input_dialog, ncdu_progress};
 use tc_gui::fmt::{ProcInfo, top_confirm, top_info};
@@ -52,6 +53,7 @@ pub(super) fn overlays(ctx: &Context, app: &mut App) {
         (None, Mode::Props(form)) => show_props(ctx, form),
         (None, Mode::BookmarkEdit(form)) => show_bookmark_edit(ctx, form),
         (None, Mode::Filter(form)) => show_filter(ctx, form),
+        (None, Mode::ConnEdit(form)) => show_conn_form(ctx, form),
         (None, Mode::Top(p)) => match (&p.draft, top_info(p)) {
             (Some(d), _) => show_form(
                 ctx,
@@ -472,6 +474,25 @@ fn ok_cancel_buttons(ui: &mut Ui, ok: &str) -> Option<FormAct> {
         }
     })
     .inner
+}
+
+/// Connection form: the fields of the selected type, then what Enter saves and the error.
+fn show_conn_form(ctx: &Context, form: &ConnForm) -> Option<FormAct> {
+    or_outside(modal("conn-form").show(ctx, |ui| {
+        ui.set_width(560.0);
+        let x = title_bar(ui, "Connection");
+        let shown = (0..form.rows.len()).filter(|&i| !form.hidden(i));
+        let mut act = x.or(field_grid(ui, "conn-form", &form.rows, shown, form.focus));
+        if form.scheme().is_container() && ui.button("Pick a running container (F2)").clicked() {
+            act = Some(FormAct::Key(KeyCode::F(2)));
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new(form.hint()).color(MUTED));
+        if let Some(e) = &form.error {
+            ui.label(RichText::new(e).color(Color32::LIGHT_RED));
+        }
+        act.or(ok_cancel(ui, "Save"))
+    }))
 }
 
 /// Multi-rename over the whole window: form, then as many old -> new rows as fit; keys go through the app.

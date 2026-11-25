@@ -200,31 +200,52 @@ fn bookmarks_dialog(app: &App, sel: usize) -> Option<Dialog<'_>> {
         &app.list_filter,
         "(empty, Insert or Ctrl+D adds the current directory)",
     )?;
-    if let Dialog::List { rows, buttons, .. } = &mut d {
-        let add = app.can_bookmark();
+    edit_buttons(
+        &mut d,
+        (app.can_bookmark(), false),
+        [
+            "Add the current directory (Insert)",
+            "Delete the selected bookmark (Delete)",
+            "Edit all: order, alias, path, add, delete (F4)",
+        ],
+    );
+    Some(d)
+}
+
+/// Saved connections with Add, Delete and Edit (the selected one) buttons.
+fn connections_dialog(app: &App, sel: usize) -> Option<Dialog<'_>> {
+    let mut d = list_dialog(
+        ("Connections", &app.connections, sel),
+        &app.list_filter,
+        "(empty, Insert or ✚ adds one)",
+    )?;
+    edit_buttons(
+        &mut d,
+        (true, true),
+        [
+            "Add a connection: SFTP, FTP, containers (Insert)",
+            "Delete the selected connection (Delete)",
+            "Edit the selected connection (F4)",
+        ],
+    );
+    Some(d)
+}
+
+/// ✚ / ➖ / Edit… under an editable list; `tips` in that order. Delete needs a row, Edit
+/// too when `edit_row` (it edits the selected one).
+fn edit_buttons(
+    d: &mut Dialog,
+    (add, edit_row): (bool, bool),
+    [add_tip, del_tip, edit_tip]: [&'static str; 3],
+) {
+    if let Dialog::List { rows, buttons, .. } = d {
         let any = !rows.is_empty();
         buttons.extend([
-            (
-                "✚",
-                "Add the current directory (Insert)",
-                KeyCode::Insert,
-                add,
-            ),
-            (
-                "➖",
-                "Delete the selected bookmark (Delete)",
-                KeyCode::Delete,
-                any,
-            ),
-            (
-                "Edit…",
-                "Edit all: order, alias, path, add, delete (F4)",
-                KeyCode::F(4),
-                true,
-            ),
+            ("✚", add_tip, KeyCode::Insert, add),
+            ("➖", del_tip, KeyCode::Delete, any),
+            ("Edit…", edit_tip, KeyCode::F(4), any || !edit_row),
         ]);
     }
-    Some(d)
 }
 
 fn text<'a>(title: &'a str, text: String) -> Option<Dialog<'a>> {
@@ -281,17 +302,17 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
         Mode::DirHistory(rows, sel) => {
             list_dialog(("Directory history", rows, *sel), &Filter::default(), "")
         }
-        Mode::Connections(sel) => list_dialog(
-            ("Connections", &app.connections, *sel),
-            &app.list_filter,
-            "(empty, Insert adds one)",
-        ),
-        Mode::ConnEdit(_, l) => edit(
-            "Connection",
-            "sftp://user@host[:port]/dir, ftp://..., ftps://...\n(no passwords, they are asked on connect)",
-            l,
-            "[Enter] Save   [Esc] Cancel",
-        ),
+        Mode::Connections(sel) => connections_dialog(app, *sel),
+        Mode::ConnPick(p) => match &p.rows {
+            None => text(
+                "Running containers",
+                format!(
+                    "Listing {} containers ...\n\n[Esc] Cancel",
+                    p.form.type_name()
+                ),
+            ),
+            Some(rows) => list_dialog(("Running containers", rows, p.sel), &app.list_filter, ""),
+        },
         Mode::Connecting(c) => match &c.ask {
             Some((Prompt::HostKey(t), _)) => text(
                 "Host key",

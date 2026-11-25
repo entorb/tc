@@ -2,7 +2,7 @@
 //! `<cli> exec <target> sh -c <script>`, so the container needs a POSIX `sh`, `find` and `stat`
 //! (GNU or busybox).
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{ErrorKind, Read, Write};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, SystemTime};
@@ -82,26 +82,11 @@ impl Container {
     }
 
     fn spawn_err(&self, e: &std::io::Error) -> Error {
-        let prog = self.prog.to_string_lossy();
-        if e.kind() == ErrorKind::NotFound {
-            Error::Remote(format!("{prog} not found in PATH"))
-        } else {
-            Error::Remote(format!("{prog}: {e}"))
-        }
+        spawn_err(&self.prog, e)
     }
 
     fn failed(&self, out: &Output) -> Result<()> {
-        if out.status.success() {
-            return Ok(());
-        }
-        let msg = String::from_utf8_lossy(&out.stderr);
-        let msg = msg.trim();
-        let msg = if msg.is_empty() {
-            out.status.to_string()
-        } else {
-            msg.to_owned()
-        };
-        Err(Error::Remote(format!("{}: {msg}", self.base)))
+        failed(&self.base, out)
     }
 
     /// Run `script`, return its stdout; a non-zero exit is an error with the stderr text.
@@ -133,6 +118,120 @@ impl Container {
                 e
             }))
     }
+}
+
+fn spawn_err(prog: &OsStr, e: &std::io::Error) -> Error {
+    let prog = prog.to_string_lossy();
+    if e.kind() == ErrorKind::NotFound {
+        Error::Remote(format!("{prog} not found in PATH"))
+    } else {
+        Error::Remote(format!("{prog}: {e}"))
+    }
+}
+
+/// A non-zero exit as an error with the stderr text, prefixed by `what`.
+fn failed(what: &str, out: &Output) -> Result<()> {
+    if out.status.success() {
+        return Ok(());
+    }
+    let msg = String::from_utf8_lossy(&out.stderr);
+    let msg = msg.trim();
+    let msg = if msg.is_empty() {
+        out.status.to_string()
+    } else {
+        msg.to_owned()
+    };
+    Err(Error::Remote(format!("{what}: {msg}")))
+}
+
+/// A running container the connection form offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    /// Host part of the URL: container name, or `namespace/pod`.
+    pub host: String,
+    /// User part: the container of a pod with several, else empty.
+    pub user: String,
+    /// List row: name, image and status, or pod and container.
+    pub label: String,
+}
+
+/// Rows shown at most; a bigger cluster is filtered by typing a name instead.
+const PICK_MAX: usize = 10_000;
+
+/// Running containers of `scheme` (Docker, Podman), or containers of running pods in all
+/// namespaces of the current `kubectl` context.
+pub fn running(scheme: Scheme) -> Result<Vec<Pick>> {
+    const PS: [&str; 3] = ["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"];
+    const PODS: [&str; 7] = [
+        "get",
+        "pods",
+        "-A",
+        "--field-selector=status.phase=Running",
+        "--no-headers",
+        "-o",
+        "custom-columns=NS:.metadata.namespace,POD:.metadata.name,CT:.spec.containers[*].name",
+    ];
+    let (prog, args): (&str, &[&str]) = match scheme {
+        Scheme::Kube => ("kubectl", &PODS),
+        Scheme::Podman => ("podman", &PS),
+        _ => ("docker", &PS),
+    };
+    let mut c = Command::new(prog);
+    c.args(args).stdin(Stdio::null());
+    no_window(&mut c);
+    let out = c.output().map_err(|e| spawn_err(prog.as_ref(), &e))?;
+    failed(prog, &out)?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut picks = if scheme == Scheme::Kube {
+        parse_pods(&text)
+    } else {
+        parse_ps(&text)
+    };
+    picks.truncate(PICK_MAX);
+    Ok(picks)
+}
+
+/// `ps --format` lines: name, image, status separated by tabs.
+fn parse_ps(out: &str) -> Vec<Pick> {
+    out.lines()
+        .filter_map(|l| {
+            let mut it = l.split('\t');
+            let name = it.next().filter(|n| !n.is_empty())?;
+            let rest: Vec<&str> = it.collect();
+            Some(Pick {
+                host: name.into(),
+                user: String::new(),
+                label: format!("{name}   {}", rest.join("   ")).trim_end().into(),
+            })
+        })
+        .collect()
+}
+
+/// `kubectl get pods` custom columns: namespace, pod, comma separated containers; a pod
+/// with several containers gets one row each.
+fn parse_pods(out: &str) -> Vec<Pick> {
+    let mut picks = Vec::new();
+    for l in out.lines() {
+        let mut it = l.split_whitespace();
+        let (Some(ns), Some(pod)) = (it.next(), it.next()) else {
+            continue;
+        };
+        let host = format!("{ns}/{pod}");
+        let cts: Vec<&str> = it.next().unwrap_or("").split(',').collect();
+        for ct in &cts {
+            let several = cts.len() > 1;
+            picks.push(Pick {
+                host: host.clone(),
+                user: if several { (*ct).into() } else { String::new() },
+                label: if several {
+                    format!("{host}   {ct}")
+                } else {
+                    host.clone()
+                },
+            });
+        }
+    }
+    picks
 }
 
 /// `stat -c` format: hex mode, size, mtime, name (last: it may hold spaces).
@@ -439,6 +538,30 @@ mod tests {
         c.prog = "tc-no-such-cli".into();
         let e = c.list("/").unwrap_err().to_string();
         assert!(e.contains("tc-no-such-cli not found"), "{e}");
+    }
+
+    #[test]
+    fn running_lists() {
+        let ps = parse_ps("web\tnginx:1\tUp 2 hours\n\ndb\tpostgres\tUp 1 minute\n");
+        assert_eq!(ps.len(), 2);
+        assert_eq!(
+            (ps[0].host.as_str(), ps[0].label.as_str()),
+            ("web", "web   nginx:1   Up 2 hours")
+        );
+        let pods = parse_pods("prod   api-1   app,sidecar\nkube-system   dns   coredns\n");
+        let rows: Vec<_> = pods
+            .iter()
+            .map(|p| (p.host.as_str(), p.user.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("prod/api-1", "app"),
+                ("prod/api-1", "sidecar"),
+                ("kube-system/dns", "")
+            ]
+        );
+        assert_eq!(pods[1].label, "prod/api-1   sidecar");
     }
 
     #[test]

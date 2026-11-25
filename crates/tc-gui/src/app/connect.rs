@@ -1,6 +1,6 @@
 //! Remote sessions: connect (Ctrl+N list, host key and password prompts), fetch for the editor, disconnect.
 
-use super::{App, Done, Filter, Mode, VIEW_CAP, edit_key, list_nav, list_rows};
+use super::{App, ConnForm, Done, Filter, Mode, VIEW_CAP, edit_key, list_nav, list_rows};
 use crate::{KeyCode, KeyEvent};
 use std::mem;
 use std::path::PathBuf;
@@ -71,12 +71,12 @@ impl App {
             (KeyCode::Enter, Some(url)) => return self.connect(url),
             (KeyCode::Insert | KeyCode::Char('a'), _) => {
                 self.list_filter = Filter::default();
-                self.mode = Mode::ConnEdit(None, LineEdit::from("sftp://".to_owned()));
+                self.mode = Mode::ConnEdit(Box::new(ConnForm::new(None, "")));
                 return;
             }
             (KeyCode::F(4) | KeyCode::Char('e'), Some(url)) => {
                 self.list_filter = Filter::default();
-                self.mode = Mode::ConnEdit(Some(sel), LineEdit::from(url));
+                self.mode = Mode::ConnEdit(Box::new(ConnForm::new(Some(sel), &url)));
                 return;
             }
             (KeyCode::Delete | KeyCode::Backspace, Some(_)) => {
@@ -255,25 +255,50 @@ mod tests {
         let mut app = two_panels(dir.path(), dir.path());
         with(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
         assert!(matches!(app.mode, Mode::Connections(0)));
+        // new: focus on Host, Down to User
         key(&mut app, KeyCode::Insert);
-        type_keys(&mut app, "me@h");
+        type_keys(&mut app, "h");
+        key(&mut app, KeyCode::Down);
+        type_keys(&mut app, "me");
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.connections, [PathBuf::from("sftp://me@h")]);
         key(&mut app, KeyCode::F(4));
         type_keys(&mut app, "ost");
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.connections, [PathBuf::from("sftp://me@host")]);
+        // Docker: Space on Type cycles to it, Port is skipped
         key(&mut app, KeyCode::Insert);
-        for _ in 0..7 {
-            key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Up);
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Char(' '));
         }
-        type_keys(&mut app, "nonsense");
+        key(&mut app, KeyCode::Down);
+        type_keys(&mut app, "web");
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down);
+        type_keys(&mut app, "srv");
         key(&mut app, KeyCode::Enter);
-        assert!(matches!(app.mode, Mode::Message(_)));
-        assert_eq!(app.connections.len(), 1);
+        assert_eq!(app.connections[1], PathBuf::from("docker://web/srv"));
+        // a whole URL in Host, spread over the fields when leaving it
+        key(&mut app, KeyCode::Insert);
+        type_keys(&mut app, "ftp://x@y:2121/d");
+        key(&mut app, KeyCode::Tab);
+        let Mode::ConnEdit(f) = &app.mode else {
+            panic!()
+        };
+        assert_eq!(f.scheme(), tc_remote::Scheme::Ftp);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.connections[2], PathBuf::from("ftp://x@y:2121/d"));
+        // empty host: error, stays in the form
+        key(&mut app, KeyCode::Insert);
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.mode, Mode::ConnEdit(f) if f.error.is_some()));
+        assert_eq!(app.connections.len(), 3);
         key(&mut app, KeyCode::Esc);
-        with(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
-        key(&mut app, KeyCode::Delete);
+        assert!(matches!(app.mode, Mode::Connections(_)));
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Delete);
+        }
         assert!(app.connections.is_empty());
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));

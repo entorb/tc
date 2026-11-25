@@ -25,6 +25,7 @@ mod bookmarks;
 mod browse_sync;
 mod compare;
 mod config;
+mod conn_form;
 mod connect;
 mod editor;
 mod help;
@@ -39,6 +40,7 @@ mod update;
 mod widgets;
 mod xfer;
 pub use bookmark_edit::{BmClick, BookmarkForm, BookmarkRow};
+pub use conn_form::{ConnForm, ConnPick};
 pub use connect::Connecting;
 pub use editor::{Ask, Input, SearchForm, Step};
 pub use menu::{
@@ -149,8 +151,10 @@ pub enum Mode {
     AskExit(Editor),
     /// Saved connections (Ctrl+N) with the selected row.
     Connections(usize),
-    /// Connection URL being added (`None`) or edited (row).
-    ConnEdit(Option<usize>, LineEdit),
+    /// Connection being added or edited: type, host, user, port, directory.
+    ConnEdit(Box<ConnForm>),
+    /// Running containers listed for the connection form.
+    ConnPick(Box<ConnPick>),
     /// Alias and path of a bookmark being edited (F4 in the bookmarks).
     BookmarkEdit(Box<BookmarkForm>),
     /// Connect running in a worker; may ask for a host key or password.
@@ -415,14 +419,8 @@ impl App {
                 }
             },
             Mode::Connections(sel) => self.connections_key(key, sel),
-            Mode::ConnEdit(row, mut l) => match key.code {
-                KeyCode::Enter => self.conn_save(row, &l.text),
-                KeyCode::Esc => self.mode = Mode::Connections(row.unwrap_or(0)),
-                _ => {
-                    edit_key(&mut l, key);
-                    self.mode = Mode::ConnEdit(row, l);
-                }
-            },
+            Mode::ConnEdit(f) => self.conn_form_key(f, key),
+            Mode::ConnPick(p) => self.conn_pick_key(p, key),
             Mode::BookmarkEdit(f) => self.bookmark_edit_key(key, *f),
             Mode::Connecting(c) => self.connecting_key(c, key),
             Mode::Confirm(op, targets, text) => self.confirm_key(op, targets, text, key.code),
@@ -1128,8 +1126,12 @@ impl App {
             | Mode::Transfer(_, _, l)
             | Mode::Mkdir(l)
             | Mode::Link(link::LinkAsk { line: l, .. })
-            | Mode::NewFile(l)
-            | Mode::ConnEdit(_, l) => paste_line(l, &text),
+            | Mode::NewFile(l) => paste_line(l, &text),
+            Mode::ConnEdit(f) => {
+                if let Some(FormRow::Text(_, l)) = f.rows.get_mut(f.focus) {
+                    paste_line(l, &text);
+                }
+            }
             Mode::BookmarkEdit(f) => {
                 if let Some(l) = f.line_mut() {
                     paste_line(l, &text);
@@ -1298,6 +1300,9 @@ impl App {
         }
         if matches!(self.mode, Mode::Connecting(_)) {
             return self.connect_tick();
+        }
+        if matches!(self.mode, Mode::ConnPick(_)) {
+            return self.conn_pick_tick();
         }
         if let Mode::Found(f) = &mut self.mode {
             return f.pump();

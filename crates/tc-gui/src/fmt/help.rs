@@ -11,7 +11,8 @@ Ctrl+B          bookmarks
 Ctrl+Z          popular directories (most visited and recent)
 Ctrl+Space      DIR SIZE (like ncdu): biggest files and dirs
                 of the current tree, with % and bar
-Ctrl+N          SFTP / FTP / FTPS connections
+Ctrl+N          connections: SFTP / FTP / FTPS servers,
+                Docker / Podman containers, Kubernetes pods
 Disconnect all  (F9 Go) panels and tabs on a server go back
                 to their local directory
 Ctrl+P          PROCESSES (like btop / task manager), of the
@@ -448,6 +449,26 @@ F4 / e          edit the connection
 Delete/Bksp     remove the connection
 /               filter: Enter keeps, Esc clears
 Esc / q / F10   close
+
+== Connection form (Insert / F4 in Connections) ==
+Tab/Up/Down     next / previous field
+Space/Left/Right  Type: SFTP, FTP, FTPS, Docker, Podman,
+                Kubernetes (fields follow the type)
+Host            a whole URL typed here (sftp://me@h:22/dir)
+                fills the other fields
+F2              Docker / Podman / Kubernetes: pick a running
+                container (also Enter while the field is empty)
+Enter           save (the line under the fields shows the URL)
+Esc             back to the list
+
+== Running containers (F2 in the connection form) ==
+Up/Down         move
+Enter           fill the form (then Directory, Enter saves)
+/               filter: Enter keeps, Esc clears
+Ctrl+R          list again
+Esc / q / F10   back to the form
+Containers run `docker|podman|kubectl exec ... sh`: they
+must be running and have sh, find and stat.
 
 == Compare (Ctrl+Y) ==
 Up/Down         move

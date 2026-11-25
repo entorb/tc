@@ -8,6 +8,7 @@ use tc_core::vfs::Remote;
 use tc_core::{Error, Result};
 
 mod container;
+pub use container::{Pick, running};
 mod ftp;
 mod sftp;
 pub mod update;
@@ -142,11 +143,6 @@ impl Url {
             format!("{s}:{}", self.port)
         }
     }
-
-    /// The whole URL, start directory included (what the connection list stores).
-    pub fn full(&self) -> String {
-        format!("{}{}", self.base(), self.path)
-    }
 }
 
 /// `cmd` run in `dir` on the host of `url`: the system `ssh` on a terminal (`-t`, prompts for
@@ -241,16 +237,13 @@ mod tests {
             (u.scheme, u.user.as_str(), u.host.as_str(), u.port),
             (Scheme::Docker, "root", "web", 0)
         );
-        assert_eq!(
-            (u.base(), u.full()),
-            ("docker://root@web".into(), "docker://root@web/srv".into())
-        );
+        assert_eq!(u.base(), "docker://root@web");
         let u = Url::parse("kube://app@prod/web-1/var/log").unwrap();
         assert_eq!(
             (u.host.as_str(), u.user.as_str(), u.path.as_str()),
             ("prod/web-1", "app", "/var/log")
         );
-        assert_eq!(u.full(), "kube://app@prod/web-1/var/log");
+        assert_eq!(u.base(), "kube://app@prod/web-1");
         assert_eq!(Url::parse("kube://ns/pod").unwrap().host, "ns/pod");
         assert_eq!(Url::parse("podman://db").unwrap().scheme, Scheme::Podman);
         for bad in [

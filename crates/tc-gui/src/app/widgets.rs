@@ -88,6 +88,7 @@ impl Mode {
             Mode::Props(f) => Some((&f.rows, &mut f.focus)),
             Mode::Top(p) => p.draft.as_mut().map(|d| (d.rows.as_slice(), &mut d.focus)),
             Mode::Filter(f) => Some((&f.rows, &mut f.focus)),
+            Mode::ConnEdit(f) => Some((&f.rows, &mut f.focus)),
             _ => None,
         }
     }
@@ -109,7 +110,6 @@ impl Mode {
             | Mode::Mkdir(l)
             | Mode::Link(LinkAsk { line: l, .. })
             | Mode::NewFile(l)
-            | Mode::ConnEdit(_, l)
             | Mode::Editor(_, l)
             | Mode::Connecting(Connecting {
                 ask: Some((Prompt::Password(_), l)),
@@ -124,6 +124,7 @@ impl Mode {
             Mode::Props(f) => text_row(&mut f.rows, f.focus),
             Mode::BookmarkEdit(f) => f.line_mut(),
             Mode::Filter(f) => text_row(&mut f.rows, f.focus),
+            Mode::ConnEdit(f) => text_row(&mut f.rows, f.focus),
             Mode::Top(p) => p
                 .draft
                 .as_mut()
@@ -406,6 +407,12 @@ impl ListRow for PathBuf {
 impl ListRow for tc_core::panel::CompareKind {
     fn label(&self) -> Cow<'_, str> {
         Self::label(*self).into()
+    }
+}
+
+impl ListRow for tc_remote::Pick {
+    fn label(&self) -> Cow<'_, str> {
+        self.label.as_str().into()
     }
 }
 
