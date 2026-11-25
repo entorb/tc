@@ -154,7 +154,7 @@ impl Side {
         }
     }
 
-    fn remove_file(&self, p: &Path) -> Result<()> {
+    pub(crate) fn remove_file(&self, p: &Path) -> Result<()> {
         match self {
             Side::Remote(r) => r.remove_file(&rpath(p)),
             Side::Local => fs::remove_file(p).map_err(io_err(p)),

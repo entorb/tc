@@ -151,7 +151,8 @@ pub fn plan(items: &[Item], from: usize, ignore_date: bool, delete_extras: bool)
 }
 
 /// Run `plan` from side `from` to the other: copies first (overwriting, the user confirmed),
-/// then deletes (local: trash, remote: permanently). Stops at the first error.
+/// then deletes (local: trash, remote: permanently; files only, a name that became a directory
+/// since the compare is refused). Stops at the first error.
 pub fn run(
     sides: &[Side; 2],
     roots: &[PathBuf; 2],
@@ -179,7 +180,7 @@ pub fn run(
         let t = roots[to].join(name);
         match &sides[to] {
             Side::Local => ops::trash(&t)?,
-            side => side.delete(&t)?,
+            side => side.remove_file(&t)?,
         }
     }
     Ok(())
@@ -188,6 +189,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::{Plan, Progress, Side, Status, compare, plan, run};
+    use crate::vfs::Remote;
     use crate::vfs::mem::Mem;
     use std::ffi::OsString;
     use std::fs;
@@ -335,5 +337,21 @@ mod tests {
         run(&sides, &roots, 0, &p, &Progress::default()).unwrap();
         assert_eq!(ml.paths(), ["/", "/a"]);
         assert_eq!(mr.paths(), ["/", "/a"]);
+    }
+
+    #[test]
+    fn run_refuses_to_delete_a_name_that_became_a_dir() {
+        let (ml, mr) = (Mem::new(), Mem::new());
+        let sides = [Side::Remote(ml.clone()), Side::Remote(mr.clone())];
+        mr.put("/extra", b"x");
+        let roots = [PathBuf::from("/"), PathBuf::from("/")];
+        let items = compare(&sides, &roots, &Progress::default()).unwrap();
+        let p = plan(&items, 0, true, true);
+        assert_eq!(p.delete, names(&["extra"]));
+        mr.remove_file("/extra").unwrap();
+        mr.dir("/extra");
+        mr.put("/extra/keep", b"k");
+        assert!(run(&sides, &roots, 0, &p, &Progress::default()).is_err());
+        assert_eq!(mr.paths(), ["/", "/extra", "/extra/keep"]);
     }
 }

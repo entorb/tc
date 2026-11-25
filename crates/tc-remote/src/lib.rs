@@ -328,6 +328,36 @@ mod tests {
         }
     }
 
+    /// Sync with delete extras: a target name that became a directory after the compare is
+    /// refused, not deleted as a tree.
+    #[test]
+    #[ignore = "needs a server"]
+    fn live_sync_delete_refuses_dir() {
+        use tc_core::{ops::Progress, sync, vfs::Side};
+        for l in live("sync") {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("s");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("extra"), "x").unwrap();
+            let remote = l.base.join("sync");
+            put(&l, &src, &remote, false).unwrap();
+            let left = tmp.path().join("l");
+            std::fs::create_dir(&left).unwrap();
+            let sides = [Side::Local, Side::Remote(l.r.clone())];
+            let roots = [left, remote.clone()];
+            let items = sync::compare(&sides, &roots, &Progress::default()).unwrap();
+            let plan = sync::plan(&items, 0, true, true);
+            let extra = tc_core::vfs::rpath(&remote.join("extra"));
+            l.r.remove_file(&extra).unwrap();
+            l.r.mkdir(&extra).unwrap();
+            let keep = remote.join("extra/keep");
+            put(&l, &src.join("extra"), &keep, false).unwrap();
+            assert!(sync::run(&sides, &roots, 0, &plan, &Progress::default()).is_err());
+            assert!(!gone(&l, &keep), "{}", l.var);
+            Side::Remote(l.r.clone()).delete(&remote).unwrap();
+        }
+    }
+
     /// Spaces, quotes, `$`, backticks, unicode and a leading dash survive upload, listing,
     /// the server-side `find` scan (shell quoting) and download.
     #[test]
