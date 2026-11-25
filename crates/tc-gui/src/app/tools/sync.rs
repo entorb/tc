@@ -108,7 +108,8 @@ impl Sync {
             return "Nothing to do: both sides have the same files.\n\nany key".into();
         }
         let to = 1 - from;
-        let copied = self.items.iter().filter(|it| plan.copy.contains(&it.name));
+        let copy: std::collections::HashSet<_> = plan.copy.iter().collect();
+        let copied = self.items.iter().filter(|it| copy.contains(&it.name));
         let (bytes, over) = copied.fold((0, 0), |(b, o), it| {
             let size = it.side(from).map_or(0, |e| e.size);
             (b + size, o + usize::from(it.side(to).is_some()))
