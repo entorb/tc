@@ -177,6 +177,30 @@ fn table_headers_share_one_line() {
 }
 
 #[test]
+/// A click on a sortable process column title sorts by it (shared `head_row`).
+fn top_header_click_sorts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let open = || Panel::open(tmp.path()).unwrap();
+    let mut app = App::new(open(), open());
+    let (ctx, mut look) = (egui::Context::default(), Look::default());
+    let mut run = |app: &mut App, ev: Vec<Event>| frame(&ctx, app, &mut look, ev);
+    run(&mut app, vec![press(Key::P, Modifiers::CTRL)]);
+    run(&mut app, vec![]);
+    let mut look2 = Look::default();
+    let p = text_rect(&ctx, &mut app, &mut look2, "Memory").center();
+    let button = |pressed| Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    run(&mut app, vec![Event::PointerMoved(p)]);
+    run(&mut app, vec![button(true)]);
+    run(&mut app, vec![button(false)]);
+    assert!(matches!(&app.mode, Mode::Top(t) if t.sort == tc_core::top::ProcSort::Mem));
+}
+
+#[test]
 /// The command line is an egui TextEdit: keys reach the app once, a click moves the app's caret.
 fn text_box_keys_once_and_click_moves_caret() {
     let tmp = tempfile::tempdir().unwrap();

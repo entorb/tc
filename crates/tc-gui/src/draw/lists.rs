@@ -4,10 +4,10 @@ use super::tools::sync_options;
 use super::widgets::{cell, click_table, left, line_edit, page_rows, right};
 use super::{ACCENT, MARK, MUTED, SYNC_DIFF, SYNC_LEFT, SYNC_RIGHT, TEXT};
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Label, Pos2, ProgressBar, Rect, RichText, Sense,
-    Shape, Stroke, StrokeKind, Ui, epaint::Mesh, vec2,
+    self, Align2, Color32, CornerRadius, FontId, Pos2, ProgressBar, Rect, RichText, Sense, Shape,
+    Stroke, StrokeKind, Ui, epaint::Mesh, vec2,
 };
-use egui_extras::{Column, TableBuilder, TableRow};
+use egui_extras::{Column, TableRow};
 use std::sync::Arc;
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
@@ -25,12 +25,12 @@ pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     let Mode::Found(f) = &mut app.mode else {
         return;
     };
-    ui.label(RichText::new(found_title(f)).strong().color(ACCENT));
+    panel_head(ui, "Find results", Some(found_title(f)));
     let (row_h, h) = page_rows(ui);
     let start = f.sel / h * h;
     let rows: Vec<[String; 2]> = f.shown().skip(start).take(h).map(found_cols).collect();
     let cols = [Column::exact(80.0), Column::remainder().clip(true)];
-    let clicked = click_table(
+    let (clicked, _) = click_table(
         ui,
         &cols,
         &["Size", "Path"],
@@ -254,6 +254,7 @@ pub(super) fn draw_ncdu(ui: &mut Ui, app: &mut App) {
             (row_h, start, rows.len(), sel),
             |row, i| ncdu_cells(row, &rows[i - start]),
         )
+        .0
     };
     let width = ui.available_width();
     let clicked = if width >= MAP_MIN_WIDTH {
@@ -311,80 +312,55 @@ pub(super) fn draw_top(ui: &mut Ui, app: &mut App) {
     let (row_h, h) = page_rows(ui);
     let start = p.sel / h * h;
     let shown = p.rows.len().saturating_sub(start).min(h);
-    let (mut sort, mut clicked) = (None, None);
-    TableBuilder::new(ui)
-        .striped(false)
-        .vscroll(false)
-        .sense(Sense::CLICK)
-        .column(Column::exact(70.0))
-        .column(Column::exact(110.0))
-        .column(Column::exact(70.0))
-        .column(Column::exact(90.0))
-        .column(Column::exact(70.0))
-        .column(Column::remainder().clip(true))
-        .header(row_h, |mut head| {
-            let cols = [
-                ("PID", None),
-                ("User", None),
-                ("CPU %", Some(('c', ProcSort::Cpu))),
-                ("Memory", Some(('m', ProcSort::Mem))),
-                ("Min", Some(('r', ProcSort::Run))),
-                ("Command", None),
-            ];
-            let c = &p.crit;
-            // a column shows 🔍 while its filter field is set
-            // the text filter matches the id, the name and the command
-            let filtered = [
-                !c.text.is_empty(),
-                false,
-                c.min_cpu > 0.0,
-                c.min_mem > 0,
-                c.min_run > 0,
-                !c.text.is_empty(),
-            ];
-            for (k, (title, key)) in cols.into_iter().enumerate() {
-                let arrow = match key {
-                    Some((_, s)) if s == p.sort => " ⏷",
-                    _ => "",
-                };
-                let icon = if filtered[k] { " 🔍" } else { "" };
-                head.col(|ui| {
-                    let t = RichText::new(format!("{title}{icon}{arrow}"))
-                        .strong()
-                        .color(MUTED);
-                    let add = |ui: &mut Ui| ui.add(Label::new(t).sense(Sense::CLICK)).clicked();
-                    let hit = cell(ui, matches!(k, 0 | 2 | 3 | 4), add);
-                    if hit {
-                        sort = key.map(|(c, _)| c);
-                    }
-                });
-            }
+    let cols = [
+        ("PID", None),
+        ("User", None),
+        ("CPU %", Some(('c', ProcSort::Cpu))),
+        ("Memory", Some(('m', ProcSort::Mem))),
+        ("Min", Some(('r', ProcSort::Run))),
+        ("Command", None),
+    ];
+    let c = &p.crit;
+    // a column shows 🔍 while its filter field is set
+    // the text filter matches the id, the name and the command
+    let filtered = [
+        !c.text.is_empty(),
+        false,
+        c.min_cpu > 0.0,
+        c.min_mem > 0,
+        c.min_run > 0,
+        !c.text.is_empty(),
+    ];
+    let titles: Vec<String> = (cols.iter().zip(filtered))
+        .map(|((title, key), f)| {
+            let icon = if f { " 🔍" } else { "" };
+            let arrow = match key {
+                Some((_, s)) if *s == p.sort => " ⏷",
+                _ => "",
+            };
+            format!("{title}{icon}{arrow}")
         })
-        .body(|body| {
-            body.rows(row_h, shown, |mut row| {
-                let i = start + row.index();
-                let q = &p.snap.procs[p.rows[i]];
-                row.set_selected(i == p.sel);
-                row.col(|ui| right(ui, q.pid.to_string()));
-                row.col(|ui| {
-                    ui.add(Label::new(q.user.as_str()).truncate());
-                });
-                row.col(|ui| right(ui, format!("{:.1}", q.cpu)));
-                row.col(|ui| right(ui, human(q.mem)));
-                row.col(|ui| right(ui, (q.run / 60).to_string()));
-                row.col(|ui| {
-                    let cmd = if q.cmd.is_empty() || q.cmd == q.name {
-                        q.name.clone()
-                    } else {
-                        format!("{}  {}", q.name, q.cmd)
-                    };
-                    ui.add(Label::new(cmd).truncate());
-                });
-                if row.response().clicked() {
-                    clicked = Some(i);
-                }
-            });
-        });
+        .collect();
+    let widths = [
+        Column::exact(70.0),
+        Column::exact(110.0),
+        Column::exact(70.0),
+        Column::exact(90.0),
+        Column::exact(70.0),
+        Column::remainder().clip(true),
+    ];
+    let procs = &p.snap.procs;
+    let rows = &p.rows;
+    let (clicked, head) = click_table(
+        ui,
+        &widths,
+        &titles,
+        &[0, 2, 3, 4],
+        (row_h, start, shown, p.sel),
+        |row, i| proc_cells(row, &procs[rows[i]]),
+    );
+    let clicked = clicked.map(|(i, _)| i);
+    let sort = head.and_then(|k| cols[k].1).map(|(c, _)| c);
     let idle = p.idle();
     if let Some(k) = clicked.filter(|_| idle) {
         p.sel = k;
@@ -393,4 +369,18 @@ pub(super) fn draw_top(ui: &mut Ui, app: &mut App) {
     if let Some(c) = sort.filter(|_| idle) {
         app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
+}
+
+fn proc_cells(row: &mut TableRow, q: &tc_core::top::Proc) {
+    row.col(|ui| right(ui, q.pid.to_string()));
+    row.col(|ui| left(ui, q.user.as_str()));
+    row.col(|ui| right(ui, format!("{:.1}", q.cpu)));
+    row.col(|ui| right(ui, human(q.mem)));
+    row.col(|ui| right(ui, (q.run / 60).to_string()));
+    let cmd = if q.cmd.is_empty() || q.cmd == q.name {
+        q.name.clone()
+    } else {
+        format!("{}  {}", q.name, q.cmd)
+    };
+    row.col(|ui| left(ui, cmd));
 }

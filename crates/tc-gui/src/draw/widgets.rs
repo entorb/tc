@@ -175,26 +175,36 @@ pub(super) fn left(ui: &mut Ui, text: impl Into<String>) {
     ui.add(Label::new(text.into()).truncate());
 }
 
-/// Header cells; the columns in `right_cols` are right-aligned.
-pub(super) fn head_row(mut head: TableRow, titles: &[&str], right_cols: &[usize]) {
+/// Header cells; the columns in `right_cols` are right-aligned. Returns the clicked column.
+pub(super) fn head_row<S: AsRef<str>>(
+    mut head: TableRow,
+    titles: &[S],
+    right_cols: &[usize],
+) -> Option<usize> {
+    let mut clicked = None;
     for (k, title) in titles.iter().enumerate() {
         head.col(|ui| {
-            let t = RichText::new(*title).strong().color(MUTED);
-            cell(ui, right_cols.contains(&k), |ui| ui.label(t));
+            let t = RichText::new(title.as_ref()).strong().color(MUTED);
+            let add = |ui: &mut Ui| ui.add(Label::new(t).sense(Sense::CLICK)).clicked();
+            if cell(ui, right_cols.contains(&k), add) {
+                clicked = Some(k);
+            }
         });
     }
+    clicked
 }
 
-/// Click table of `shown` rows from `start`; `fill` draws one row's cells. `Some((index, double))` on click.
-pub(super) fn click_table(
+/// Click table of `shown` rows from `start`; `fill` draws one row's cells.
+/// Returns `Some((index, double))` on a row click and the clicked header column.
+pub(super) fn click_table<S: AsRef<str>>(
     ui: &mut Ui,
     cols: &[Column],
-    titles: &[&str],
+    titles: &[S],
     right_cols: &[usize],
     (row_h, start, shown, sel): (f32, usize, usize, usize),
     mut fill: impl FnMut(&mut TableRow, usize),
-) -> Option<(usize, bool)> {
-    let mut clicked = None;
+) -> (Option<(usize, bool)>, Option<usize>) {
+    let (mut clicked, mut head_click) = (None, None);
     let mut table = TableBuilder::new(ui)
         .striped(false)
         .vscroll(false)
@@ -203,7 +213,9 @@ pub(super) fn click_table(
         table = table.column(*c);
     }
     table
-        .header(row_h, |head| head_row(head, titles, right_cols))
+        .header(row_h, |head| {
+            head_click = head_row(head, titles, right_cols)
+        })
         .body(|body| {
             body.rows(row_h, shown, |mut row| {
                 let i = start + row.index();
@@ -215,5 +227,5 @@ pub(super) fn click_table(
                 }
             });
         });
-    clicked
+    (clicked, head_click)
 }
