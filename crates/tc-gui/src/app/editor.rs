@@ -876,7 +876,7 @@ fn row_on(rows: &[FormRow], label: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::find_files::Found;
+    use super::super::tools::find::Found;
 
     use super::super::{App, Filter, Mode, Step};
 

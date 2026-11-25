@@ -1,6 +1,6 @@
 //! File Stats: directory size tree, marks, delete, panelize.
 
-use super::{App, Filter, Mode, REMOTE, delete_question, delete_text};
+use crate::app::{App, Filter, Mode, REMOTE, delete_question, delete_text};
 use crate::fmt;
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::{HashMap, HashSet};
@@ -22,30 +22,30 @@ pub struct Stats {
     pub dir: PathBuf,
     pub root: Node,
     /// Child indices from `root` down to the browsed directory.
-    pub(super) path: Vec<usize>,
+    pub(in crate::app) path: Vec<usize>,
     /// Row in `view`.
     pub sel: usize,
     /// Indices into the browsed directory's children shown (all, or those matching `filter`).
-    pub(super) view: Vec<usize>,
+    pub(in crate::app) view: Vec<usize>,
     pub filter: Filter,
     /// Show file count (value, share, bar) instead of size.
     pub by_files: bool,
     /// Path of the running rescan to swap into `root`; `None` for the first scan.
-    pub(super) splice: Option<Vec<usize>>,
+    pub(in crate::app) splice: Option<Vec<usize>>,
     /// Running scan; `root` is empty until it finishes.
-    pub(super) job: Option<thread::JoinHandle<Node>>,
+    pub(in crate::app) job: Option<thread::JoinHandle<Node>>,
     pub progress: Arc<ops::Progress>,
     /// Delete question for the selected entry, shown while set.
     pub confirm: Option<String>,
     /// Connection of a remote panel the tree was scanned on.
-    pub(super) remote: Option<Arc<dyn Remote>>,
+    pub(in crate::app) remote: Option<Arc<dyn Remote>>,
     /// Names in the browsed directory a running remote delete removes, and how many it has
     /// deleted so far.
-    pub(super) deleting: Option<(Vec<OsString>, Arc<AtomicUsize>)>,
+    pub(in crate::app) deleting: Option<(Vec<OsString>, Arc<AtomicUsize>)>,
     /// Marked names of the browsed directory.
-    pub(super) marked: HashSet<OsString>,
+    pub(in crate::app) marked: HashSet<OsString>,
     /// Treemap of the browsed directory and the size it was laid out for; cleared by `rebuild`.
-    pub(super) map: Option<((u32, u32), Vec<Tile>)>,
+    pub(in crate::app) map: Option<((u32, u32), Vec<Tile>)>,
 }
 
 impl Stats {
@@ -57,7 +57,7 @@ impl Stats {
         self.path.iter().fold(&self.root, |n, &i| &n.children[i])
     }
 
-    pub(super) fn current_mut(&mut self) -> &mut Node {
+    pub(in crate::app) fn current_mut(&mut self) -> &mut Node {
         let mut n = &mut self.root;
         for &i in &self.path {
             n = &mut n.children[i];
@@ -88,7 +88,7 @@ impl Stats {
     }
 
     /// Children indices a delete acts on: the shown marked entries, else the selected one.
-    pub(super) fn targets(&self) -> Vec<usize> {
+    pub(in crate::app) fn targets(&self) -> Vec<usize> {
         let dir = self.current();
         let marked: Vec<_> = (self.view.iter().copied())
             .filter(|&i| self.marked.contains(&dir.children[i].name))
@@ -101,7 +101,7 @@ impl Stats {
     }
 
     /// Ask to delete the targets.
-    pub(super) fn delete_ask(&mut self) {
+    pub(in crate::app) fn delete_ask(&mut self) {
         let dir = self.current();
         let nodes: Vec<_> = self
             .targets()
@@ -123,7 +123,7 @@ impl Stats {
     }
 
     /// Remove deleted entries of the browsed directory from the tree.
-    pub(super) fn drop_names(&mut self, names: &[OsString]) {
+    pub(in crate::app) fn drop_names(&mut self, names: &[OsString]) {
         for name in names {
             if let Some(i) = self.current().children.iter().position(|n| &n.name == name) {
                 stats::remove(&mut self.root, &self.path, i);
@@ -134,7 +134,7 @@ impl Stats {
     }
 
     /// Recompute the shown entries after a sort, a filter or a change of the tree.
-    pub(super) fn rebuild(&mut self) {
+    pub(in crate::app) fn rebuild(&mut self) {
         let filter = &self.filter;
         self.view = (self.current().children.iter().enumerate())
             .filter(|(_, n)| filter.matches(&n.name.to_string_lossy()))
@@ -205,7 +205,7 @@ impl Stats {
         p
     }
 
-    pub(super) fn key(&mut self, code: KeyCode, page: usize) {
+    pub(in crate::app) fn key(&mut self, code: KeyCode, page: usize) {
         let last = self.view.len().saturating_sub(1);
         match code {
             KeyCode::Up => self.sel = self.sel.saturating_sub(1),
@@ -248,7 +248,7 @@ impl Stats {
     }
 
     /// F5: scan the browsed directory again in a worker and swap it into the tree.
-    pub(super) fn rescan(&mut self) {
+    pub(in crate::app) fn rescan(&mut self) {
         self.progress = Arc::new(ops::Progress::default());
         self.splice = Some(self.path.clone());
         self.job = Some(spawn_scan(
@@ -260,7 +260,7 @@ impl Stats {
     }
 
     /// A finished scan: the first one is the tree, a rescan replaces the browsed directory.
-    pub(super) fn scanned(&mut self, node: Node) {
+    pub(in crate::app) fn scanned(&mut self, node: Node) {
         let Some(path) = self.splice.take() else {
             self.root = node;
             self.rebuild();
@@ -274,7 +274,7 @@ impl Stats {
     }
 
     /// Mark or unmark the selected entry and move down.
-    pub(super) fn toggle_mark(&mut self, last: usize) {
+    pub(in crate::app) fn toggle_mark(&mut self, last: usize) {
         if let Some(name) = self.selected().map(|n| n.name.clone())
             && !self.marked.remove(&name)
         {
@@ -284,7 +284,7 @@ impl Stats {
     }
 
     /// Puts the cursor on the shown entry called `name`, if any.
-    pub(super) fn select_name(&mut self, name: Option<OsString>) {
+    pub(in crate::app) fn select_name(&mut self, name: Option<OsString>) {
         if let Some(i) = name.and_then(|name| {
             self.view
                 .iter()
@@ -295,7 +295,7 @@ impl Stats {
     }
 
     /// Sorts the browsed directory and puts the cursor on its first shown entry.
-    pub(super) fn resort(&mut self) {
+    pub(in crate::app) fn resort(&mut self) {
         let order = if self.by_files {
             stats::Order::Count
         } else {
@@ -308,7 +308,7 @@ impl Stats {
 }
 
 /// Scan `dir` (on `remote` if set) in a worker.
-pub(super) fn spawn_scan(
+pub(in crate::app) fn spawn_scan(
     dir: PathBuf,
     remote: Option<Arc<dyn Remote>>,
     p: Arc<ops::Progress>,
@@ -321,7 +321,7 @@ pub(super) fn spawn_scan(
 
 impl App {
     /// Ctrl+Space: File Stats of the active panel's directory.
-    pub(super) fn spawn_stats(&mut self) {
+    pub(in crate::app) fn spawn_stats(&mut self) {
         let panel = &self.panels[self.active];
         if panel.archive().is_some() {
             self.mode = Mode::Message("File Stats does not work in archives.".into());
@@ -331,7 +331,7 @@ impl App {
     }
 
     /// Scan `dir` in a worker and show its File Stats.
-    pub(super) fn scan_stats(&mut self, dir: PathBuf, remote: Option<Arc<dyn Remote>>) {
+    pub(in crate::app) fn scan_stats(&mut self, dir: PathBuf, remote: Option<Arc<dyn Remote>>) {
         let progress = Arc::new(ops::Progress::default());
         let job = spawn_scan(dir.clone(), remote.clone(), progress.clone());
         self.mode = Mode::Stats(Stats {
@@ -354,7 +354,7 @@ impl App {
     }
 
     /// Keys in File Stats; only Esc/q/F10 (cancel) work while scanning.
-    pub(super) fn stats_mode_key(&mut self, mut st: Stats, key: KeyEvent) {
+    pub(in crate::app) fn stats_mode_key(&mut self, mut st: Stats, key: KeyEvent) {
         if st.confirm.is_some() {
             return self.stats_confirm_key(st, key.code);
         }
@@ -394,7 +394,7 @@ impl App {
     }
 
     /// `i`: message popup for the selected entry, the stats come back when it closes.
-    pub(super) fn stats_info(&mut self, st: Stats) {
+    pub(in crate::app) fn stats_info(&mut self, st: Stats) {
         let Some(n) = st.selected() else {
             self.mode = Mode::Stats(st);
             return;
@@ -411,7 +411,7 @@ impl App {
     }
 
     /// `p`: the marked entries, else all shown ones, become a virtual panel in the active panel.
-    pub(super) fn stats_panelize(&mut self, st: Stats) {
+    pub(in crate::app) fn stats_panelize(&mut self, st: Stats) {
         if st.remote.is_some() {
             // the list's re-stat is local only
             self.stats = Some(st);
@@ -443,7 +443,7 @@ impl App {
     }
 
     /// Answer to the File Stats delete question: the entry leaves the tree without a rescan.
-    pub(super) fn stats_confirm_key(&mut self, mut st: Stats, code: KeyCode) {
+    pub(in crate::app) fn stats_confirm_key(&mut self, mut st: Stats, code: KeyCode) {
         let to_trash = match code {
             // no trash on remote panels
             KeyCode::Char('y' | 'Y') | KeyCode::Enter if st.remote.is_none() => true,
@@ -476,7 +476,7 @@ impl App {
     }
 
     /// F3 view, F4 edit, Shift+F4 external editor on the selected file of File Stats.
-    pub(super) fn stats_open(&mut self, st: Stats, key: KeyEvent) {
+    pub(in crate::app) fn stats_open(&mut self, st: Stats, key: KeyEvent) {
         let Some(path) = st
             .selected()
             .filter(|n| !n.is_dir)
@@ -515,14 +515,15 @@ impl App {
 #[cfg(test)]
 mod tests {
 
-    use super::super::{App, Mode};
+    use crate::app::{App, Mode};
 
     use crate::{KeyCode, KeyModifiers};
 
+    #[cfg(unix)]
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
-    use super::super::tests::{key, settle, two_panels, type_keys, type_text, wait, with};
+    use crate::app::tests::{key, settle, two_panels, type_keys, type_text, wait, with};
 
     #[test]
     fn stats_deletes_without_rescan_and_runs_cmd_in_dir() {

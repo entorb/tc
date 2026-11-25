@@ -9,8 +9,8 @@ use eframe::egui::{
     Ui,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
-use tc::app::App;
 use tc_core::cmdline::LineEdit;
+use tc_gui::app::App;
 /// Single-line text of `l` with a caret at its cursor.
 pub(super) fn line_edit(ui: &mut Ui, l: &LineEdit) {
     text_box(ui, l, true);

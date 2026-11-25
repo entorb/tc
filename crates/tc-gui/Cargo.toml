@@ -1,7 +1,11 @@
 [package]
-name = "tc"
+name = "tc-gui"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "tc"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"

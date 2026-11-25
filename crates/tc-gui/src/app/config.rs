@@ -222,7 +222,7 @@ mod tests {
     use tc_core::panel::Panel;
     use tc_core::settings;
 
-    use super::super::find_files::F_NAME;
+    use super::super::tools::find::F_NAME;
     use super::super::{
         App, FormRow, Mode, form_checked, rename_rows, rows_from_line, rows_to_line,
     };
@@ -361,10 +361,10 @@ mod tests {
     fn sync_options_persist_and_reopen() {
         let tmp = tempfile::tempdir().unwrap();
         let mut a = app(tmp.path());
-        let line = format!("{}=1", super::super::sync::S_NODATE);
+        let line = format!("{}=1", super::super::tools::sync::S_NODATE);
         a.remember("sync-forms", &line);
         let nodate = |a: &App| match &a.mode {
-            Mode::Sync(s) => form_checked(&s.form.rows, super::super::sync::S_NODATE),
+            Mode::Sync(s) => form_checked(&s.form.rows, super::super::tools::sync::S_NODATE),
             _ => panic!("no sync screen"),
         };
         a.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
@@ -372,7 +372,7 @@ mod tests {
         a.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(!nodate(&a));
         let saved = tc_core::cmdline::load_history(&tmp.path().join("cfg/sync-forms")).unwrap();
-        let off = format!("{}=0", super::super::sync::S_NODATE);
+        let off = format!("{}=0", super::super::tools::sync::S_NODATE);
         assert!(saved.last().is_some_and(|l| l.starts_with(&off)));
     }
 }

@@ -1,4 +1,4 @@
-//! Torben's Commander desktop app: `tc::app` drawn with egui.
+//! Torben's Commander desktop app: `tc_gui::app` drawn with egui.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod draw;
@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use eframe::egui::{self, ViewportCommand};
-use tc::KeyModifiers;
-use tc::app::{App, Mode};
 use tc_core::panel::Panel;
 use tc_core::view::Viewer;
+use tc_gui::KeyModifiers;
+use tc_gui::app::{App, Mode};
 
 /// Wheel distance (points) of one 3-line scroll step in viewer and editor.
 const WHEEL_STEP: f32 = 40.0;
@@ -41,7 +41,7 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new(open()?, open()?);
     app.load_config()?;
     app.start_update_check();
-    let title = match tc::app::VERSION {
+    let title = match tc_gui::app::VERSION {
         Some(version) => format!("Torben's Commander {version}"),
         None => "Torben's Commander".to_owned(),
     };
@@ -125,7 +125,7 @@ impl Gui {
                 Some(keys::Input::Paste(_)) if editing => {}
                 // in the file panel Ctrl+V pastes files; elsewhere it pastes text into the prompt or editor
                 Some(keys::Input::Key(k))
-                    if k.code == tc::KeyCode::Char('v')
+                    if k.code == tc_gui::KeyCode::Char('v')
                         && k.modifiers == KeyModifiers::CONTROL
                         && !field
                         && !self.app.panel_keys() =>

@@ -1,7 +1,7 @@
 //! Process monitor (Ctrl+P): sampling, sort, filter, kill.
 
-use super::widgets::form_text;
-use super::{FormRow, edit_key};
+use crate::app::widgets::form_text;
+use crate::app::{FormRow, edit_key};
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::Arc;
 use std::thread;
@@ -52,7 +52,7 @@ pub struct Draft {
 pub struct Procs {
     /// Connection of the remote panel it was opened on; `None`: this computer.
     pub remote: Option<Arc<dyn Remote>>,
-    pub(super) sampler: Sampler,
+    pub(in crate::app) sampler: Sampler,
     /// Time between snapshots, CPU % is averaged over it.
     pub every: Duration,
     /// Interval being typed (`s`), in seconds.
@@ -71,13 +71,13 @@ pub struct Procs {
     pub info: Option<u32>,
     /// Kill question for (pid, name), shown while set.
     pub confirm: Option<(u32, String)>,
-    pub(super) kill: Option<thread::JoinHandle<tc_core::Result<()>>>,
+    pub(in crate::app) kill: Option<thread::JoinHandle<tc_core::Result<()>>>,
     /// Result of the last kill, shown in the footer until the next key.
     pub status: String,
 }
 
 impl Procs {
-    pub(super) fn new(remote: Option<Arc<dyn Remote>>) -> Self {
+    pub(in crate::app) fn new(remote: Option<Arc<dyn Remote>>) -> Self {
         Procs {
             sampler: procs::sample(remote.clone(), procs::INTERVAL),
             every: procs::INTERVAL,
@@ -111,7 +111,7 @@ impl Procs {
     }
 
     /// Re-sort and re-filter; the cursor keeps its row, so the list does not jump under it.
-    pub(super) fn refresh(&mut self) {
+    pub(in crate::app) fn refresh(&mut self) {
         procs::sort(&mut self.snap.procs, self.sort);
         self.rows = (0..self.snap.procs.len())
             .filter(|&i| self.crit.matches(&self.snap.procs[i]))
@@ -120,7 +120,7 @@ impl Procs {
     }
 
     /// Takes the newest snapshot and a finished kill; `Some(error)` when sampling failed.
-    pub(super) fn tick(&mut self) -> Option<String> {
+    pub(in crate::app) fn tick(&mut self) -> Option<String> {
         let mut new = None;
         while let Ok(r) = self.sampler.rx.try_recv() {
             match r {
@@ -148,7 +148,7 @@ impl Procs {
     }
 
     /// `false` closes the monitor.
-    pub(super) fn key(&mut self, key: KeyEvent, page: usize) -> bool {
+    pub(in crate::app) fn key(&mut self, key: KeyEvent, page: usize) -> bool {
         self.status.clear();
         if self.confirm.is_some() {
             self.confirm_key(key.code);
@@ -242,7 +242,7 @@ impl Procs {
     }
 
     /// Typing the update interval: Enter sets it (0.5 to 3600 s), Esc keeps the old one.
-    pub(super) fn every_key(&mut self, mut l: LineEdit, key: KeyEvent) {
+    pub(in crate::app) fn every_key(&mut self, mut l: LineEdit, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {}
             KeyCode::Enter => match l.text.trim().replace(',', ".").parse::<f64>() {
@@ -260,7 +260,7 @@ impl Procs {
     }
 
     /// Answer to the kill question: `t` SIGTERM, `k` SIGKILL, sent in a worker (slow links).
-    pub(super) fn confirm_key(&mut self, code: KeyCode) {
+    pub(in crate::app) fn confirm_key(&mut self, code: KeyCode) {
         let force = match code {
             KeyCode::Char('t' | 'T') | KeyCode::Enter => false,
             KeyCode::Char('k' | 'K') => true,
@@ -285,18 +285,18 @@ impl Procs {
 #[cfg(test)]
 mod tests {
 
-    use super::super::menu::PROCS_FOOTER;
+    use crate::app::menu::PROCS_FOOTER;
 
     use super::Procs;
 
-    use super::super::{App, Mode};
+    use crate::app::{App, Mode};
     use crate::fmt;
 
     use crate::{KeyCode, KeyModifiers};
 
     use tc_core::procs::ProcSort;
 
-    use super::super::tests::{key, settle, two_panels, type_keys, with};
+    use crate::app::tests::{key, settle, two_panels, type_keys, with};
 
     fn procs(app: &App) -> &Procs {
         match &app.mode {

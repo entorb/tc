@@ -1,7 +1,9 @@
 //! Multi-rename (Ctrl+M) form, names from the editor, undo; F2 / Shift+F6 rename.
 
-use super::widgets::{step_focus, tab_key, tab_of, tab_range};
-use super::{App, FormRow, Mode, Op, READ_ONLY, form_checked, form_text, paste_line, rows_to_line};
+use crate::app::widgets::{step_focus, tab_key, tab_of, tab_range};
+use crate::app::{
+    App, FormRow, Mode, Op, READ_ONLY, form_checked, form_text, paste_line, rows_to_line,
+};
 use crate::{KeyCode, KeyEvent, KeyModifiers};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -11,53 +13,54 @@ use tc_core::vfs::Side;
 use tc_core::{ops, rename};
 
 // Multi-rename form row labels.
-pub(super) const R_NAME: &str = "Name mask";
+pub(in crate::app) const R_NAME: &str = "Name mask";
 
-pub(super) const R_EXT: &str = "Extension mask";
+pub(in crate::app) const R_EXT: &str = "Extension mask";
 
-pub(super) const R_FIND: &str = "Find";
+pub(in crate::app) const R_FIND: &str = "Find";
 
 // row keys (form lookup, history); shown as "Search" / "Replace" (`fmt::rename_shown`)
-pub(super) const R_REPLACE: &str = "Replace with";
+pub(in crate::app) const R_REPLACE: &str = "Replace with";
 
-pub(super) const R_PH_FIND: &str = "Search";
+pub(in crate::app) const R_PH_FIND: &str = "Search";
 
-pub(super) const R_PH_REPLACE: &str = "Replace";
+pub(in crate::app) const R_PH_REPLACE: &str = "Replace";
 
-pub(super) const R_REGEX: &str = "Regex";
+pub(in crate::app) const R_REGEX: &str = "Regex";
 
-pub(super) const R_CASE_SENS: &str = "Find case-sensitive";
+pub(in crate::app) const R_CASE_SENS: &str = "Find case-sensitive";
 
-pub(super) const R_UNDERSCORE: &str = "Underscore to space";
+pub(in crate::app) const R_UNDERSCORE: &str = "Underscore to space";
 
-pub(super) const R_COLLAPSE: &str = "Remove multiple spaces";
+pub(in crate::app) const R_COLLAPSE: &str = "Remove multiple spaces";
 
-pub(super) const R_SPACE_CAPS: &str = "Space before capitals";
+pub(in crate::app) const R_SPACE_CAPS: &str = "Space before capitals";
 
-pub(super) const R_DOTS: &str = "Remove dots";
+pub(in crate::app) const R_DOTS: &str = "Remove dots";
 
-pub(super) const R_TRIM: &str = "Trim spaces";
+pub(in crate::app) const R_TRIM: &str = "Trim spaces";
 
 /// Shown when a setting replaced names typed in the Editor or pasted as a list.
-pub(super) const LOST_NOTE: &str = "The settings replaced your edited names: F8 restores them.";
+pub(in crate::app) const LOST_NOTE: &str =
+    "The settings replaced your edited names: F8 restores them.";
 
-pub(super) const R_ADD: &str = "Add to first number";
+pub(in crate::app) const R_ADD: &str = "Add to first number";
 
-pub(super) const R_CASE: &str = "Case";
+pub(in crate::app) const R_CASE: &str = "Case";
 
 /// Rows per tab (titles in `fmt::RENAME_TABS`): the rows of all tabs in this order; the Editor
 /// tab has none.
-pub(super) const TAB_ROWS: [usize; 5] = [5, 4, 2, 7, 0];
+pub(in crate::app) const TAB_ROWS: [usize; 5] = [5, 4, 2, 7, 0];
 
 const _: () = assert!(TAB_ROWS.len() == crate::fmt::RENAME_TABS.len());
 
-pub(super) const R_START: &str = "Counter start";
+pub(in crate::app) const R_START: &str = "Counter start";
 
-pub(super) const R_STEP: &str = "Counter step";
+pub(in crate::app) const R_STEP: &str = "Counter step";
 
-pub(super) const R_WIDTH: &str = "Counter digits";
+pub(in crate::app) const R_WIDTH: &str = "Counter digits";
 
-pub(super) const CASES: [(&str, rename::Case); 6] = [
+pub(in crate::app) const CASES: [(&str, rename::Case); 6] = [
     ("unchanged", rename::Case::Keep),
     ("lower", rename::Case::Lower),
     ("UPPER", rename::Case::Upper),
@@ -66,21 +69,21 @@ pub(super) const CASES: [(&str, rename::Case); 6] = [
     ("Every Word, small kept", rename::Case::WordsSmall),
 ];
 
-pub(super) const CASE_NAMES: [&str; 6] = [
+pub(in crate::app) const CASE_NAMES: [&str; 6] = [
     CASES[0].0, CASES[1].0, CASES[2].0, CASES[3].0, CASES[4].0, CASES[5].0,
 ];
 
 /// A finished multi-rename: where it ran and what it renamed, for Ctrl+Z.
 #[derive(Clone)]
-pub(super) struct RenameBatch {
+pub(in crate::app) struct RenameBatch {
     // shortcut: a remote side's session stays open in the undo memory, upgrade by clearing it on disconnect
-    pub(super) side: Side,
-    pub(super) dir: PathBuf,
-    pub(super) pairs: Vec<(String, String)>,
+    pub(in crate::app) side: Side,
+    pub(in crate::app) dir: PathBuf,
+    pub(in crate::app) pairs: Vec<(String, String)>,
 }
 
 /// Multi-rename form rows in focus order, with the defaults (name unchanged).
-pub(super) fn rename_rows() -> Vec<FormRow> {
+pub(in crate::app) fn rename_rows() -> Vec<FormRow> {
     let text = |label, v: &str| FormRow::Text(label, LineEdit::from(v.to_owned()));
     vec![
         text(R_NAME, "[N]"),
@@ -117,17 +120,17 @@ fn row_differs(a: &FormRow, b: &FormRow) -> bool {
 pub struct RenameForm {
     pub rows: Vec<FormRow>,
     pub focus: usize,
-    pub(super) dir: PathBuf,
-    pub(super) items: Vec<(OsString, Option<std::time::SystemTime>)>,
+    pub(in crate::app) dir: PathBuf,
+    pub(in crate::app) items: Vec<(OsString, Option<std::time::SystemTime>)>,
     /// Old name and the new one, or why there is none (empty: the form has an error).
     pub preview: Vec<(String, Result<String, String>)>,
     /// First preview row shown.
     pub scroll: usize,
     pub error: Option<String>,
     /// Position in the settings history for Alt+Up/Down (= its length: not from history).
-    pub(super) hist: usize,
+    pub(in crate::app) hist: usize,
     /// New names pasted as a list, one per item; they replace the masks.
-    pub(super) names: Option<Vec<String>>,
+    pub(in crate::app) names: Option<Vec<String>>,
     /// The Editor tab's text: one new name per line. It shows the masks' result until edited.
     pub editor: String,
     /// The editor has the keyboard (set by the drawing; typed keys then go to it).
@@ -141,11 +144,11 @@ pub struct RenameForm {
     /// Preview rows that fit (set by the drawing): the PgUp / PgDn step.
     pub page: usize,
     /// Edited names a setting replaced (Editor text), until F8 restores them.
-    pub(super) lost: Option<String>,
+    pub(in crate::app) lost: Option<String>,
 }
 
 impl RenameForm {
-    pub(super) fn spec(&self) -> Result<rename::Spec, String> {
+    pub(in crate::app) fn spec(&self) -> Result<rename::Spec, String> {
         let rows = &self.rows;
         let num = |label: &str| {
             let t = form_text(rows, label).trim();
@@ -194,7 +197,7 @@ impl RenameForm {
     }
 
     /// New names for the form as it is; the first problem goes to `error`.
-    pub(super) fn refresh(&mut self) {
+    pub(in crate::app) fn refresh(&mut self) {
         let rule = self.spec().and_then(rename::Spec::compile);
         self.preview = (self.items.iter().enumerate())
             .map(|(i, (name, modified))| {
@@ -252,7 +255,7 @@ impl RenameForm {
     }
 
     /// Show tab `t` and focus its first row.
-    pub(super) fn goto_tab(&mut self, t: usize) {
+    pub(in crate::app) fn goto_tab(&mut self, t: usize) {
         self.tab = t.min(TAB_ROWS.len() - 1);
         // keys after the switch go to the form until the drawing focuses the editor again
         self.editor_focused = false;
@@ -260,31 +263,31 @@ impl RenameForm {
     }
 
     /// Focus moved (Tab, click): the tab follows it.
-    pub(super) fn follow_focus(&mut self) {
+    pub(in crate::app) fn follow_focus(&mut self) {
         if let Some(t) = tab_of(&TAB_ROWS, self.focus) {
             self.tab = t;
         }
     }
 
     /// Scroll the preview by `rows`, keeping the last page full.
-    pub(super) fn scroll_preview(&mut self, rows: isize) {
+    pub(in crate::app) fn scroll_preview(&mut self, rows: isize) {
         let end = self.preview.len().saturating_sub(self.page.max(1));
         self.scroll = self.scroll.saturating_add_signed(rows).min(end);
     }
 
     /// Up / Down: move inside the shown tab, over the rows that are shown.
-    pub(super) fn step_in_tab(&mut self, delta: isize) {
+    pub(in crate::app) fn step_in_tab(&mut self, delta: isize) {
         self.focus = step_focus(self.shown_rows(), self.focus, delta, |i| self.hidden(i));
     }
 
     /// Tab / Shift+Tab: the next row that is shown (`forward` or back), staying in the form.
-    pub(super) fn next_visible(&mut self, forward: bool) {
+    pub(in crate::app) fn next_visible(&mut self, forward: bool) {
         let delta = if forward { 1 } else { -1 };
         self.focus = step_focus(0..self.rows.len(), self.focus, delta, |i| self.hidden(i));
     }
 
     /// Renames to run, or why not.
-    pub(super) fn pairs(&self) -> Result<Vec<(String, String)>, String> {
+    pub(in crate::app) fn pairs(&self) -> Result<Vec<(String, String)>, String> {
         // a wrong count shifts names onto the wrong files
         if let Some(n) = &self.names
             && n.len() != self.items.len()
@@ -305,7 +308,7 @@ impl RenameForm {
     }
 
     /// Pasted text with line breaks is a list of new names; else it goes into the field.
-    pub(super) fn paste(&mut self, text: &str) {
+    pub(in crate::app) fn paste(&mut self, text: &str) {
         if text.contains('\n') {
             let lines = text.lines().take(self.items.len() + 1);
             return self.set_names(lines.map(str::to_owned).collect());
@@ -318,7 +321,7 @@ impl RenameForm {
     }
 
     /// A setting changed: the masks make the names again; hand-made names are kept for F8.
-    pub(super) fn settings_changed(&mut self) {
+    pub(in crate::app) fn settings_changed(&mut self) {
         let lost = self.names.take().map(|_| std::mem::take(&mut self.editor));
         self.refresh();
         if lost.is_some() {
@@ -328,7 +331,7 @@ impl RenameForm {
     }
 
     /// F8: back to the edited names a setting replaced.
-    pub(super) fn restore_lost(&mut self) {
+    pub(in crate::app) fn restore_lost(&mut self) {
         if let Some(text) = self.lost.take() {
             self.editor = text;
             self.goto_tab(TAB_ROWS.len() - 1);
@@ -337,7 +340,7 @@ impl RenameForm {
     }
 
     /// The editor text changed: its lines are the new names (a final line break adds none).
-    pub(super) fn sync_editor(&mut self) {
+    pub(in crate::app) fn sync_editor(&mut self) {
         let lines: Vec<String> = {
             let text = self.editor.strip_suffix('\n').unwrap_or(&self.editor);
             text.split('\n').map(str::to_owned).collect()
@@ -347,7 +350,7 @@ impl RenameForm {
     }
 
     /// Use `lines` as the new names, one per item; a wrong count is an error and changes nothing.
-    pub(super) fn set_names(&mut self, lines: Vec<String>) {
+    pub(in crate::app) fn set_names(&mut self, lines: Vec<String>) {
         if lines.len() == self.items.len() {
             self.lost = None;
             self.editor = lines.join("\n");
@@ -365,7 +368,7 @@ impl RenameForm {
 
 impl App {
     /// Shift+F6: rename the cursor entry through the move prompt (bare name = same directory).
-    pub(super) fn rename(&mut self) {
+    pub(in crate::app) fn rename(&mut self) {
         let panel = &self.panels[self.active];
         if panel.archive().is_some() {
             self.mode = Mode::Message(READ_ONLY.into());
@@ -380,7 +383,7 @@ impl App {
     }
 
     /// Ctrl+M: multi-rename the selection (else the cursor entry), opened with the last settings.
-    pub(super) fn multi_rename(&mut self) {
+    pub(in crate::app) fn multi_rename(&mut self) {
         let panel = &self.panels[self.active];
         if panel.archive().is_some() {
             self.mode = Mode::Message(READ_ONLY.into());
@@ -419,7 +422,7 @@ impl App {
         self.mode = Mode::MultiRename(form);
     }
 
-    pub(super) fn multi_rename_key(&mut self, key: KeyEvent, mut form: RenameForm) {
+    pub(in crate::app) fn multi_rename_key(&mut self, key: KeyEvent, mut form: RenameForm) {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if let Some(t) = tab_key(key, form.tab, TAB_ROWS.len()) {
             form.goto_tab(t);
@@ -467,7 +470,7 @@ impl App {
     }
 
     /// Enter: rename in a worker (remote panels too); the form stays open on a problem.
-    pub(super) fn multi_rename_run(&mut self, mut form: RenameForm) {
+    pub(in crate::app) fn multi_rename_run(&mut self, mut form: RenameForm) {
         let pairs = match form.pairs() {
             Ok(p) if p.is_empty() => Err("No name changes.".to_owned()),
             r => r,
@@ -497,7 +500,7 @@ impl App {
     }
 
     /// Ctrl+Z in the form: rename the last finished batch back in a worker.
-    pub(super) fn rename_undo_run(&mut self, mut form: RenameForm) {
+    pub(in crate::app) fn rename_undo_run(&mut self, mut form: RenameForm) {
         let Some(RenameBatch { side, dir, pairs }) = self.rename_undo.take() else {
             form.error = Some("Nothing to undo.".into());
             self.mode = Mode::MultiRename(form);
@@ -511,7 +514,7 @@ impl App {
 
     /// A multi-rename that renamed every pair becomes the one Ctrl+Z undoes (a cancel or an
     /// error leaves `files` short of the total).
-    pub(super) fn rename_done(&mut self, error: Option<&String>, progress: &ops::Progress) {
+    pub(in crate::app) fn rename_done(&mut self, error: Option<&String>, progress: &ops::Progress) {
         if let Some(batch) = self.rename_running.take()
             && error.is_none()
             && progress.files.load(Ordering::Relaxed)
@@ -553,16 +556,16 @@ impl App {
 #[cfg(test)]
 mod tests {
 
-    use super::super::multi_rename::R_NAME;
-    use super::super::widgets::form_text;
     use super::rename_rows;
+    use crate::app::tools::rename::R_NAME;
+    use crate::app::widgets::form_text;
 
-    use super::super::{App, Mode, Op};
     use super::FormRow;
+    use crate::app::{App, Mode, Op};
 
     use crate::{KeyCode, KeyModifiers};
 
-    use super::super::tests::{key, two_panels, type_keys, wait, with};
+    use crate::app::tests::{key, two_panels, type_keys, wait, with};
 
     #[test]
     fn f2_renames_one_or_multi_renames_several() {

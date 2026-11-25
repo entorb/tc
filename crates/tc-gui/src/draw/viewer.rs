@@ -5,9 +5,9 @@ use eframe::egui::{
     Color32, Response, RichText, Sense, Stroke, TextFormat, TextStyle, Ui, Vec2, text::LayoutJob,
     vec2,
 };
-use tc::app::{App, Mode};
-use tc::fmt::{self, Mark, editor_info};
 use tc_core::syntax::{self, Kind};
+use tc_gui::app::{App, Mode};
+use tc_gui::fmt::{self, Mark, editor_info};
 /// Monospace cell size.
 pub(super) fn cell(ui: &Ui) -> Vec2 {
     ui.painter().layout_no_wrap("M".into(), mono(), TEXT).size()

@@ -11,12 +11,12 @@ use tc_core::sync::{Item, Plan, Status};
 use tc_core::vfs::Side;
 use tc_core::{Error, ops, sync};
 
-use super::widgets::step_key;
-use super::{App, FormRow, Mode, form_checked, rows_from_line, rows_to_line};
+use crate::app::widgets::step_key;
+use crate::app::{App, FormRow, Mode, form_checked, rows_from_line, rows_to_line};
 use tc_core::edit::human;
 
-pub(super) const S_NODATE: &str = "Ignore date";
-pub(super) const S_DELETE: &str = "Mirror";
+pub(in crate::app) const S_NODATE: &str = "Ignore date";
+pub(in crate::app) const S_DELETE: &str = "Mirror";
 
 /// The sync options: checkboxes, always with the keyboard.
 #[derive(Clone)]
@@ -145,7 +145,7 @@ impl Sync {
 
 impl App {
     /// Ctrl+E: compare the two panel directories at once, with the options last used.
-    pub(super) fn sync_open(&mut self) {
+    pub(in crate::app) fn sync_open(&mut self) {
         if self
             .panels
             .iter()
@@ -166,7 +166,7 @@ impl App {
     }
 
     /// Compare in a worker; the status line shows progress until it is done.
-    pub(super) fn sync_spawn(&mut self, (form, sides, roots): SyncSetup) {
+    pub(in crate::app) fn sync_spawn(&mut self, (form, sides, roots): SyncSetup) {
         let progress = Arc::new(ops::Progress::default());
         let (p, s, r) = (progress.clone(), sides.clone(), roots.clone());
         let job = thread::spawn(move || sync::compare(&s, &r, &p));
@@ -183,7 +183,7 @@ impl App {
         }));
     }
 
-    pub(super) fn sync_key(&mut self, key: KeyEvent, mut s: Box<Sync>) {
+    pub(in crate::app) fn sync_key(&mut self, key: KeyEvent, mut s: Box<Sync>) {
         if let Some((from, _)) = s.confirm.take() {
             return self.sync_confirm_key(s, from, key.code);
         }
@@ -231,7 +231,7 @@ impl App {
     }
 
     /// Collect a finished compare.
-    pub(super) fn sync_tick(&mut self) {
+    pub(in crate::app) fn sync_tick(&mut self) {
         let Mode::Sync(s) = &mut self.mode else {
             return;
         };

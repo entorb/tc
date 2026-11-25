@@ -595,7 +595,7 @@ pub fn sync_footer(s: &Sync) -> String {
 }
 
 /// Placeholder legend under the multi-rename form.
-/// Tab titles of the multi-rename form (rows per tab: `app::multi_rename::TAB_ROWS`).
+/// Tab titles of the multi-rename form (rows per tab: `app::tools::rename::TAB_ROWS`).
 pub const RENAME_TABS: [&str; 5] = ["Name", "Replace", "Placeholder", "Clean up", "Editor"];
 
 /// Find files tab titles (rows: `FIND_TAB_ROWS`); same names as their F-keys in the footer.

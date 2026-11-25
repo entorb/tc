@@ -132,7 +132,7 @@ jobs:
 
       - name: Build release
         if: inputs.release
-        run: cargo build --release --locked -p tc
+        run: cargo build --release --locked -p tc-gui
         env:
           # release tag built into the binary for the daily update check
           TC_VERSION: ${{ inputs.tag_name || needs.core.outputs.next_tag }}

@@ -1,8 +1,8 @@
 //! File properties (Alt+Enter, F9 File): info on the marked entries or the cursor entry;
 //! Unix: mode, owner and group, elsewhere the read-only flag; applied in a worker.
 
-use super::form_text;
 #[cfg(unix)]
+use super::form_text;
 use super::widgets::step_key;
 use super::{App, Done, FormRow, Mode, form_checked};
 use crate::{KeyCode, KeyEvent};

@@ -8,18 +8,18 @@ use eframe::egui::{
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 use std::sync::Arc;
-use tc::app::{App, Mode, Stats};
-use tc::fmt::{
-    self, StatsCols, found_cols, found_title, stats_cols, stats_footer, stats_title, sync_comment,
-    sync_footer, sync_title,
-};
-use tc::fmt::{procs_footer, procs_header, procs_prompt};
-use tc::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::cmdline::LineEdit;
 use tc_core::edit::human;
 use tc_core::procs::ProcSort;
 use tc_core::stats::treemap::Tile;
 use tc_core::sync::Status;
+use tc_gui::app::{App, Mode, Stats};
+use tc_gui::fmt::{
+    self, StatsCols, found_cols, found_title, stats_cols, stats_footer, stats_title, sync_comment,
+    sync_footer, sync_title,
+};
+use tc_gui::fmt::{procs_footer, procs_header, procs_prompt};
+use tc_gui::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) fn draw_found(ui: &mut Ui, app: &mut App) {
     let Mode::Found(f) = &mut app.mode else {
         return;
@@ -62,7 +62,7 @@ pub(super) fn draw_sync(ui: &mut Ui, app: &mut App) {
 }
 
 /// The listed files from the top row that fit; returns the rows per page.
-fn sync_rows(ui: &mut Ui, s: &tc::app::Sync) -> usize {
+fn sync_rows(ui: &mut Ui, s: &tc_gui::app::Sync) -> usize {
     let today = jiff::ZonedDateTime::now().date();
     let (row_h, h) = page_rows(ui);
     let start = s.top;

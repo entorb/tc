@@ -1,7 +1,7 @@
-//! egui rendering of the shared `App` state; texts come from `tc::fmt`, so both front ends say the same.
+//! egui rendering of the shared `App` state; texts come from `tc_gui::fmt`, so both front ends say the same.
 
 use eframe::egui::{self, Color32, Context, FontFamily, FontId, Id, Modal, Ui};
-use tc::app::{App, Mode};
+use tc_gui::app::{App, Mode};
 mod viewer;
 use self::viewer::{draw_editor, draw_view};
 mod panel;

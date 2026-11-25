@@ -279,7 +279,9 @@ fn icons_exist_in_icon_font() {
         .textures_delta
         .clear();
     let id = FontId::new(16.0, only);
-    let icons = tc::app::TOOLBAR.iter().flat_map(|g| g.iter().map(|t| t.0));
+    let icons = tc_gui::app::TOOLBAR
+        .iter()
+        .flat_map(|g| g.iter().map(|t| t.0));
     let panel = super::panel::BUTTONS.iter().map(|b| b.0);
     for icon in icons
         .chain(panel)
@@ -402,7 +404,12 @@ fn scrolling_has_no_rubber_band() {
 fn help_scrolls_to_the_last_line() {
     let tmp = tempfile::tempdir().unwrap();
     let open = || Panel::open(tmp.path()).unwrap();
-    let last = tc::fmt::HELP_MAIN.lines().last().unwrap().trim().to_owned();
+    let last = tc_gui::fmt::HELP_MAIN
+        .lines()
+        .last()
+        .unwrap()
+        .trim()
+        .to_owned();
     let wheel = Event::MouseWheel {
         unit: egui::MouseWheelUnit::Page,
         delta: egui::vec2(0.0, -100.0),
@@ -424,7 +431,10 @@ fn help_scrolls_to_the_last_line() {
             let at = Event::PointerMoved(egui::pos2(450.0, 300.0));
             frame(&ctx, &mut app, &mut look, vec![at, wheel.clone()]);
         } else {
-            app.help_key(tc::KeyEvent::new(tc::KeyCode::End, tc::KeyModifiers::NONE));
+            app.help_key(tc_gui::KeyEvent::new(
+                tc_gui::KeyCode::End,
+                tc_gui::KeyModifiers::NONE,
+            ));
         }
         for _ in 0..3 {
             frame(&ctx, &mut app, &mut look, vec![]);

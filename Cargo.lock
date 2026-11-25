@@ -3875,25 +3875,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "eframe",
- "egui",
- "egui_extras",
- "jiff",
- "regex",
- "tc-core",
- "tc-remote",
- "tempfile",
- "unicode-width",
- "winresource",
- "zip",
-]
-
-[[package]]
 name = "tc-core"
 version = "0.1.0"
 dependencies = [
@@ -3913,6 +3894,25 @@ dependencies = [
  "thiserror 2.0.21",
  "trash",
  "windows-sys 0.61.2",
+ "zip",
+]
+
+[[package]]
+name = "tc-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "jiff",
+ "regex",
+ "tc-core",
+ "tc-remote",
+ "tempfile",
+ "unicode-width",
+ "winresource",
  "zip",
 ]
 

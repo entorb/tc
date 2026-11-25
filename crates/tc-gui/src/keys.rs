@@ -1,7 +1,7 @@
 //! egui input events as the key events `App` handles.
 
 use eframe::egui::{Event, ImeEvent, Key, Modifiers};
-use tc::{KeyCode, KeyEvent, KeyModifiers};
+use tc_gui::{KeyCode, KeyEvent, KeyModifiers};
 
 pub enum Input {
     Key(KeyEvent),

@@ -27,36 +27,32 @@ mod compare;
 mod config;
 mod connect;
 mod editor;
-mod file_stats;
-mod find_files;
 mod help;
 mod link;
 mod menu;
-mod multi_rename;
 mod panel_filter;
 mod popular;
-mod proc_mon;
 mod props;
-mod sync;
 mod tabs;
+mod tools;
 mod update;
 mod widgets;
 mod xfer;
 pub use bookmark_edit::{BmClick, BookmarkForm, BookmarkRow};
 pub use connect::Connecting;
 pub use editor::{Ask, Input, SearchForm, Step};
-pub use file_stats::Stats;
-pub use find_files::{FindForm, Found, FoundSort};
 pub use menu::{
     ENTRY_MENU, FOOTER, MENUS, MenuItem, PROCS_FOOTER, STATS_FOOTER, TOOLBAR, ToolItem,
     help_action, zoom_step,
 };
-pub use multi_rename::RenameForm;
-use multi_rename::{RenameBatch, rename_rows};
 pub use panel_filter::FilterForm;
-pub use proc_mon::Procs;
 pub use props::PropsForm;
-pub use sync::{Sync, SyncForm};
+pub use tools::find::{FindForm, Found, FoundSort};
+pub use tools::ncdu::Stats;
+pub use tools::rename::RenameForm;
+use tools::rename::{RenameBatch, rename_rows};
+pub use tools::sync::{Sync, SyncForm};
+pub use tools::top::Procs;
 pub use update::{RELEASES, SettingsForm, VERSION};
 pub use widgets::{Filter, FormRow, ListRow, list_rows};
 use widgets::{
@@ -256,7 +252,7 @@ pub struct App {
     /// Directory of the settings and history files (none: not persisted).
     config_dir: Option<PathBuf>,
     /// A running sync compares again when it ends.
-    sync_again: Option<sync::SyncSetup>,
+    sync_again: Option<tools::sync::SyncSetup>,
     /// Find results while a result is open in the viewer or editor; shown again after it.
     found: Option<Found>,
     /// The batch being renamed, and the last one that finished completely (undo, until quit).

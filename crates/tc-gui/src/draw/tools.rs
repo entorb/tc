@@ -5,8 +5,8 @@
 use super::dialogs::{FormAct, apply, field_grid, form_row};
 use super::{MUTED, TEXT};
 use eframe::egui::{self, Color32, RichText, TextStyle, Ui, vec2};
-use tc::app::{App, Mode, RenameForm, Sync};
-use tc::fmt;
+use tc_gui::app::{App, Mode, RenameForm, Sync};
+use tc_gui::fmt;
 
 /// Title of a half of the window, its optional note on the right, and the rule under both:
 /// the same on the left and right, so the two halves line up.

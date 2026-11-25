@@ -5,10 +5,10 @@ use eframe::egui::{
     self, Context, FontId, RichText, Sense, Ui, ViewportBuilder, ViewportClass, ViewportId,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
-use tc::app::App;
-use tc::fmt::{self};
-use tc::{KeyCode, KeyModifiers};
 use tc_core::cmdline::LineEdit;
+use tc_gui::app::App;
+use tc_gui::fmt::{self};
+use tc_gui::{KeyCode, KeyModifiers};
 
 /// Help in its own OS window, movable beside tc; tc stays usable. Keys typed there go to the help.
 pub(super) fn show_help(ctx: &Context, app: &mut App) {

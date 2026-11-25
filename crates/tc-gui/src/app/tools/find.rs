@@ -1,7 +1,7 @@
 //! Find files (Alt+F7 / Ctrl+F): form, streamed results, panelize.
 
-use super::widgets::{step_focus, step_key, tab_key, tab_of, tab_range};
-use super::{
+use crate::app::widgets::{step_focus, step_key, tab_key, tab_of, tab_range};
+use crate::app::{
     App, Filter, FormRow, Mode, form_checked, form_text, paste_line, rows_from_line, rows_to_line,
 };
 use crate::{KeyCode, KeyEvent, KeyModifiers};
@@ -21,57 +21,57 @@ use tc_core::vfs;
 use tc_core::{find, search};
 
 // Find form row labels; also the keys of the find history lines.
-pub(super) const F_NAME: &str = "Name (masks)";
+pub(in crate::app) const F_NAME: &str = "Name (masks)";
 
-pub(super) const F_NAME_RE: &str = "Name is a regex";
+pub(in crate::app) const F_NAME_RE: &str = "Name is a regex";
 
-pub(super) const F_NAME_CASE: &str = "Name case-sensitive";
+pub(in crate::app) const F_NAME_CASE: &str = "Name case-sensitive";
 
-pub(super) const F_SKIP_FILES: &str = "Exclude files";
+pub(in crate::app) const F_SKIP_FILES: &str = "Exclude files";
 
-pub(super) const F_CONTENT_ON: &str = "Search file contents";
+pub(in crate::app) const F_CONTENT_ON: &str = "Search file contents";
 
-pub(super) const F_CONTENT: &str = "Content";
+pub(in crate::app) const F_CONTENT: &str = "Content";
 
-pub(super) const F_REGEX: &str = "Content is a regex";
+pub(in crate::app) const F_REGEX: &str = "Content is a regex";
 
-pub(super) const F_CASE: &str = "Content case-sensitive";
+pub(in crate::app) const F_CASE: &str = "Content case-sensitive";
 
-pub(super) const F_WORD: &str = "Whole words";
+pub(in crate::app) const F_WORD: &str = "Whole words";
 
-pub(super) const F_NOT: &str = "Not containing";
+pub(in crate::app) const F_NOT: &str = "Not containing";
 
-pub(super) const F_EVERY: &str = "List every match";
+pub(in crate::app) const F_EVERY: &str = "List every match";
 
-pub(super) const F_SKIP_DIRS: &str = "Exclude dirs";
+pub(in crate::app) const F_SKIP_DIRS: &str = "Exclude dirs";
 
-pub(super) const F_HIDDEN: &str = "Skip hidden";
+pub(in crate::app) const F_HIDDEN: &str = "Skip hidden";
 
-pub(super) const F_GITIGNORE: &str = "Use .gitignore";
+pub(in crate::app) const F_GITIGNORE: &str = "Use .gitignore";
 
-pub(super) const F_FOLLOW: &str = "Follow symlinks";
+pub(in crate::app) const F_FOLLOW: &str = "Follow symlinks";
 
-pub(super) const F_DEPTH: &str = "Max depth";
+pub(in crate::app) const F_DEPTH: &str = "Max depth";
 
-pub(super) const F_MIN: &str = "Min size";
+pub(in crate::app) const F_MIN: &str = "Min size";
 
-pub(super) const F_MAX: &str = "Max size";
+pub(in crate::app) const F_MAX: &str = "Max size";
 
-pub(super) const F_AFTER: &str = "Modified after";
+pub(in crate::app) const F_AFTER: &str = "Modified after";
 
-pub(super) const F_BEFORE: &str = "Modified before";
+pub(in crate::app) const F_BEFORE: &str = "Modified before";
 
-pub(super) const F_AGE: &str = "Not older than";
+pub(in crate::app) const F_AGE: &str = "Not older than";
 
-pub(super) const F_EXTS: &str = "Extensions";
+pub(in crate::app) const F_EXTS: &str = "Extensions";
 
 /// Rows per tab (titles in `fmt::FIND_TABS`), in row order.
-pub(super) const FIND_TAB_ROWS: [usize; 4] = [5, 7, 5, 5];
+pub(in crate::app) const FIND_TAB_ROWS: [usize; 4] = [5, 7, 5, 5];
 
 const _: () = assert!(FIND_TAB_ROWS.len() == crate::fmt::FIND_TABS.len());
 
 /// Find files form rows in focus order, tab by tab; all start empty or off.
-pub(super) fn find_rows() -> Vec<FormRow> {
+pub(in crate::app) fn find_rows() -> Vec<FormRow> {
     let text = |label| FormRow::Text(label, LineEdit::default());
     let check = |label| FormRow::Check(label, false);
     vec![
@@ -107,7 +107,7 @@ pub struct FindForm {
     pub focus: usize,
     pub error: Option<String>,
     /// Position in the find history for Alt+Up/Down (= its length: not from history).
-    pub(super) hist: usize,
+    pub(in crate::app) hist: usize,
     /// Tab shown (`FIND_TAB_ROWS`).
     pub tab: usize,
 }
@@ -140,34 +140,34 @@ impl FindForm {
     }
 
     /// Show tab `t` and focus its first row.
-    pub(super) fn goto_tab(&mut self, t: usize) {
+    pub(in crate::app) fn goto_tab(&mut self, t: usize) {
         self.tab = t.min(FIND_TAB_ROWS.len() - 1);
         self.focus = self.shown_rows().start;
     }
 
     /// Focus moved (Tab, click): the tab follows it.
-    pub(super) fn follow_focus(&mut self) {
+    pub(in crate::app) fn follow_focus(&mut self) {
         if let Some(t) = tab_of(&FIND_TAB_ROWS, self.focus) {
             self.tab = t;
         }
     }
 
-    pub(super) fn text(&self, label: &str) -> &str {
+    pub(in crate::app) fn text(&self, label: &str) -> &str {
         form_text(&self.rows, label)
     }
 
-    pub(super) fn checked(&self, label: &str) -> bool {
+    pub(in crate::app) fn checked(&self, label: &str) -> bool {
         form_checked(&self.rows, label)
     }
 
     /// Typing and space toggle on the focused row.
-    pub(super) fn key(&mut self, key: KeyEvent) {
+    pub(in crate::app) fn key(&mut self, key: KeyEvent) {
         self.rows[self.focus].key(key);
         self.tick_content();
     }
 
     /// Pasted text goes into the focused text field.
-    pub(super) fn paste(&mut self, text: &str) {
+    pub(in crate::app) fn paste(&mut self, text: &str) {
         if let FormRow::Text(_, l) = &mut self.rows[self.focus] {
             paste_line(l, text);
         }
@@ -175,7 +175,7 @@ impl FindForm {
     }
 
     /// Typed content text turns content search on, so it is not silently ignored.
-    pub(super) fn tick_content(&mut self) {
+    pub(in crate::app) fn tick_content(&mut self) {
         if self.text(F_CONTENT).is_empty() {
             return;
         }
@@ -187,20 +187,20 @@ impl FindForm {
     }
 
     /// One line of the find history: the [`rows_to_line`] of the form.
-    pub(super) fn to_line(&self) -> String {
+    pub(in crate::app) fn to_line(&self) -> String {
         rows_to_line(&self.rows, "")
     }
 
     /// The form a history line describes; unknown labels (a saved-search name in old lines)
     /// are ignored, missing ones stay empty.
-    pub(super) fn from_line(line: &str) -> Self {
+    pub(in crate::app) fn from_line(line: &str) -> Self {
         let mut form = FindForm::new();
         rows_from_line(&mut form.rows, line);
         form
     }
 
     /// The search the fields describe; the first field that does not parse is the error.
-    pub(super) fn query(&self, exact: bool, remote: bool) -> Result<find::Query, String> {
+    pub(in crate::app) fn query(&self, exact: bool, remote: bool) -> Result<find::Query, String> {
         let name = self.text(F_NAME).trim();
         let name_case = exact || self.checked(F_NAME_CASE);
         let name_re = if self.checked(F_NAME_RE) {
@@ -253,7 +253,7 @@ impl FindForm {
     }
 
     /// Content search of the form; `None` while its checkbox is off.
-    pub(super) fn content(&self, exact: bool) -> Result<Option<find::Content>, String> {
+    pub(in crate::app) fn content(&self, exact: bool) -> Result<Option<find::Content>, String> {
         if !self.checked(F_CONTENT_ON) {
             return Ok(None);
         }
@@ -289,7 +289,7 @@ pub enum FoundSort {
 }
 
 /// Case-insensitive comparison of two names (no allocation for UTF-8 ones).
-pub(super) fn cmp_lower(a: &OsStr, b: &OsStr) -> cmp::Ordering {
+pub(in crate::app) fn cmp_lower(a: &OsStr, b: &OsStr) -> cmp::Ordering {
     let (a, b) = (a.to_string_lossy(), b.to_string_lossy());
     a.chars()
         .flat_map(char::to_lowercase)
@@ -297,7 +297,7 @@ pub(super) fn cmp_lower(a: &OsStr, b: &OsStr) -> cmp::Ordering {
 }
 
 /// Order of two hits by `key`, ties by path.
-pub(super) fn cmp_hits(a: &Hit, b: &Hit, key: FoundSort) -> cmp::Ordering {
+pub(in crate::app) fn cmp_hits(a: &Hit, b: &Hit, key: FoundSort) -> cmp::Ordering {
     let (a, b) = (&a.entry, &b.entry);
     let by = match key {
         FoundSort::Path => cmp::Ordering::Equal,
@@ -318,7 +318,7 @@ pub(super) fn cmp_hits(a: &Hit, b: &Hit, key: FoundSort) -> cmp::Ordering {
 pub struct Found {
     pub list: Vec<Hit>,
     /// Indices into `list` of the shown results (all, or those matching `filter`).
-    pub(super) view: Vec<usize>,
+    pub(in crate::app) view: Vec<usize>,
     pub filter: Filter,
     /// Order of `view` and whether reversed; `None` keeps the arrival order.
     pub sort: Option<(FoundSort, bool)>,
@@ -330,11 +330,11 @@ pub struct Found {
     /// Why a remote search stopped early (the server cannot run `find`, ...).
     pub error: Arc<Mutex<Option<String>>>,
     /// Content regex of the search: highlighted when a result opens in the viewer or editor.
-    pub(super) re: Option<Regex>,
+    pub(in crate::app) re: Option<Regex>,
     /// What Ctrl+R searches again.
-    pub(super) query: find::Query,
-    pub(super) rx: Receiver<Hit>,
-    pub(super) cancel: Arc<AtomicBool>,
+    pub(in crate::app) query: find::Query,
+    pub(in crate::app) rx: Receiver<Hit>,
+    pub(in crate::app) cancel: Arc<AtomicBool>,
 }
 
 impl Found {
@@ -347,11 +347,11 @@ impl Found {
         self.view.len()
     }
 
-    pub(super) fn matches(&self, h: &Hit) -> bool {
+    pub(in crate::app) fn matches(&self, h: &Hit) -> bool {
         self.filter.matches(&h.entry.name.to_string_lossy())
     }
 
-    pub(super) fn rebuild(&mut self) {
+    pub(in crate::app) fn rebuild(&mut self) {
         self.view = (0..self.list.len())
             .filter(|&i| self.matches(&self.list[i]))
             .collect();
@@ -360,7 +360,7 @@ impl Found {
     }
 
     /// Orders `view` by `sort`, the cursor stays on the same hit.
-    pub(super) fn resort(&mut self) {
+    pub(in crate::app) fn resort(&mut self) {
         let cur = self.view.get(self.sel).copied();
         self.sort_view();
         if let Some(i) = cur.and_then(|c| self.view.iter().position(|&v| v == c)) {
@@ -368,7 +368,7 @@ impl Found {
         }
     }
 
-    pub(super) fn sort_view(&mut self) {
+    pub(in crate::app) fn sort_view(&mut self) {
         let Some((key, rev)) = self.sort else { return };
         let list = &self.list;
         self.view.sort_by(|&a, &b| {
@@ -378,12 +378,12 @@ impl Found {
     }
 
     /// Sorts by `key`; the same key again reverses.
-    pub(super) fn set_sort(&mut self, key: FoundSort) {
+    pub(in crate::app) fn set_sort(&mut self, key: FoundSort) {
         self.sort = Some((key, self.sort == Some((key, false))));
         self.resort();
     }
 
-    pub(super) fn pump(&mut self) {
+    pub(in crate::app) fn pump(&mut self) {
         let mut pushed = false;
         for _ in 0..5000 {
             match self.rx.try_recv() {
@@ -409,7 +409,7 @@ impl Found {
 
 impl App {
     /// Search the active panel's directory in a worker thread, results arrive via `tick`.
-    pub(super) fn spawn_find(&mut self, q: find::Query) {
+    pub(in crate::app) fn spawn_find(&mut self, q: find::Query) {
         let panel = &self.panels[self.active];
         let remote = panel.remote().cloned();
         let root = panel.path().to_owned();
@@ -448,7 +448,7 @@ impl App {
 
     /// Find files form: Enter / F10 searches, F2-F5 show a tab, Tab/Up/Down move, Space
     /// toggles, Esc / F9 cancel.
-    pub(super) fn find_form_key(&mut self, key: KeyEvent, mut form: FindForm) {
+    pub(in crate::app) fn find_form_key(&mut self, key: KeyEvent, mut form: FindForm) {
         let remote = self.panels[self.active].remote().is_some();
         form.error = None;
         if let Some(t) = tab_key(key, form.tab, FIND_TAB_ROWS.len()) {
@@ -490,7 +490,7 @@ impl App {
         self.mode = Mode::FindForm(form);
     }
 
-    pub(super) fn found_key(&mut self, key: KeyEvent, mut f: Found) {
+    pub(in crate::app) fn found_key(&mut self, key: KeyEvent, mut f: Found) {
         let page = self.page;
         let last = f.view.len().saturating_sub(1);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -564,7 +564,7 @@ impl App {
 
     /// Enter in the results: the found files (once each, in the shown order) become a virtual
     /// panel; their first matching line stays for F3/F4 there.
-    pub(super) fn panelize_found(&mut self, f: Found) {
+    pub(in crate::app) fn panelize_found(&mut self, f: Found) {
         f.cancel.store(true, Ordering::Relaxed);
         if f.re.is_some() {
             self.search.clone_from(&f.re);
@@ -585,11 +585,11 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::super::find_files::{
+    use crate::app::tools::find::{
         F_CONTENT, F_CONTENT_ON, F_EVERY, F_MIN, F_NAME, F_SKIP_DIRS, Found, FoundSort,
     };
 
-    use super::super::{App, Filter, Mode};
+    use crate::app::{App, Filter, Mode};
     use crate::fmt;
     use crate::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -602,7 +602,7 @@ mod tests {
     use tc_core::find::Hit;
     use tc_core::panel::{Entry, Panel};
 
-    use super::super::tests::{key, settle, two_panels, type_keys, wait, with};
+    use crate::app::tests::{key, settle, two_panels, type_keys, wait, with};
 
     /// Fills the find form (name, then content regex, which ticks its checkbox) and searches.
     fn find_in_form(app: &mut App, mask: &str, content: Option<&str>) {

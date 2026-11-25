@@ -4,10 +4,10 @@ use eframe::egui::{
     self, Align, Button, Color32, Label, Layout, RichText, Sense, Stroke, TextStyle, Ui,
 };
 use egui_extras::{Column, TableBuilder};
-use tc::app::{App, ENTRY_MENU, Mode};
-use tc::fmt::{entry_cols, panel_info, panel_title};
-use tc::{KeyCode, KeyEvent, KeyModifiers};
 use tc_core::panel::SortKey;
+use tc_gui::app::{App, ENTRY_MENU, Mode};
+use tc_gui::fmt::{entry_cols, panel_info, panel_title};
+use tc_gui::{KeyCode, KeyEvent, KeyModifiers};
 enum Action {
     Sort(SortKey),
     /// Entry, Shift / Ctrl held, double click.
