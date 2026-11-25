@@ -4,10 +4,10 @@
 set -e
 cd "$(dirname "$0")/.."
 mkdir -p screenshots
-# clean config: same panels, sort and zoom on every run
-XDG_CONFIG_HOME=$(mktemp -d)
-trap 'rm -rf "$XDG_CONFIG_HOME"' EXIT
-export XDG_CONFIG_HOME TC_SHOT_SIZE=800x600
+# clean config per shot (same panels, sort and zoom on every run); shots run in parallel
+cfg=$(mktemp -d)
+trap 'rm -rf "$cfg"' EXIT
+export TC_SHOT_SIZE=800x600
 want=${1:-all}
 case $want in all | panel | editor | ncdu | top | rename | find | sync) ;; *)
   echo "unknown screenshot: $want" >&2
@@ -15,13 +15,19 @@ case $want in all | panel | editor | ncdu | top | rename | find | sync) ;; *)
   ;;
 esac
 w1="wait 1"
-# one tc run per screenshot; steps are word-split (no spaces inside "type")
+# one tc run per screenshot, each in its own Xvfb; steps are word-split (no spaces inside "type")
 # never F10 in the panel view (quits) and never Enter in multi-rename (renames)
+pids=""
+n=100
 shot() {
   name=$1
   [ "$want" = all ] || [ "$want" = "$name" ] || return 0
   shift
-  scripts/ui_shot.sh "key Tab" "type scripts" "key Return" "key Tab" "$@" "shot screenshots/$name.png"
+  mkdir "$cfg/$name"
+  n=$((n + 1))
+  TC_SHOT_DISPLAY=$n XDG_CONFIG_HOME="$cfg/$name" scripts/ui_shot.sh "key Tab" "type scripts" "key Return" "key Tab" "$@" \
+    "shot screenshots/$name.png" &
+  pids="$pids $!"
 }
 shot panel
 shot editor "type readme" "key F4" "$w1"
@@ -33,3 +39,6 @@ shot rename "key Tab" "type +" "$w1" "type chk_*.sh" "$w1" "key Return" "$w1" "k
 shot find "key ctrl+f" "$w1" "type *.sh" "key F3" "type cargo" "$w1"
 # sync: tc against scripts, compared
 shot sync "key ctrl+e" "wait 3"
+fail=0
+for p in $pids; do wait "$p" || fail=1; done
+exit $fail

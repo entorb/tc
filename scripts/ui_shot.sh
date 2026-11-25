@@ -17,7 +17,8 @@ TC_SHOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export TC_SHOT_BIN="$bin" TC_SHOT_DIR
 export TC_SHOT_SIZE
 # shellcheck disable=SC2016 # the inner script expands its variables inside Xvfb
-exec xvfb-run -a -s "-screen 0 ${TC_SHOT_SIZE:-1280x800}x24" sh -c '
+# TC_SHOT_DISPLAY: first X display number to try (parallel runs: distinct numbers, xvfb-run -a races)
+exec xvfb-run -a -n "${TC_SHOT_DISPLAY:-99}" -s "-screen 0 ${TC_SHOT_SIZE:-1280x800}x24" sh -c '
   LIBGL_ALWAYS_SOFTWARE=1 "$TC_SHOT_BIN" >/dev/null 2>&1 &
   pid=$!
   trap "kill $pid 2>/dev/null" EXIT
