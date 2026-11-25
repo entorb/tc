@@ -1,4 +1,5 @@
-//! Remote file system backends for tc: SFTP and FTP/FTPS, behind [`tc_core::vfs::Remote`].
+//! Remote file system backends for tc: SFTP, FTP/FTPS and containers (Docker, Podman,
+//! Kubernetes), behind [`tc_core::vfs::Remote`].
 
 use std::process::Command;
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::sync::Arc;
 use tc_core::vfs::Remote;
 use tc_core::{Error, Result};
 
+mod container;
 mod ftp;
 mod sftp;
 pub mod update;
@@ -26,9 +28,50 @@ pub enum Scheme {
     Sftp,
     Ftp,
     Ftps,
+    Docker,
+    Podman,
+    /// Kubernetes pod via `kubectl`.
+    Kube,
 }
 
-/// `scheme://[user@]host[:port][/path]`.
+impl Scheme {
+    pub const ALL: [Self; 6] = [
+        Self::Sftp,
+        Self::Ftp,
+        Self::Ftps,
+        Self::Docker,
+        Self::Podman,
+        Self::Kube,
+    ];
+
+    /// URL prefix before `://`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sftp => "sftp",
+            Self::Ftp => "ftp",
+            Self::Ftps => "ftps",
+            Self::Docker => "docker",
+            Self::Podman => "podman",
+            Self::Kube => "kube",
+        }
+    }
+
+    /// Port used when the URL has none; 0 for containers (no network port).
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Sftp => 22,
+            Self::Ftp | Self::Ftps => 21,
+            Self::Docker | Self::Podman | Self::Kube => 0,
+        }
+    }
+
+    pub fn is_container(self) -> bool {
+        self.default_port() == 0
+    }
+}
+
+/// `scheme://[user@]host[:port][/path]`. Containers: host is the container name, user the
+/// `exec` user; Kubernetes: `kube://[container@]namespace/pod[/path]`, host `namespace/pod`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Url {
     pub scheme: Scheme,
@@ -42,27 +85,42 @@ pub struct Url {
 impl Url {
     // shortcut: no IPv6 literals ([::1]) and no %-escapes, upgrade when someone needs them
     pub fn parse(s: &str) -> Result<Self> {
-        let bad = || Error::Remote(format!("not a remote URL: {s} (sftp://, ftp://, ftps://)"));
+        let bad = || {
+            Error::Remote(format!(
+                "not a remote URL: {s} (sftp://, ftp://, ftps://, docker://, podman://, kube://)"
+            ))
+        };
         let (scheme, rest) = s.trim().split_once("://").ok_or_else(bad)?;
         let scheme = match scheme.to_ascii_lowercase().as_str() {
-            "sftp" | "ssh" => Scheme::Sftp,
-            "ftp" => Scheme::Ftp,
-            "ftps" => Scheme::Ftps,
-            _ => return Err(bad()),
+            "ssh" => Scheme::Sftp,
+            name => (Scheme::ALL.into_iter())
+                .find(|s| s.name() == name)
+                .ok_or_else(bad)?,
         };
-        let (auth, path) = match rest.find('/') {
+        let (mut auth, mut path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, ""),
         };
+        if scheme == Scheme::Kube {
+            // the pod is the first path segment: host becomes `namespace/pod`
+            let end = path[1.min(path.len())..]
+                .find('/')
+                .map_or(path.len(), |i| i + 1);
+            if end <= 1 {
+                return Err(bad());
+            }
+            auth = &rest[..auth.len() + end];
+            path = &path[end..];
+        }
         let (user, hostport) = match auth.rsplit_once('@') {
             Some((u, h)) => (u, h),
             None => ("", auth),
         };
         let (host, port) = match hostport.rsplit_once(':') {
-            Some((h, p)) => (h, p.parse().map_err(|_| bad())?),
-            None => (hostport, if scheme == Scheme::Sftp { 22 } else { 21 }),
+            Some((h, p)) if !scheme.is_container() => (h, p.parse().map_err(|_| bad())?),
+            _ => (hostport, scheme.default_port()),
         };
-        if host.is_empty() {
+        if host.is_empty() || (scheme.is_container() && host.contains(':')) {
             return Err(bad());
         }
         Ok(Self {
@@ -74,36 +132,45 @@ impl Url {
         })
     }
 
-    /// Shown before remote paths: `sftp://user@host:22`.
+    /// Shown before remote paths: `sftp://user@host:22`, `docker://name`.
     pub fn base(&self) -> String {
-        let scheme = match self.scheme {
-            Scheme::Sftp => "sftp",
-            Scheme::Ftp => "ftp",
-            Scheme::Ftps => "ftps",
-        };
         let at = if self.user.is_empty() { "" } else { "@" };
-        format!("{scheme}://{}{at}{}:{}", self.user, self.host, self.port)
+        let s = format!("{}://{}{at}{}", self.scheme.name(), self.user, self.host);
+        if self.scheme.is_container() {
+            s
+        } else {
+            format!("{s}:{}", self.port)
+        }
+    }
+
+    /// The whole URL, start directory included (what the connection list stores).
+    pub fn full(&self) -> String {
+        format!("{}{}", self.base(), self.path)
     }
 }
 
-/// The system `ssh` running `cmd` in `dir` on the host of `url`, on a terminal (`-t`). Prompts
-/// for a password itself if keys or the agent do not log in.
+/// `cmd` run in `dir` on the host of `url`: the system `ssh` on a terminal (`-t`, prompts for
+/// a password itself if keys or the agent do not log in), or `<cli> exec` for a container.
 // shortcut: assumes a POSIX shell on the server, upgrade with an exec channel on the russh session
 pub fn ssh_command(url: &str, cmd: &str, dir: &str) -> Result<Command> {
     let url = Url::parse(url)?;
+    let quoted = tc_core::vfs::sh_quote(dir);
+    let script = format!("cd {quoted} && {cmd}");
+    if url.scheme.is_container() {
+        return Ok(container::Container::new(&url).command(&script, false));
+    }
     if url.scheme != Scheme::Sftp {
         return Err(Error::Remote(
-            "commands run only on SFTP connections".into(),
+            "commands run only on SFTP and container connections".into(),
         ));
     }
-    let quoted = tc_core::vfs::sh_quote(dir);
     let mut c = Command::new("ssh");
     c.args(["-t", "-p", &url.port.to_string()]);
     if !url.user.is_empty() {
         c.args(["-l", &url.user]);
     }
     // `--` so a host starting with `-` is no option
-    c.args(["--", &url.host, &format!("cd {quoted} && {cmd}")]);
+    c.args(["--", &url.host, &script]);
     Ok(c)
 }
 
@@ -113,6 +180,9 @@ pub fn connect(url: &str, ask: Ask) -> Result<(Arc<dyn Remote>, String)> {
     let remote: Arc<dyn Remote> = match url.scheme {
         Scheme::Sftp => Arc::new(sftp::Sftp::connect(&url, ask)?),
         Scheme::Ftp | Scheme::Ftps => ftp::connect(&url, ask)?,
+        Scheme::Docker | Scheme::Podman | Scheme::Kube => {
+            Arc::new(container::Container::connect(&url)?)
+        }
     };
     let dir = if url.path.is_empty() {
         remote.home()
@@ -166,7 +236,32 @@ mod tests {
             (Scheme::Ftp, 21, "", "")
         );
         assert_eq!(Url::parse("ftps://a@b@h/").unwrap().user, "a@b");
-        for bad in ["host", "http://x", "sftp://", "sftp://h:port"] {
+        let u = Url::parse("docker://root@web/srv/").unwrap();
+        assert_eq!(
+            (u.scheme, u.user.as_str(), u.host.as_str(), u.port),
+            (Scheme::Docker, "root", "web", 0)
+        );
+        assert_eq!(
+            (u.base(), u.full()),
+            ("docker://root@web".into(), "docker://root@web/srv".into())
+        );
+        let u = Url::parse("kube://app@prod/web-1/var/log").unwrap();
+        assert_eq!(
+            (u.host.as_str(), u.user.as_str(), u.path.as_str()),
+            ("prod/web-1", "app", "/var/log")
+        );
+        assert_eq!(u.full(), "kube://app@prod/web-1/var/log");
+        assert_eq!(Url::parse("kube://ns/pod").unwrap().host, "ns/pod");
+        assert_eq!(Url::parse("podman://db").unwrap().scheme, Scheme::Podman);
+        for bad in [
+            "host",
+            "http://x",
+            "sftp://",
+            "sftp://h:port",
+            "kube://ns",
+            "kube://ns/",
+            "docker://h:1",
+        ] {
             assert!(Url::parse(bad).is_err(), "{bad}");
         }
     }
