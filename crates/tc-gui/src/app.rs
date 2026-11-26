@@ -1033,7 +1033,12 @@ impl App {
 
     fn spawn_detached(&mut self, path: PathBuf, command: fn(&Path) -> std::process::Command) {
         use std::process::Stdio;
-        let spawned = command(&path)
+        let mut c = command(&path);
+        // run in the file's directory, not tc's start directory
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            c.current_dir(dir);
+        }
+        let spawned = c
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
