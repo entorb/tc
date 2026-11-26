@@ -149,7 +149,8 @@ Alt+Enter       properties of marked entries, else the cursor
                 elsewhere read-only; local panels only
 
 == Tools ==
-Settings        (F9 Tools) daily update check on / off
+Settings        (F9 Tools) daily update check on / off;
+                uses HTTPS_PROXY, else the Windows system proxy
 Delete config files
                 (F9 Tools) delete tc's saved files: bookmarks,
                 popular dirs, connections, histories, searches, session

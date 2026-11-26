@@ -274,7 +274,7 @@ fn parse_list(out: &str) -> Vec<Entry> {
 }
 
 #[cfg(windows)]
-fn no_window(c: &mut Command) {
+pub(crate) fn no_window(c: &mut Command) {
     use std::os::windows::process::CommandExt;
     // tc is a GUI app: without this every exec flashes a console window
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -282,7 +282,7 @@ fn no_window(c: &mut Command) {
 }
 
 #[cfg(not(windows))]
-fn no_window(_: &mut Command) {}
+pub(crate) fn no_window(_: &mut Command) {}
 
 impl Remote for Container {
     fn url(&self) -> &str {

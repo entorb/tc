@@ -1023,19 +1023,25 @@ impl App {
 
     /// Start the default application detached; `xdg-open` and friends return at once.
     fn open_default(&mut self, path: PathBuf) {
-        self.spawn_detached(path, cmdline::open_command);
+        let cwd = path.parent().filter(|d| !d.as_os_str().is_empty());
+        self.spawn_detached(&path, cmdline::open_command, cwd);
     }
 
     /// F3 on media and office files: the host's quick preview.
     fn open_preview(&mut self, path: PathBuf) {
-        self.spawn_detached(path, cmdline::view_command);
+        let cwd = path.parent().filter(|d| !d.as_os_str().is_empty());
+        self.spawn_detached(&path, cmdline::view_command, cwd);
     }
 
-    fn spawn_detached(&mut self, path: PathBuf, command: fn(&Path) -> std::process::Command) {
+    fn spawn_detached(
+        &mut self,
+        path: &Path,
+        command: fn(&Path) -> std::process::Command,
+        cwd: Option<&Path>,
+    ) {
         use std::process::Stdio;
-        let mut c = command(&path);
-        // run in the file's directory, not tc's start directory
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let mut c = command(path);
+        if let Some(dir) = cwd {
             c.current_dir(dir);
         }
         let spawned = c

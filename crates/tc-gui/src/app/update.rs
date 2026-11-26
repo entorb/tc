@@ -102,7 +102,8 @@ impl App {
                 return;
             }
             KeyCode::Enter => {
-                self.spawn_detached(PathBuf::from(RELEASES), tc_core::cmdline::open_command)
+                let path = PathBuf::from(RELEASES);
+                self.spawn_detached(&path, tc_core::cmdline::open_command, None)
             }
             KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q') => {}
             _ => {

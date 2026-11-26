@@ -3,6 +3,8 @@
 use std::time::Duration;
 
 use tc_core::{Error, Result};
+use ureq::Proxy;
+use ureq::tls::{RootCerts, TlsConfig};
 
 const LATEST: &str = "https://api.github.com/repos/entorb/tc/releases/latest";
 
@@ -13,6 +15,13 @@ pub fn latest_tag() -> Result<String> {
         .timeout_global(Some(Duration::from_secs(10)))
         .https_only(true)
         .user_agent("tc")
+        // OS cert store: corporate TLS-inspecting proxies sign with a CA installed there
+        .tls_config(
+            TlsConfig::builder()
+                .root_certs(RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .proxy(Proxy::try_from_env().or_else(system_proxy))
         .build()
         .new_agent();
     let body = (agent.get(LATEST).call().map_err(err)?)
@@ -22,6 +31,58 @@ pub fn latest_tag() -> Result<String> {
         .read_to_string()
         .map_err(err)?;
     tag_from_json(&body).ok_or_else(|| Error::Remote("update check: no tag_name".into()))
+}
+
+/// Windows "Internet Options" proxy (`ProxyEnable` + `ProxyServer`); env vars win.
+/// shortcut: no PAC/WPAD script and no NTLM auth, set `HTTPS_PROXY` for those.
+#[cfg(windows)]
+fn system_proxy() -> Option<Proxy> {
+    let mut c = std::process::Command::new("reg");
+    c.args([
+        "query",
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+    ]);
+    crate::container::no_window(&mut c);
+    let out = c.output().ok()?;
+    Proxy::new(&proxy_from_reg(&String::from_utf8_lossy(&out.stdout))?).ok()
+}
+
+#[cfg(not(windows))]
+fn system_proxy() -> Option<Proxy> {
+    None
+}
+
+/// Proxy URI from `reg query` output: `host:port` or `http=h:p;https=h:p`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn proxy_from_reg(out: &str) -> Option<String> {
+    let value = |name: &str| {
+        out.lines().find_map(|l| {
+            let mut it = l.split_whitespace();
+            (it.next() == Some(name)).then(|| it.nth(1).unwrap_or_default().to_owned())
+        })
+    };
+    if value("ProxyEnable")? != "0x1" {
+        return None;
+    }
+    let server = value("ProxyServer")?;
+    let pick = |scheme: &str| {
+        server
+            .split(';')
+            .find_map(|p| p.strip_prefix(scheme)?.strip_prefix('='))
+            .map(str::to_owned)
+    };
+    let hp = if server.contains('=') {
+        pick("https").or_else(|| pick("http"))?
+    } else {
+        server
+    };
+    (!hp.is_empty()).then(|| {
+        if hp.contains("://") {
+            hp
+        } else {
+            format!("http://{hp}")
+        }
+    })
 }
 
 /// Value of the first `"tag_name"` string; no JSON parser for one field.
@@ -34,7 +95,31 @@ fn tag_from_json(json: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::tag_from_json;
+    use super::{proxy_from_reg, tag_from_json};
+
+    #[test]
+    fn proxy_from_reg_query() {
+        let reg = |enable: &str, server: &str| {
+            format!(
+                "\r\nHKEY_CURRENT_USER\\Software\r\n    ProxyEnable    REG_DWORD    {enable}\r\n    ProxyServer    REG_SZ    {server}\r\n"
+            )
+        };
+        assert_eq!(
+            proxy_from_reg(&reg("0x1", "proxy.corp:8080")).as_deref(),
+            Some("http://proxy.corp:8080")
+        );
+        assert_eq!(
+            proxy_from_reg(&reg("0x1", "http=h:80;https=s:443;ftp=f:21")).as_deref(),
+            Some("http://s:443")
+        );
+        assert_eq!(
+            proxy_from_reg(&reg("0x1", "ftp=f:21;http=h:80")).as_deref(),
+            Some("http://h:80")
+        );
+        assert_eq!(proxy_from_reg(&reg("0x0", "proxy.corp:8080")), None);
+        assert_eq!(proxy_from_reg(&reg("0x1", "ftp=f:21")), None);
+        assert_eq!(proxy_from_reg("ProxyEnable    REG_DWORD    0x1"), None);
+    }
 
     #[test]
     fn tag_compact_pretty_and_missing() {
