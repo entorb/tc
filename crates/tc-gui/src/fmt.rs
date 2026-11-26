@@ -282,7 +282,6 @@ pub fn dialog(app: &App) -> Option<Dialog<'_>> {
             l,
             OK_CANCEL,
         ),
-        Mode::Editor(_, l) => edit("Editor not found, enter editor command", "", l, OK_CANCEL),
         Mode::Bookmarks(sel) => bookmarks_dialog(app, *sel),
         Mode::Popular(sel) => list_dialog(
             ("Popular directories", &app.popular, *sel),

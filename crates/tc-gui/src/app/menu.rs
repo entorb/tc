@@ -82,7 +82,11 @@ pub(super) const RENAME_FOOTER: [(&str, KeyCode, KeyModifiers); 8] = [
     f("F10 Rename", 10),
 ];
 
-pub(super) const SETTINGS_FOOTER: [(&str, KeyCode, KeyModifiers); 2] = [HELP, CLOSE];
+pub(super) const SETTINGS_FOOTER: [(&str, KeyCode, KeyModifiers); 3] = [
+    HELP,
+    ("F2 Pick editor", KeyCode::F(2), KeyModifiers::NONE),
+    CLOSE,
+];
 
 /// Footer bar items: label, key sent when clicked.
 pub const FOOTER: [(&str, KeyCode, KeyModifiers); 10] = [

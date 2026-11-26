@@ -504,7 +504,7 @@ impl App {
             }
             KeyCode::F(3) => self.open_viewer(path),
             _ if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.external_edit(path, "code".into());
+                self.external_edit(path);
             }
             _ => self.edit_path(path),
         }

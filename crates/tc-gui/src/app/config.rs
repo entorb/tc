@@ -91,6 +91,7 @@ impl App {
                 u8::from(self.update_check).to_string().into(),
             ),
             ("update_day".to_owned(), self.update_day.clone().into()),
+            ("editor".to_owned(), self.editor.clone().into_os_string()),
         ];
         for (side, name) in SIDES.iter().enumerate() {
             // ring layout of `tab_key`: shown panel is tab `tab[side]`, `tabs[side]` follow it
@@ -161,6 +162,9 @@ impl App {
         self.update_check = num("update_check") != Some(0);
         if let Some((_, day)) = kv.iter().find(|(k, _)| k == "update_day") {
             self.update_day = day.to_string_lossy().into_owned();
+        }
+        if let Some((_, ed)) = kv.iter().find(|(k, _)| k == "editor") {
+            self.editor = PathBuf::from(ed);
         }
     }
 
@@ -262,6 +266,7 @@ mod tests {
         src.active = 1;
         src.zoom = 1.3;
         (src.update_check, src.update_day) = (false, "2026-11-22".into());
+        src.editor = "C:\\Program Files\\ed.exe".into();
         let kv = src.session();
         let order: Vec<PathBuf> = (kv.iter().filter(|(k, _)| k == "right"))
             .map(|(_, v)| v.into())
@@ -279,11 +284,29 @@ mod tests {
         );
         assert!((dst.zoom - 1.3).abs() < 1e-6);
         assert!(!dst.update_check && dst.update_day == "2026-11-22");
+        assert_eq!(dst.editor, PathBuf::from("C:\\Program Files\\ed.exe"));
         assert_eq!(
             dst.tabs[1].iter().map(Panel::path).collect::<Vec<_>>(),
             [a.as_path(), b.as_path()]
         );
         assert_eq!(dst.panels[0].path(), tmp.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_path_persists_without_lossy_conversion() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut src = app(tmp.path());
+        let editor = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/editor-\xff".to_vec()));
+        src.editor = editor.clone();
+        src.save_session().unwrap();
+
+        let kv = settings::load(&tmp.path().join("cfg/settings")).unwrap();
+        let mut dst = app(tmp.path());
+        dst.restore_session(&kv);
+        assert_eq!(dst.editor, editor);
     }
 
     #[test]

@@ -627,24 +627,27 @@ impl App {
         }
     }
 
-    /// Start `cmd path` detached; a missing command asks for another one.
+    /// Start the editor of the settings on `path`, detached; a missing one opens the settings.
     // shortcut: no terminal suspend, so console editors (vim) do not work, upgrade if wanted
-    pub(super) fn external_edit(&mut self, path: PathBuf, cmd: String) {
-        use std::process::{Command, Stdio};
-        let cmd = cmd.trim().to_string();
-        let spawned = Command::new(&cmd)
-            .arg(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        match spawned {
+    pub(super) fn external_edit(&mut self, path: PathBuf) {
+        let cmd = self
+            .editor
+            .to_str()
+            .map_or_else(|| self.editor.clone(), |s| PathBuf::from(s.trim()));
+        if cmd.as_os_str().is_empty() {
+            self.open_editor_setting("Enter an editor command or press F2 to pick one".into());
+            return;
+        }
+        match spawn_editor(&cmd, &path) {
             // reap it when it exits, else it stays a zombie until tc quits
             Ok(mut child) => drop(thread::spawn(move || child.wait())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.mode = Mode::Editor(path, LineEdit::default())
+                self.open_editor_setting(format!(
+                    "Editor \"{}\" not found: enter its command or press F2 to pick it",
+                    cmd.display()
+                ))
             }
-            Err(e) => self.mode = Mode::Message(format!("{cmd}: {e}")),
+            Err(e) => self.mode = Mode::Message(format!("{}: {e}", cmd.display())),
         }
     }
 
@@ -874,6 +877,39 @@ fn row_on(rows: &[FormRow], label: &str) -> bool {
         .any(|r| matches!(r, FormRow::Check(l, true) if *l == label))
 }
 
+/// `cmd path` with null stdio; on Windows a bare name also tries `<name>.cmd`, the
+/// launcher VS Code and others put in PATH (`Command` only looks for `.exe`).
+fn spawn_editor(cmd: &Path, path: &Path) -> std::io::Result<std::process::Child> {
+    use std::process::{Command, Stdio};
+    let spawn = |prog: &Path| {
+        let mut c = Command::new(prog);
+        c.arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            // a .cmd runs in cmd.exe: hide its console window
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
+        c.spawn()
+    };
+    match spawn(cmd) {
+        Err(e)
+            if cfg!(windows)
+                && e.kind() == std::io::ErrorKind::NotFound
+                && cmd.extension().is_none() =>
+        {
+            let mut fallback = cmd.as_os_str().to_os_string();
+            fallback.push(".cmd");
+            spawn(Path::new(&fallback))
+        }
+        r => r,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tools::find::Found;
@@ -890,6 +926,42 @@ mod tests {
     use tc_core::panel::Panel;
 
     use super::super::tests::{key, rows, two_panels, type_keys, type_text, wait, with};
+
+    // exec of a file this process just wrote can fail with ETXTBSY under parallel tests:
+    // run the system `sh` (on the script, or via a symlink) instead
+    #[cfg(unix)]
+    #[test]
+    fn spawn_editor_keeps_paths_with_spaces_as_single_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("target file.sh");
+        std::fs::write(&script, "printf '%s' \"$0\" > \"$0.args\"\n").unwrap();
+        let sh = std::path::Path::new("/bin/sh");
+        let mut child = super::spawn_editor(sh, &script).unwrap();
+        assert!(child.wait().unwrap().success());
+
+        let mut marker = script.as_os_str().to_os_string();
+        marker.push(".args");
+        assert_eq!(
+            std::fs::read_to_string(std::path::PathBuf::from(marker)).unwrap(),
+            script.to_string_lossy()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_editor_keeps_non_utf8_executable_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"editor-\xff".to_vec()));
+        std::os::unix::fs::symlink("/bin/sh", &executable).unwrap();
+        let script = dir.path().join("ok.sh");
+        std::fs::write(&script, "exit 0\n").unwrap();
+        let mut child = super::spawn_editor(&executable, &script).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
 
     #[test]
     fn edit_save_exit() {

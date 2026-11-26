@@ -123,7 +123,8 @@ Ctrl+O          open a terminal in this directory (local panels only)
 F3              view (media: preview)
 F4              edit (media: default application)
 Shift+F4        edit in external editor (asks the name,
-                creates a missing file)
+                creates a missing file); editor not found:
+                opens Settings to set or pick (F2) one
 F5              copy (Windows without symlink rights: directory
                 links become junctions, file links copies)
 F6              move
@@ -149,7 +150,8 @@ Alt+Enter       properties of marked entries, else the cursor
                 elsewhere read-only; local panels only
 
 == Tools ==
-Settings        (F9 Tools) daily update check on / off;
+Settings        (F9 Tools) daily update check on / off, font
+                size, external editor (F2 picks it);
                 uses HTTPS_PROXY, else the Windows system proxy
 Delete config files
                 (F9 Tools) delete tc's saved files: bookmarks,
@@ -234,6 +236,10 @@ Check for updates daily: release builds ask GitHub for a
 newer release on the first start of a day and show it.
 Font size: Left/Right/Space change it; also Ctrl+=
 and Ctrl+-.
+External editor: program Shift+F4 runs with the file,
+default code (VS Code; on Windows also code.cmd).
+F2              pick the editor program in a file dialog
+Ctrl+V          paste into the editor field
 
 == Run ==
 Every change is saved at once.

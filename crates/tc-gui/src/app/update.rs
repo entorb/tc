@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 
 use crate::{KeyCode, KeyEvent};
+use tc_core::cmdline::LineEdit;
 
-use super::widgets::step_key;
+use super::widgets::{paste_line, step_key};
 use super::{App, FormRow, Mode, form_checked, zoom_step};
 
 /// Release tag CI builds into release binaries; `None` in dev builds, which never check.
@@ -17,6 +18,9 @@ pub const VERSION: Option<&str> = match option_env!("TC_VERSION") {
 pub const RELEASES: &str = "https://github.com/entorb/tc/releases/latest";
 const CHECK_DAILY: &str = "Check for updates daily";
 const FONT_SIZE: &str = "Font size";
+const EDITOR: &str = "External editor (F2 to pick)";
+/// Row of `EDITOR` in the settings form.
+const EDITOR_ROW: usize = 2;
 /// Font scales 50 %..300 % in 10 % steps, index = `zoom * 10 - 5` (see `zoom_step`).
 const ZOOMS: [&str; 26] = [
     "50%", "60%", "70%", "80%", "90%", "100%", "110%", "120%", "130%", "140%", "150%", "160%",
@@ -29,6 +33,8 @@ const ZOOMS: [&str; 26] = [
 pub struct SettingsForm {
     pub rows: Vec<FormRow>,
     pub focus: usize,
+    /// Why the form opened by itself, e.g. the editor was not found.
+    pub note: Option<String>,
 }
 
 fn zoom_index(zoom: f32) -> usize {
@@ -125,6 +131,10 @@ impl App {
         if let Some(FormRow::Choice(_, _, i)) = rows.iter().find(|r| r.label() == FONT_SIZE) {
             self.zoom = zoom_step((*i + 5) as f32 / 10.0, 0);
         }
+        if let Some(FormRow::Text(_, l)) = rows.iter().find(|r| r.label() == EDITOR) {
+            // shortcut: a non-UTF-8 path picked with F2 comes back lossy, upgrade if one shows up
+            self.editor = PathBuf::from(&l.text);
+        }
         self.save_or_message();
     }
 
@@ -135,13 +145,43 @@ impl App {
     }
 
     pub(super) fn open_settings(&mut self) {
+        self.open_settings_at(0, None);
+    }
+
+    /// Settings with the editor field focused and `note` on top.
+    pub(super) fn open_editor_setting(&mut self, note: String) {
+        self.open_settings_at(EDITOR_ROW, Some(note));
+    }
+
+    fn open_settings_at(&mut self, focus: usize, note: Option<String>) {
         self.mode = Mode::Settings(SettingsForm {
             rows: vec![
                 FormRow::Check(CHECK_DAILY, self.update_check),
                 FormRow::Choice(FONT_SIZE, &ZOOMS, zoom_index(self.zoom)),
+                FormRow::Text(
+                    EDITOR,
+                    LineEdit::from(self.editor.to_string_lossy().into_owned()),
+                ),
             ],
-            focus: 0,
+            focus,
+            note,
         });
+    }
+
+    /// F2: native file dialog for the editor program.
+    // shortcut: blocks the UI while open (modal anyway), upgrade to rfd async if it matters
+    fn pick_editor(&mut self, form: &mut SettingsForm) -> bool {
+        let Some(file) = rfd::FileDialog::new()
+            .set_title("External editor")
+            .pick_file()
+        else {
+            return false;
+        };
+        form.focus = EDITOR_ROW;
+        form.note = None;
+        form.rows[EDITOR_ROW] =
+            FormRow::Text(EDITOR, LineEdit::from(file.to_string_lossy().into_owned()));
+        true
     }
 
     pub(super) fn settings_key(&mut self, key: KeyEvent, mut form: SettingsForm) {
@@ -149,6 +189,13 @@ impl App {
             KeyCode::Esc | KeyCode::F(10) | KeyCode::Enter => return,
             KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up => {
                 form.focus = step_key(key.code, form.focus, form.rows.len());
+            }
+            KeyCode::F(2) => {
+                if self.pick_editor(&mut form) {
+                    let rows = form.rows.clone();
+                    self.mode = Mode::Settings(form);
+                    return self.apply_settings(&rows);
+                }
             }
             _ => {
                 form.rows[form.focus].key(key);
@@ -159,14 +206,29 @@ impl App {
         }
         self.mode = Mode::Settings(form);
     }
+
+    /// Pasted text goes into the focused text field and is saved.
+    pub(super) fn settings_paste(&mut self, text: &str) {
+        let Mode::Settings(form) = &mut self.mode else {
+            return;
+        };
+        if let FormRow::Text(_, l) = &mut form.rows[form.focus] {
+            paste_line(l, text);
+        }
+        let rows = form.rows.clone();
+        self.apply_settings(&rows);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
     use tc_core::panel::Panel;
 
-    use super::{App, CHECK_DAILY, FormRow, Mode, due, form_checked, is_newer, parse_version};
+    use super::{
+        App, CHECK_DAILY, EDITOR_ROW, FormRow, Mode, due, form_checked, is_newer, parse_version,
+    };
 
     #[test]
     fn versions_compare() {
@@ -236,6 +298,45 @@ mod tests {
         assert_eq!(choice(&a).0, 0);
         key(&mut a, KeyCode::Enter);
         assert!(a.update_check);
+    }
+
+    #[test]
+    fn missing_editor_opens_settings_and_typing_sets_it() {
+        let mut a = app();
+        a.editor = "tc-no-such-editor".into();
+        a.external_edit(std::env::temp_dir().join("f"));
+        assert!(matches!(&a.mode, Mode::Settings(f) if f.focus == EDITOR_ROW && f.note.is_some()));
+        key(&mut a, KeyCode::Char('x'));
+        assert_eq!(a.editor, PathBuf::from("tc-no-such-editorx"));
+    }
+
+    #[test]
+    fn settings_paste_updates_editor_and_saves() {
+        let mut a = app();
+        a.open_editor_setting(String::new());
+        a.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        a.on_paste("my editor".into());
+        assert_eq!(a.editor, PathBuf::from("my editor"));
+        assert!(matches!(
+            &a.mode,
+            Mode::Settings(f) if matches!(&f.rows[EDITOR_ROW], FormRow::Text(_, l) if l.text == "my editor")
+        ));
+    }
+
+    #[test]
+    fn settings_text_field_edits_update_editor_path() {
+        let mut a = app();
+        a.open_editor_setting(String::new());
+        a.set_line("new editor".into(), 10);
+        assert_eq!(a.editor, PathBuf::from("new editor"));
+    }
+
+    #[test]
+    fn empty_editor_opens_settings() {
+        let mut a = app();
+        a.editor = " \t ".into();
+        a.external_edit(std::env::temp_dir().join("f"));
+        assert!(matches!(&a.mode, Mode::Settings(f) if f.focus == EDITOR_ROW));
     }
 
     #[test]

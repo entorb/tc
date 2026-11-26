@@ -326,7 +326,7 @@ fn show_settings(ctx: &Context, form: &SettingsForm) -> Option<FormAct> {
     show_form(
         ctx,
         ("settings", "Settings"),
-        (&form.rows, form.focus, None),
+        (&form.rows, form.focus, form.note.as_deref()),
         None,
     )
 }

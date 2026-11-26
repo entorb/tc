@@ -95,8 +95,6 @@ pub enum Mode {
     Search(String),
     /// Panel filter popup (`/`).
     Filter(Box<FilterForm>),
-    /// Command prompt for the external editor (shown when the default is missing).
-    Editor(PathBuf, LineEdit),
     /// Command line, run with Enter.
     Cmd(LineEdit),
     /// Bookmark list with the selected row.
@@ -299,6 +297,8 @@ pub struct App {
     /// Daily update check on (settings), the local date it last ran, and the running check.
     update_check: bool,
     update_day: String,
+    /// External editor command (Shift+F4), set in the settings.
+    editor: PathBuf,
     update_job: Option<thread::JoinHandle<Option<String>>>,
 }
 
@@ -370,6 +370,7 @@ impl App {
             watch_seen: None,
             update_check: true,
             update_day: String::new(),
+            editor: "code".into(),
             update_job: None,
         }
     }
@@ -410,14 +411,6 @@ impl App {
             Mode::Normal => self.normal_mode_key(key),
             Mode::Search(text) => self.search_key(text, key),
             Mode::Filter(f) => self.filter_key(f, key),
-            Mode::Editor(path, mut cmd) => match key.code {
-                KeyCode::Enter => self.external_edit(path, cmd.text),
-                KeyCode::Esc => {}
-                _ => {
-                    edit_key(&mut cmd, key);
-                    self.mode = Mode::Editor(path, cmd);
-                }
-            },
             Mode::Connections(sel) => self.connections_key(key, sel),
             Mode::ConnEdit(f) => self.conn_form_key(f, key),
             Mode::ConnPick(p) => self.conn_pick_key(p, key),
@@ -1112,13 +1105,16 @@ impl App {
             self.finish(None);
             self.panels[self.active].focus(OsStr::new(name));
         }
-        self.external_edit(path, "code".into());
+        self.external_edit(path);
     }
 
     /// Pasted text: into the editor or the open prompt.
     pub fn on_paste(&mut self, text: String) {
         if let Some(input) = &mut self.input {
             return paste_line(&mut input.text, &text);
+        }
+        if matches!(&self.mode, Mode::Settings(_)) {
+            return self.settings_paste(&text);
         }
         match &mut self.mode {
             Mode::Edit {
@@ -1152,7 +1148,6 @@ impl App {
                 ask: Some((Prompt::Password(_), l)),
                 ..
             }) => paste_line(l, &text),
-            Mode::Editor(_, l) => paste_line(l, &text),
             Mode::FindForm(f) => f.paste(&text),
             Mode::MultiRename(f) => f.paste(&text),
             Mode::Xfer(Xfer {

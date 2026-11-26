@@ -110,7 +110,6 @@ impl Mode {
             | Mode::Mkdir(l)
             | Mode::Link(LinkAsk { line: l, .. })
             | Mode::NewFile(l)
-            | Mode::Editor(_, l)
             | Mode::Connecting(Connecting {
                 ask: Some((Prompt::Password(_), l)),
                 ..
