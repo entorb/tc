@@ -109,6 +109,7 @@ Adding features of
 
 - Viewer `F3`: stream supports huge files: search, go to line, hex view (`h`), encodings
 - Editor `F4`: syntax colors for common languages, minor format on save
+- External editor `Shift+F4`: VS Code by default
 
 ### Inline help `F1`
 
@@ -118,6 +119,7 @@ Adding features of
 
 - Plain text in `$XDG_CONFIG_HOME/tc/` (`~/.config/tc/`, `%APPDATA%\tc\`)
 - `F9` → Tools → Delete config files removes them.
+- Crash reports: panics (message, stack trace, OS, tc version) go to Sentry via the update check proxy; no host name, IP or home path
 
 ### Planned Features
 

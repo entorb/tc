@@ -36,6 +36,7 @@ deque
 devbox
 distroless
 doublecmd
+editorx
 eexist
 eframe
 egui
@@ -49,6 +50,7 @@ epub
 errorlevel
 esac
 etime
+etxtbsy
 fclonefileat
 fffd
 fifos
@@ -58,8 +60,8 @@ flate
 fokus
 frecency
 gitignoreed
-harminisations
 harmonisations
+hkcu
 hostclip
 hostport
 hotlist
@@ -103,6 +105,7 @@ noreplace
 nosonar
 nsurl
 ntfs
+ntlm
 nund
 oneone
 openat
@@ -187,6 +190,7 @@ windowsize
 winit
 winresource
 wirks
+wpad
 wusr
 xabc
 xattr

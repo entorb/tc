@@ -25,6 +25,7 @@ Before editing a crate, read its `AGENTS.md` (`crates/tc-core/AGENTS.md`, `crate
 
 Each of these shipped as a bug once.
 
+- HTTP calls (update check, Sentry, any new one): build the client with `tc_remote::update::agent()` (corporate proxy from `HTTPS_PROXY` or Windows Internet Options, OS cert store); never a bare `ureq::Agent` or another HTTP crate.
 - Config files: write through `hotlist::save` (atomic, 0600, follows symlinks); never `fs::write`.
 - Temp names: `.tc-tmp-*`; never remove a temp file tc did not create (remote overwrite spares foreign ones).
 - FTP has no exclusive create: refuse writes when the target listing fails instead of risking an overwrite.
