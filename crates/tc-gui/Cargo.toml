@@ -16,6 +16,7 @@ egui_extras = { version = "0.37.0", default-features = false }
 jiff = "1.0.1"
 regex = "1.13.1"
 rfd = "0.18.0"
+sentry = { version = "0.49.6", default-features = false, features = ["backtrace", "contexts", "panic", "ureq"] }
 tc-core = { version = "0.1.0", path = "../tc-core" }
 tc-remote = { version = "0.1.0", path = "../tc-remote" }
 tempfile = "3.27.0"

@@ -1,6 +1,7 @@
 //! Torben's Commander desktop app: `tc_gui::app` drawn with egui.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod crash;
 mod draw;
 mod icon;
 mod keys;
@@ -36,6 +37,7 @@ fn system_text() -> Option<String> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let _crash = crash::init();
     let cwd = std::env::current_dir().context("cannot read current directory")?;
     let open = || Panel::open(&cwd).with_context(|| format!("cannot open {}", cwd.display()));
     let mut app = App::new(open()?, open()?);

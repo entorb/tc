@@ -11,7 +11,18 @@ const LATEST: &str = "https://api.github.com/repos/entorb/tc/releases/latest";
 /// Tag of the latest non-prerelease release (`v1.2.3`); blocks up to 10 s.
 pub fn latest_tag() -> Result<String> {
     let err = |e: ureq::Error| Error::Remote(format!("update check: {e}"));
-    let agent = ureq::Agent::config_builder()
+    let body = (agent().get(LATEST).call().map_err(err)?)
+        .body_mut()
+        .with_config()
+        .limit(1 << 20)
+        .read_to_string()
+        .map_err(err)?;
+    tag_from_json(&body).ok_or_else(|| Error::Remote("update check: no tag_name".into()))
+}
+
+/// HTTPS client through the corporate proxy, 10 s timeout; also carries crash reports.
+pub fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
         .https_only(true)
         .user_agent("tc")
@@ -23,14 +34,7 @@ pub fn latest_tag() -> Result<String> {
         )
         .proxy(Proxy::try_from_env().or_else(system_proxy))
         .build()
-        .new_agent();
-    let body = (agent.get(LATEST).call().map_err(err)?)
-        .body_mut()
-        .with_config()
-        .limit(1 << 20)
-        .read_to_string()
-        .map_err(err)?;
-    tag_from_json(&body).ok_or_else(|| Error::Remote("update check: no tag_name".into()))
+        .new_agent()
 }
 
 /// Windows "Internet Options" proxy (`ProxyEnable` + `ProxyServer`); env vars win.
